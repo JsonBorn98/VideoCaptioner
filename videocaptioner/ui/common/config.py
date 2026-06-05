@@ -19,6 +19,7 @@ from qfluentwidgets import (
 )
 
 from videocaptioner.config import SETTINGS_PATH, WORK_PATH
+from videocaptioner.core.dubbing import available_dubbing_presets
 from videocaptioner.core.entities import (
     FasterWhisperModelEnum,
     LLMServiceEnum,
@@ -263,20 +264,7 @@ class Config(QConfig):
         "Dubbing",
         "Preset",
         "edge-cn-female",
-        OptionsValidator(
-            [
-                "edge-cn-female",
-                "edge-cn-male",
-                "edge-en-female",
-                "edge-en-male",
-                "gemini-en-friendly",
-                "gemini-en-neutral",
-                "gemini-en-upbeat",
-                "siliconflow-cn-female",
-                "siliconflow-cn-male",
-                "siliconflow-cn-deep-male",
-            ]
-        ),
+        OptionsValidator(available_dubbing_presets()),
     )
     dubbing_voice = ConfigItem("Dubbing", "Voice", "zh-CN-XiaoxiaoNeural")
     dubbing_text_track = OptionsConfigItem(

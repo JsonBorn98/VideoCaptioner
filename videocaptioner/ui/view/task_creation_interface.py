@@ -14,8 +14,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
     CaptionLabel,
-    ComboBox,
+    CardWidget,
     FluentIcon,
     HyperlinkButton,
     InfoBar,
@@ -60,6 +61,16 @@ class TaskCreationInterface(QWidget):
 
         self.setObjectName("TaskCreationInterface")
         self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
+        self.setStyleSheet(
+            """
+            QWidget#TaskCreationInterface { background-color: #1f1f1f; }
+            CardWidget#taskCard {
+                border-radius: 12px;
+                background: rgba(38, 38, 38, 0.92);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            """
+        )
         self.setAcceptDrops(True)
 
         self.setup_ui()
@@ -69,13 +80,27 @@ class TaskCreationInterface(QWidget):
     def setup_ui(self):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setObjectName("main_layout")
-        self.main_layout.setSpacing(28)
+        self.main_layout.setSpacing(22)
         self.main_layout.addStretch(1)
-        self.setup_logo()
-        self.setup_search_layout()
-        self.setup_target_layout()
+        self.setup_task_card()
         self.setup_status_layout()
+        self.main_layout.addStretch(1)
         self.setup_info_label()
+
+    def setup_task_card(self):
+        self.task_card = CardWidget(self)
+        self.task_card.setObjectName("taskCard")
+        self.task_card.setMinimumWidth(760)
+        self.task_card.setMaximumWidth(860)
+        self.task_layout = QVBoxLayout(self.task_card)
+        self.task_layout.setContentsMargins(34, 28, 34, 28)
+        self.task_layout.setSpacing(18)
+        self.setup_logo()
+        title = BodyLabel(self.tr("创建字幕任务"), self.task_card)
+        title.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.task_layout.addWidget(title)
+        self.setup_search_layout()
+        self.main_layout.addWidget(self.task_card, 0, Qt.AlignCenter)  # type: ignore
 
     def setup_logo(self):
         self.logo_label = QLabel(self)
@@ -89,11 +114,11 @@ class TaskCreationInterface(QWidget):
 
         self.logo_label.setPixmap(self.logo_pixmap)
         self.logo_label.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.main_layout.addWidget(self.logo_label)
+        self.task_layout.addWidget(self.logo_label)
 
     def setup_search_layout(self):
         self.search_layout = QHBoxLayout()
-        self.search_layout.setContentsMargins(80, 0, 80, 0)
+        self.search_layout.setContentsMargins(0, 0, 0, 0)
         self.search_input = LineEdit(self)
         self.search_input.setPlaceholderText(self.tr("请拖拽文件或输入视频URL"))
         self.search_input.setFixedHeight(40)
@@ -103,30 +128,7 @@ class TaskCreationInterface(QWidget):
         self.search_layout.addWidget(self.search_input)
         self.search_layout.addWidget(self.start_button)
         self.search_layout.setSpacing(10)
-        self.main_layout.addLayout(self.search_layout)
-
-    def setup_target_layout(self):
-        target_container = QWidget(self)
-        target_layout = QHBoxLayout(target_container)
-        target_layout.setContentsMargins(80, 0, 80, 0)
-        target_layout.setSpacing(8)
-
-        self.target_combo = ComboBox(target_container)
-        self.target_combo.addItems(
-            [
-                self.tr("中文字幕 + 中文配音"),
-                self.tr("中文字幕视频"),
-                self.tr("中文配音视频"),
-            ]
-        )
-        self.target_combo.setMinimumWidth(188)
-        self.target_combo.setFixedHeight(34)
-
-        target_layout.addStretch(1)
-        target_layout.addWidget(CaptionLabel(self.tr("输出"), target_container))
-        target_layout.addWidget(self.target_combo)
-        target_layout.addStretch(1)
-        self.main_layout.addWidget(target_container)
+        self.task_layout.addLayout(self.search_layout)
 
     def setup_status_layout(self):
         self.status_layout = QVBoxLayout()
@@ -173,34 +175,13 @@ class TaskCreationInterface(QWidget):
     def setup_signals(self):
         self.start_button.clicked.connect(self.on_start_clicked)
         self.search_input.textChanged.connect(self.on_search_input_changed)
-        self.target_combo.currentTextChanged.connect(self.on_target_changed)
         self.log_button.clicked.connect(self.show_log_window)
         self.donate_button.clicked.connect(self.show_donate_dialog)
 
     def setup_values(self):
         self.search_input.setText("")
-        self.on_target_changed(self.target_combo.currentText())
-
-    def on_target_changed(self, text: str):
-        add_subtitle = text != self.tr("中文配音视频")
-        add_dubbing = text != self.tr("中文字幕视频")
-        need_translate = True
-
-        cfg.set(cfg.need_translate, need_translate)
-        cfg.set(cfg.need_video, add_subtitle)
-        cfg.set(cfg.dubbing_enabled, add_dubbing)
-        signalBus.subtitle_translation_changed.emit(need_translate)
-        signalBus.need_video_changed.emit(add_subtitle)
-        signalBus.dubbing_enabled_changed.emit(add_dubbing)
-
-        if add_subtitle and add_dubbing:
-            hint = self.tr("输出中文字幕视频，并生成中文配音。")
-        elif add_subtitle:
-            hint = self.tr("只输出中文字幕视频。")
-        else:
-            hint = self.tr("只输出中文配音视频和配音音频。")
-        self.target_combo.setToolTip(hint)
-        self.status_label.setText(hint)
+        cfg.set(cfg.need_translate, True)
+        signalBus.subtitle_translation_changed.emit(True)
 
     def on_start_clicked(self):
         if self._start_mode == "browse":

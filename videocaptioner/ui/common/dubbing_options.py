@@ -17,6 +17,7 @@ class DubbingVoiceOption:
     preset: str
     title: str
     description: str
+    tags: tuple[str, ...] = ()
 
 
 DUBBING_PROVIDERS: tuple[DubbingProviderOption, ...] = (
@@ -52,20 +53,65 @@ DUBBING_PROVIDERS: tuple[DubbingProviderOption, ...] = (
 
 DUBBING_VOICES: dict[str, tuple[DubbingVoiceOption, ...]] = {
     "edge": (
-        DubbingVoiceOption("edge-cn-female", "中文女声", "免费中文女声，适合日常解说"),
-        DubbingVoiceOption("edge-cn-male", "中文男声", "免费中文男声，适合旁白"),
-        DubbingVoiceOption("edge-en-female", "英文女声", "免费英文女声"),
-        DubbingVoiceOption("edge-en-male", "英文男声", "免费英文男声"),
+        DubbingVoiceOption("edge-cn-female", "晓晓", "清晰自然的普通话女声", ("中文", "女声", "免费")),
+        DubbingVoiceOption("edge-cn-male", "云希", "年轻自然的普通话男声", ("中文", "男声", "免费")),
+        DubbingVoiceOption("edge-cn-xiaoyi", "晓伊", "温和明亮的普通话女声", ("中文", "女声", "免费")),
+        DubbingVoiceOption("edge-cn-yunjian", "云健", "更适合演讲和旁白的男声", ("中文", "男声", "免费")),
+        DubbingVoiceOption("edge-cn-yunyang", "云扬", "播报感更强的普通话男声", ("中文", "男声", "免费")),
+        DubbingVoiceOption("edge-hk-hiugaai", "曉佳", "粤语女声", ("粤语", "女声", "免费")),
+        DubbingVoiceOption("edge-hk-wanlung", "雲龍", "粤语男声", ("粤语", "男声", "免费")),
+        DubbingVoiceOption("edge-tw-hsiaoyu", "曉臾", "台湾国语女声", ("中文", "女声", "免费")),
+        DubbingVoiceOption("edge-tw-yunjhe", "雲哲", "台湾国语男声", ("中文", "男声", "免费")),
+        DubbingVoiceOption("edge-en-female", "Jenny", "美式英语女声", ("英文", "女声", "免费")),
+        DubbingVoiceOption("edge-en-male", "Guy", "美式英语男声", ("英文", "男声", "免费")),
+        DubbingVoiceOption("edge-en-ava", "Ava", "清爽自然的美式英语女声", ("英文", "女声", "免费")),
+        DubbingVoiceOption("edge-en-andrew", "Andrew", "清晰稳重的美式英语男声", ("英文", "男声", "免费")),
+        DubbingVoiceOption("edge-en-emma", "Emma", "柔和自然的美式英语女声", ("英文", "女声", "免费")),
+        DubbingVoiceOption("edge-en-brian", "Brian", "自然稳健的美式英语男声", ("英文", "男声", "免费")),
+        DubbingVoiceOption("edge-en-libby", "Libby", "英式英语女声", ("英文", "女声", "免费")),
+        DubbingVoiceOption("edge-en-ryan", "Ryan", "英式英语男声", ("英文", "男声", "免费")),
     ),
     "gemini": (
-        DubbingVoiceOption("gemini-en-friendly", "友好英文", "亲切自然，不支持音色克隆"),
-        DubbingVoiceOption("gemini-en-neutral", "自然英文", "清晰稳定，不支持音色克隆"),
-        DubbingVoiceOption("gemini-en-upbeat", "活泼英文", "更有能量，不支持音色克隆"),
+        DubbingVoiceOption("gemini-en-friendly", "Achird", "友好自然的英文表达", ("英文", "推荐", "需 Key")),
+        DubbingVoiceOption("gemini-en-neutral", "Kore", "清晰稳定的自然英文", ("英文", "推荐", "需 Key")),
+        DubbingVoiceOption("gemini-en-upbeat", "Puck", "更有能量的英文表达", ("英文", "推荐", "需 Key")),
+        DubbingVoiceOption("gemini-zephyr", "Zephyr", "明亮清爽的英文声音", ("英文", "Bright", "需 Key")),
+        DubbingVoiceOption("gemini-aoede", "Aoede", "明亮自然的英文声音", ("英文", "需 Key")),
+        DubbingVoiceOption("gemini-autonoe", "Autonoe", "均衡清晰的英文声音", ("英文", "需 Key")),
+        DubbingVoiceOption("gemini-callirrhoe", "Callirrhoe", "轻松自然的英文声音", ("英文", "Easy-going", "需 Key")),
+        DubbingVoiceOption("gemini-charon", "Charon", "更沉稳的英文声音", ("英文", "需 Key")),
+        DubbingVoiceOption("gemini-despina", "Despina", "平滑自然的英文声音", ("英文", "Smooth", "需 Key")),
+        DubbingVoiceOption("gemini-enceladus", "Enceladus", "气声感更明显的英文声音", ("英文", "Breathy", "需 Key")),
+        DubbingVoiceOption("gemini-erinome", "Erinome", "清晰直给的英文声音", ("英文", "Clear", "需 Key")),
+        DubbingVoiceOption("gemini-fenrir", "Fenrir", "低沉有力的英文声音", ("英文", "需 Key")),
+        DubbingVoiceOption("gemini-gacrux", "Gacrux", "成熟稳重的英文声音", ("英文", "Mature", "需 Key")),
+        DubbingVoiceOption("gemini-iapetus", "Iapetus", "清澈稳定的英文声音", ("英文", "Clear", "需 Key")),
+        DubbingVoiceOption("gemini-laomedeia", "Laomedeia", "轻快活泼的英文声音", ("英文", "Upbeat", "需 Key")),
+        DubbingVoiceOption("gemini-leda", "Leda", "轻快明亮的英文声音", ("英文", "需 Key")),
+        DubbingVoiceOption("gemini-orus", "Orus", "旁白感更强的英文声音", ("英文", "需 Key")),
+        DubbingVoiceOption("gemini-pulcherrima", "Pulcherrima", "前置感更强的英文声音", ("英文", "Forward", "需 Key")),
+        DubbingVoiceOption("gemini-rasalgethi", "Rasalgethi", "信息感更强的英文声音", ("英文", "Informative", "需 Key")),
+        DubbingVoiceOption("gemini-sadachbia", "Sadachbia", "生动轻快的英文声音", ("英文", "Lively", "需 Key")),
+        DubbingVoiceOption("gemini-sadaltager", "Sadaltager", "知识型表达的英文声音", ("英文", "Knowledgeable", "需 Key")),
+        DubbingVoiceOption("gemini-schedar", "Schedar", "平稳均衡的英文声音", ("英文", "Even", "需 Key")),
+        DubbingVoiceOption("gemini-sulafat", "Sulafat", "温暖自然的英文声音", ("英文", "Warm", "需 Key")),
+        DubbingVoiceOption("gemini-umbriel", "Umbriel", "轻松自然的英文声音", ("英文", "Easy-going", "需 Key")),
+        DubbingVoiceOption("gemini-vindemiatrix", "Vindemiatrix", "温和柔顺的英文声音", ("英文", "Gentle", "需 Key")),
+        DubbingVoiceOption("gemini-zubenelgenubi", "Zubenelgenubi", "休闲自然的英文声音", ("英文", "Casual", "需 Key")),
+        DubbingVoiceOption("gemini-achernar", "Achernar", "柔和的英文声音", ("英文", "Soft", "需 Key")),
+        DubbingVoiceOption("gemini-algenib", "Algenib", "颗粒感更强的英文声音", ("英文", "Gravelly", "需 Key")),
+        DubbingVoiceOption("gemini-algieba", "Algieba", "平滑的英文声音", ("英文", "Smooth", "需 Key")),
+        DubbingVoiceOption("gemini-alnilam", "Alnilam", "坚定清晰的英文声音", ("英文", "Firm", "需 Key")),
     ),
     "siliconflow": (
-        DubbingVoiceOption("siliconflow-cn-female", "中文女声 Anna", "自然中文女声，支持参考音频克隆"),
-        DubbingVoiceOption("siliconflow-cn-male", "中文男声 Alex", "自然中文男声，支持参考音频克隆"),
-        DubbingVoiceOption("siliconflow-cn-deep-male", "低沉男声 Benjamin", "沉稳旁白，支持参考音频克隆"),
+        DubbingVoiceOption("siliconflow-cn-female", "Anna", "自然中文女声，可配合参考音频克隆", ("中文", "女声", "克隆")),
+        DubbingVoiceOption("siliconflow-cn-male", "Alex", "自然中文男声，可配合参考音频克隆", ("中文", "男声", "克隆")),
+        DubbingVoiceOption("siliconflow-cn-deep-male", "Benjamin", "沉稳低沉的中文男声，可克隆", ("中文", "男声", "克隆")),
+        DubbingVoiceOption("siliconflow-cn-charles", "Charles", "磁性中文男声，可克隆", ("中文", "男声", "克隆")),
+        DubbingVoiceOption("siliconflow-cn-david", "David", "欢快中文男声，可克隆", ("中文", "男声", "克隆")),
+        DubbingVoiceOption("siliconflow-cn-bella", "Bella", "热情中文女声，可克隆", ("中文", "女声", "克隆")),
+        DubbingVoiceOption("siliconflow-cn-claire", "Claire", "温柔中文女声，可克隆", ("中文", "女声", "克隆")),
+        DubbingVoiceOption("siliconflow-cn-diana", "Diana", "欢快中文女声，可克隆", ("中文", "女声", "克隆")),
     ),
 }
 

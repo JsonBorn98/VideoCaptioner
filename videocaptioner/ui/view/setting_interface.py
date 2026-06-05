@@ -43,6 +43,7 @@ from videocaptioner.ui.common.dubbing_options import (
     get_provider_option,
     get_provider_titles,
     get_provider_voices,
+    get_voice_title,
     is_provider_default_base,
 )
 from videocaptioner.ui.common.signal_bus import signalBus
@@ -324,6 +325,7 @@ class SettingInterface(ScrollArea):
         self.subtitleGroup.addSettingCard(self.softSubtitleCard)
         self.subtitleGroup.addSettingCard(self.videoQualityCard)
 
+        self.dubbingGroup.addSettingCard(self.dubbingEnabledCard)
         self.dubbingGroup.addSettingCard(self.dubbingProviderCard)
         self.dubbingGroup.addSettingCard(self.dubbingPresetCard)
         self.dubbingGroup.addSettingCard(self.dubbingApiKeyCard)
@@ -331,7 +333,6 @@ class SettingInterface(ScrollArea):
         self.dubbingGroup.addSettingCard(self.dubbingModelCard)
         self.dubbingGroup.addSettingCard(self.checkDubbingConnectionCard)
         self.dubbingGroup.addSettingCard(self.dubbingWorkersCard)
-        self.dubbingGroup.addSettingCard(self.dubbingEnabledCard)
 
         self.saveGroup.addSettingCard(self.savePathCard)
         self.saveGroup.addSettingCard(self.cacheEnabledCard)
@@ -1005,17 +1006,26 @@ class SettingInterface(ScrollArea):
         self.transcribeGroup.adjustSize()
         self.expandLayout.update()
 
+    @staticmethod
+    def _dubbing_preset_label(preset_name: str) -> str:
+        return f"{get_voice_title(preset_name)}  ·  {preset_name}"
+
+    @staticmethod
+    def _dubbing_preset_from_label(label: str) -> str:
+        return label.split("·", 1)[-1].strip() if "·" in label else label
+
     def __onDubbingProviderChanged(self, provider: str):
         """处理配音提供商切换事件"""
         option = get_provider_option(provider)
         presets = [voice.preset for voice in get_provider_voices(provider)]
+        labels = [self._dubbing_preset_label(preset) for preset in presets]
         self.dubbingPresetCard.comboBox.blockSignals(True)
         self.dubbingPresetCard.comboBox.clear()
-        self.dubbingPresetCard.comboBox.addItems(presets)
+        self.dubbingPresetCard.comboBox.addItems(labels)
         self.dubbingModelCard.setItems(list(option.models))
         current = cfg.dubbing_preset.value
         self.dubbingPresetCard.comboBox.setCurrentText(
-            current if current in presets else presets[0]
+            self._dubbing_preset_label(current if current in presets else presets[0])
         )
         self.dubbingPresetCard.comboBox.blockSignals(False)
         cfg.set(cfg.dubbing_provider, provider)
@@ -1023,6 +1033,7 @@ class SettingInterface(ScrollArea):
 
     def __onDubbingPresetChanged(self, preset_name: str):
         """处理配音预设切换事件"""
+        preset_name = self._dubbing_preset_from_label(preset_name)
         try:
             preset = get_dubbing_preset(preset_name)
         except ValueError:
@@ -1067,7 +1078,9 @@ class SettingInterface(ScrollArea):
     def checkDubbingConnection(self):
         """检查配音 TTS 连接"""
         scroll_position = self.verticalScrollBar().value()
-        preset_name = self.dubbingPresetCard.comboBox.currentText().strip()
+        preset_name = self._dubbing_preset_from_label(
+            self.dubbingPresetCard.comboBox.currentText().strip()
+        )
         try:
             preset = get_dubbing_preset(preset_name)
         except ValueError as exc:

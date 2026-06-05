@@ -1,5 +1,5 @@
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -8,6 +8,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     ScrollArea,
+    SubtitleLabel,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -31,6 +32,87 @@ class DoctorThread(QThread):
             self.error.emit(str(exc))
 
 
+class StatusPill(QLabel):
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.setFixedHeight(24)
+        if text in {"ok", "warn", "error", "pending", "checking"}:
+            self.setStatus(text)
+
+    def setStatus(self, status: str):
+        self.setText(_status_label(status))
+        colors = {
+            "ok": ("rgba(67, 217, 154, 0.16)", "#65e6ad"),
+            "warn": ("rgba(255, 191, 71, 0.16)", "#ffc857"),
+            "error": ("rgba(255, 84, 84, 0.16)", "#ff7474"),
+            "checking": ("rgba(120, 170, 255, 0.16)", "#8fb8ff"),
+            "pending": ("rgba(255,255,255,0.10)", "#cfcfcf"),
+        }.get(status, ("rgba(255,255,255,0.12)", "#d0d0d0"))
+        self.setStyleSheet(
+            f"QLabel {{ padding: 2px 10px; border-radius: 12px; background: {colors[0]}; color: {colors[1]}; }}"
+        )
+
+
+class HealthCard(CardWidget):
+    def __init__(self, title: str, icon, parent=None):
+        super().__init__(parent)
+        self.setObjectName("healthCard")
+        self.setMinimumHeight(112)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        top = QHBoxLayout()
+        self.iconLabel = QLabel("•", self)
+        self.iconLabel.setObjectName("healthIcon")
+        self.iconLabel.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.iconLabel.setFixedSize(34, 34)
+        self.iconLabel.setStyleSheet(
+            "QLabel#healthIcon { border-radius: 8px; background: rgba(67, 217, 154, 0.14); color: #65e6ad; font-size: 22px; }"
+        )
+        self.badge = StatusPill("待检查", self)
+        top.addWidget(self.iconLabel)
+        top.addStretch(1)
+        top.addWidget(self.badge)
+        self.titleLabel = BodyLabel(title, self)
+        self.messageLabel = CaptionLabel("等待自动检查", self)
+        self.messageLabel.setWordWrap(True)
+        layout.addLayout(top)
+        layout.addWidget(self.titleLabel)
+        layout.addWidget(self.messageLabel)
+
+    def updateState(self, status: str, message: str):
+        self.badge.setStatus(status)
+        self.messageLabel.setText(message)
+        self.setProperty("status", status)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+class CheckRow(CardWidget):
+    def __init__(self, check: Check, parent=None):
+        super().__init__(parent)
+        self.setObjectName("checkRow")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+        self.badge = StatusPill(check.status, self)
+        textBox = QVBoxLayout()
+        textBox.setSpacing(3)
+        self.nameLabel = BodyLabel(check.name, self)
+        self.messageLabel = CaptionLabel(check.message, self)
+        self.messageLabel.setWordWrap(True)
+        textBox.addWidget(self.nameLabel)
+        textBox.addWidget(self.messageLabel)
+        layout.addWidget(self.badge)
+        layout.addLayout(textBox, 1)
+        if check.fix:
+            fix = CaptionLabel(check.fix, self)
+            fix.setWordWrap(True)
+            layout.addWidget(fix, 1)
+        self.setProperty("status", check.status)
+
+
 class DoctorInterface(ScrollArea):
     """桌面端诊断页。"""
 
@@ -38,11 +120,10 @@ class DoctorInterface(ScrollArea):
         super().__init__(parent=parent)
         self.setWindowTitle(self.tr("诊断"))
         self.thread: DoctorThread | None = None
+        self._auto_started = False
         self.scrollWidget = QWidget()
         self.pageLayout = QVBoxLayout(self.scrollWidget)
         self.titleLabel = QLabel(self.tr("诊断"), self)
-        self.summaryLabel = BodyLabel(self.tr("检查依赖、下载、转录、LLM、翻译和配音配置"), self.scrollWidget)
-        self.introCard = CardWidget(self.scrollWidget)
         self.resultContainer = QWidget(self.scrollWidget)
         self.resultLayout = QVBoxLayout(self.resultContainer)
         self.resultLayout.setContentsMargins(0, 0, 0, 0)
@@ -64,70 +145,94 @@ class DoctorInterface(ScrollArea):
             DoctorInterface, #scrollWidget { background-color: transparent; }
             QScrollArea { border: none; background-color: transparent; }
             QLabel#settingLabel { font: 33px 'Microsoft YaHei'; background-color: transparent; color: white; }
+            CardWidget#healthCard, CardWidget#checkRow { border-radius: 10px; background: rgba(38, 38, 38, 0.92); border: 1px solid rgba(255, 255, 255, 0.08); }
+            CardWidget#healthCard[status="ok"], CardWidget#checkRow[status="ok"] { border: 1px solid rgba(67, 217, 154, 0.55); }
+            CardWidget#healthCard[status="warn"], CardWidget#checkRow[status="warn"] { border: 1px solid rgba(255, 191, 71, 0.55); }
+            CardWidget#healthCard[status="error"], CardWidget#checkRow[status="error"] { border: 1px solid rgba(255, 84, 84, 0.55); }
+            CardWidget#healthCard[status="checking"], CardWidget#checkRow[status="checking"] { border: 1px solid rgba(120, 170, 255, 0.45); }
+            CardWidget#healthCard[status="pending"], CardWidget#checkRow[status="pending"] { border: 1px solid rgba(255, 255, 255, 0.10); }
             """
         )
 
         toolbar = QWidget(self.scrollWidget)
         toolbarLayout = QHBoxLayout(toolbar)
         toolbarLayout.setContentsMargins(0, 0, 0, 0)
-        toolbarLayout.addWidget(self.summaryLabel, 1)
-        self.runButton = PrimaryPushButton(self.tr("运行诊断"), toolbar, FIF.SEARCH)
-        self.deepRunButton = PushButton(self.tr("深度诊断"), toolbar, FIF.SYNC)
+        toolbarLayout.setSpacing(10)
+        heading = QVBoxLayout()
+        heading.setSpacing(4)
+        heading.addWidget(SubtitleLabel(self.tr("环境健康检查"), toolbar))
+        heading.addWidget(CaptionLabel(self.tr("快速项会自动检查；深度诊断会尝试真实服务请求。"), toolbar))
+        toolbarLayout.addLayout(heading, 1)
+        self.runButton = PrimaryPushButton(self.tr("重新检查"), toolbar, icon=FIF.SEARCH)
+        self.deepRunButton = PushButton(self.tr("深度诊断"), toolbar, icon=FIF.SYNC)
+        self.runButton.setFixedHeight(36)
+        self.deepRunButton.setFixedHeight(36)
+        self.deepRunButton.setStyleSheet(
+            "PushButton { background: rgba(38, 38, 38, 0.92); color: white; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 0 12px; }"
+        )
         self.deepRunButton.setToolTip(self.tr("包含少量真实 API 请求，可能产生费用"))
         toolbarLayout.addWidget(self.runButton)
         toolbarLayout.addWidget(self.deepRunButton)
 
-        introLayout = QVBoxLayout(self.introCard)
-        introLayout.setContentsMargins(16, 14, 16, 14)
-        introLayout.setSpacing(8)
-        introLayout.addWidget(BodyLabel(self.tr("开始前可以先做一次诊断"), self.introCard))
-        introLayout.addWidget(
-            CaptionLabel(
-                self.tr("普通诊断检查 Python、FFmpeg、yt-dlp、配置文件、转录、字幕处理和配音参数。"),
-                self.introCard,
-            )
-        )
-        introLayout.addWidget(
-            CaptionLabel(
-                self.tr("深度诊断会在普通诊断基础上尝试真实 API 检查，可能产生少量调用。"),
-                self.introCard,
-            )
-        )
+        self.summaryGrid = QGridLayout()
+        self.summaryGrid.setHorizontalSpacing(12)
+        self.summaryGrid.setVerticalSpacing(12)
+        self.healthCards = {
+            "env": HealthCard(self.tr("基础环境"), FIF.COMMAND_PROMPT, self.scrollWidget),
+            "download": HealthCard(self.tr("下载能力"), FIF.DOWNLOAD, self.scrollWidget),
+            "ai": HealthCard(self.tr("AI 配置"), FIF.ROBOT, self.scrollWidget),  # type: ignore
+            "dubbing": HealthCard(self.tr("配音服务"), FIF.VOLUME, self.scrollWidget),
+        }
+        for index, card in enumerate(self.healthCards.values()):
+            self.summaryGrid.addWidget(card, index // 2, index % 2)
 
         self.pageLayout.setSpacing(18)
         self.pageLayout.setContentsMargins(36, 10, 36, 0)
         self.pageLayout.addWidget(toolbar)
-        self.pageLayout.addWidget(self.introCard)
+        self.pageLayout.addLayout(self.summaryGrid)
+        self.pageLayout.addWidget(BodyLabel(self.tr("检查结果"), self.scrollWidget))
         self.pageLayout.addWidget(self.resultContainer)
         self.pageLayout.addStretch(1)
         self.runButton.clicked.connect(lambda: self._run(False))
         self.deepRunButton.clicked.connect(lambda: self._run(True))
+        self._show_pending_rows()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._auto_started:
+            self._auto_started = True
+            QTimer.singleShot(80, lambda: self._run(False))
+
+    def _show_pending_rows(self):
+        self._clear_results()
+        pending = [
+            Check("python / ffmpeg / ffprobe", "pending", self.tr("等待检查本机音视频依赖")),
+            Check("yt-dlp", "pending", self.tr("等待检查在线视频下载能力")),
+            Check("transcribe / subtitle / LLM", "pending", self.tr("等待检查转录、字幕处理和模型配置")),
+            Check("dubbing", "pending", self.tr("等待检查当前配音 provider、音色和 Key")),
+        ]
+        for check in pending:
+            self.resultLayout.addWidget(CheckRow(check, self.resultContainer))
 
     def _run(self, check_api: bool):
         if self.thread and self.thread.isRunning():
             return
+        self._set_running(True)
         self._clear_results()
-        self.introCard.hide()
-        self.resultLayout.addWidget(self._message_card(self.tr("正在检查"), self.tr("正在检查本机依赖和当前配置...")))
-        self.resultContainer.adjustSize()
-        self.pageLayout.invalidate()
-        self.runButton.setEnabled(False)
-        self.deepRunButton.setEnabled(False)
+        self.resultLayout.addWidget(CheckRow(Check("running", "checking", self.tr("正在检查当前环境和配置")), self.resultContainer))
         self.thread = DoctorThread(check_api=check_api)
         self.thread.finished.connect(self._on_finished)
         self.thread.error.connect(self._on_error)
         self.thread.start()
 
     def _on_finished(self, checks: list[Check]):
-        self.runButton.setEnabled(True)
-        self.deepRunButton.setEnabled(True)
+        self._set_running(False)
         self._clear_results()
+        for check in checks:
+            self.resultLayout.addWidget(CheckRow(check, self.resultContainer))
+        self._update_summary(checks)
         errors = sum(1 for c in checks if c.status == "error")
         warnings = sum(1 for c in checks if c.status == "warn")
-        for check in checks:
-            self.resultLayout.addWidget(self._result_card(check))
-        self.resultContainer.adjustSize()
-        self.pageLayout.invalidate()
         if errors:
             InfoBar.error(
                 self.tr("诊断完成"),
@@ -143,33 +248,38 @@ class DoctorInterface(ScrollArea):
                 parent=self,
             )
 
+    def _update_summary(self, checks: list[Check]):
+        groups = {
+            "env": ("python", "ffmpeg", "ffprobe", "config.file"),
+            "download": ("yt-dlp",),
+            "ai": ("transcribe", "subtitle", "llm", "whisper", "translate"),
+            "dubbing": ("dubbing", "api.dubbing"),
+        }
+        for key, prefixes in groups.items():
+            matched = [c for c in checks if c.name.startswith(prefixes)]
+            status = _group_status(matched)
+            if not matched:
+                self.healthCards[key].updateState("warn", self.tr("未发现相关检查项"))
+                continue
+            errors = sum(c.status == "error" for c in matched)
+            warnings = sum(c.status == "warn" for c in matched)
+            ok = sum(c.status == "ok" for c in matched)
+            message = self.tr("{ok} 正常 / {warnings} 警告 / {errors} 错误").format(
+                ok=ok,
+                warnings=warnings,
+                errors=errors,
+            )
+            self.healthCards[key].updateState(status, message)
+
+    def _set_running(self, running: bool):
+        self.runButton.setEnabled(not running)
+        self.deepRunButton.setEnabled(not running)
+        for card in self.healthCards.values():
+            card.updateState("checking" if running else "pending", self.tr("检查中...") if running else self.tr("等待检查"))
+
     def _on_error(self, message: str):
-        self.runButton.setEnabled(True)
-        self.deepRunButton.setEnabled(True)
+        self._set_running(False)
         InfoBar.error(self.tr("诊断失败"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
-
-    def _result_card(self, check: Check) -> CardWidget:
-        card = CardWidget(self.resultContainer)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 12, 16, 12)
-        title = BodyLabel(f"{_status_label(check.status)}  {check.name}", card)
-        message = CaptionLabel(check.message, card)
-        layout.addWidget(title)
-        layout.addWidget(message)
-        if check.fix:
-            fix = CaptionLabel(self.tr("建议：") + check.fix, card)
-            layout.addWidget(fix)
-        card.setMinimumHeight(86 if check.fix else 62)
-        return card
-
-    def _message_card(self, title: str, message: str) -> CardWidget:
-        card = CardWidget(self.resultContainer)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.addWidget(BodyLabel(title, card))
-        layout.addWidget(CaptionLabel(message, card))
-        card.setMinimumHeight(62)
-        return card
 
     def _clear_results(self):
         while self.resultLayout.count():
@@ -178,8 +288,22 @@ class DoctorInterface(ScrollArea):
                 widget.deleteLater()
 
 
+def _group_status(checks: list[Check]) -> str:
+    if any(c.status == "error" for c in checks):
+        return "error"
+    if any(c.status == "warn" for c in checks):
+        return "warn"
+    return "ok"
+
+
 def _status_label(status: str) -> str:
-    return {"ok": "OK", "warn": "WARN", "error": "ERROR"}.get(status, status.upper())
+    return {
+        "ok": "正常",
+        "warn": "注意",
+        "error": "错误",
+        "checking": "检查中",
+        "pending": "待检查",
+    }.get(status, status.upper())
 
 
 def _build_doctor_config() -> dict:
