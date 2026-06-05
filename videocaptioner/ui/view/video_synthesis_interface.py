@@ -31,7 +31,6 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     ScrollArea,
-    SettingCard,
     SwitchButton,
     ToolTipFilter,
     ToolTipPosition,
@@ -55,7 +54,7 @@ from videocaptioner.core.entities import (
 )
 from videocaptioner.core.utils.platform_utils import open_folder
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.common.dubbing_options import DUBBING_VOICES
+from videocaptioner.ui.common.dubbing_options import DUBBING_VOICES, get_provider_option
 from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.dubbing_thread import DubbingThread
@@ -63,7 +62,7 @@ from videocaptioner.ui.thread.video_synthesis_thread import VideoSynthesisThread
 from videocaptioner.ui.thread.voice_preview_thread import VoicePreviewThread
 
 DUBBING_PRESET_LABELS = {
-    voice.preset: f"{voice.title}（{provider}）"
+    voice.preset: f"{voice.title}（{get_provider_option(provider).title}）"
     for provider, voices in DUBBING_VOICES.items()
     for voice in voices
 }
@@ -73,44 +72,6 @@ TEXT_TRACK_LABELS = {
     "first": "第一行",
     "second": "第二行",
 }
-
-class LabeledComboSettingCard(SettingCard):
-    def __init__(
-        self,
-        icon,
-        title: str,
-        content: str,
-        labels: dict[str, str],
-        parent=None,
-    ):
-        super().__init__(icon, title, content, parent)
-        self.labels = labels
-        self.comboBox = ComboBox(self)
-        self.comboBox.addItems(list(labels.values()))
-        self.comboBox.setMinimumWidth(180)
-        self.hBoxLayout.addWidget(self.comboBox, 0, Qt.AlignRight)  # type: ignore
-        self.hBoxLayout.addSpacing(16)
-
-    def setCurrentKey(self, key: str):
-        self.comboBox.setCurrentText(self.labels.get(key, key))
-
-    def currentKey(self) -> str:
-        text = self.comboBox.currentText()
-        for key, label in self.labels.items():
-            if label == text:
-                return key
-        return text
-
-
-class VoiceActionSettingCard(SettingCard):
-    def __init__(self, icon, title: str, content: str, parent=None):
-        super().__init__(icon, title, content, parent)
-        self.previewButton = PushButton(self.tr("试听当前"), self)
-        self.chooseButton = PrimaryPushButton(self.tr("选择音色"), self)
-        self.hBoxLayout.addWidget(self.previewButton, 0, Qt.AlignRight)  # type: ignore
-        self.hBoxLayout.addSpacing(8)
-        self.hBoxLayout.addWidget(self.chooseButton, 0, Qt.AlignRight)  # type: ignore
-        self.hBoxLayout.addSpacing(16)
 
 
 class OutputOptionCard(CardWidget):

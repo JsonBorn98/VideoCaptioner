@@ -124,7 +124,14 @@ def get_provider_option(provider: str) -> DubbingProviderOption:
 
 
 def get_provider_titles() -> list[str]:
-    return [option.key for option in DUBBING_PROVIDERS]
+    return [option.title for option in DUBBING_PROVIDERS]
+
+
+def get_provider_key_by_title(title: str) -> str:
+    for option in DUBBING_PROVIDERS:
+        if option.title == title or option.key == title:
+            return option.key
+    return DUBBING_PROVIDERS[0].key
 
 
 def is_provider_default_base(value: str) -> bool:

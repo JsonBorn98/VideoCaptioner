@@ -40,6 +40,7 @@ from videocaptioner.core.speech import (
 from videocaptioner.core.utils.cache import disable_cache, enable_cache
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.dubbing_options import (
+    get_provider_key_by_title,
     get_provider_option,
     get_provider_titles,
     get_provider_voices,
@@ -679,19 +680,6 @@ class SettingInterface(ScrollArea):
                 background-color: transparent;
                 color: white;
             }
-            SettingCard, PushSettingCard, SwitchSettingCard, RangeSettingCard,
-            ComboBoxSettingCard, OptionsSettingCard, PrimaryPushSettingCard {
-                background-color: #303030;
-                color: white;
-                border: 1px solid #4a4a4a;
-                border-radius: 8px;
-            }
-            LineEdit, ComboBox, EditableComboBox {
-                background-color: #3a3a3a;
-                color: white;
-                border: 1px solid #5a5a5a;
-                border-radius: 6px;
-            }
         """
         )
 
@@ -1029,6 +1017,7 @@ class SettingInterface(ScrollArea):
 
     def __onDubbingProviderChanged(self, provider: str):
         """处理配音提供商切换事件"""
+        provider = get_provider_key_by_title(provider)
         option = get_provider_option(provider)
         presets = [voice.preset for voice in get_provider_voices(provider)]
         labels = [self._dubbing_preset_label(preset) for preset in presets]

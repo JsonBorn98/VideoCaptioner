@@ -69,7 +69,7 @@ class HealthCard(CardWidget):
         self.iconLabel = IconWidget(self)
         self.iconLabel.setIcon(icon)
         self.iconLabel.setFixedSize(34, 34)
-        self.badge = StatusPill("待检查", self)
+        self.badge = StatusPill("pending", self)
         top.addWidget(self.iconLabel)
         top.addStretch(1)
         top.addWidget(self.badge)
