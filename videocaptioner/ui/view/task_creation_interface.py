@@ -9,7 +9,6 @@ from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
-    QLabel,
     QVBoxLayout,
     QWidget,
 )
@@ -19,6 +18,7 @@ from qfluentwidgets import (
     CardWidget,
     FluentIcon,
     HyperlinkButton,
+    ImageLabel,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -103,16 +103,15 @@ class TaskCreationInterface(QWidget):
         self.main_layout.addWidget(self.task_card, 0, Qt.AlignCenter)  # type: ignore
 
     def setup_logo(self):
-        self.logo_label = QLabel(self)
-        self.logo_pixmap = QPixmap(str(LOGO_PATH))
-        self.logo_pixmap = self.logo_pixmap.scaled(
+        self.logo_label = ImageLabel(self)
+        logo_pixmap = QPixmap(str(LOGO_PATH)).scaled(
             150,
             150,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.SmoothTransformation,  # type: ignore
         )
 
-        self.logo_label.setPixmap(self.logo_pixmap)
+        self.logo_label.setPixmap(logo_pixmap)
         self.logo_label.setAlignment(Qt.AlignCenter)  # type: ignore
         self.task_layout.addWidget(self.logo_label)
 

@@ -6,7 +6,6 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
-    QLabel,
     QVBoxLayout,
     QWidget,
 )
@@ -16,8 +15,11 @@ from qfluentwidgets import (
     CardWidget,
     ComboBox,
     ExpandLayout,
+    IconWidget,
     InfoBar,
+    LargeTitleLabel,
     LineEdit,
+    PillPushButton,
     PrimaryPushButton,
     PushButton,
     ScrollArea,
@@ -42,16 +44,14 @@ from videocaptioner.ui.common.dubbing_options import (
 from videocaptioner.ui.thread.voice_preview_thread import VoicePreviewThread
 
 
-class MiniTag(QLabel):
+class MiniTag(PillPushButton):
     def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        self.setAlignment(Qt.AlignCenter)  # type: ignore
+        super().__init__(parent=parent)
+        self.setText(text)
+        self.setCheckable(False)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)  # type: ignore
         self.setFixedHeight(24)
         self.setMinimumWidth(max(42, len(text) * 10 + 20))
-        self.setStyleSheet(
-            "QLabel { padding: 2px 9px; border-radius: 12px; "
-            "background: rgba(67, 217, 154, 32); color: #65e6ad; }"
-        )
         setFont(self, 11)
 
 
@@ -86,9 +86,9 @@ class VoiceTile(CardWidget):
 
         top = QHBoxLayout()
         top.setSpacing(10)
-        self.avatar = QLabel(self._initials(voice.title), self)
+        self.avatar = IconWidget(self)
         self.avatar.setObjectName("voiceAvatar")
-        self.avatar.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.avatar.setIcon(FIF.MICROPHONE)
         self.avatar.setFixedSize(42, 42)
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
@@ -121,10 +121,6 @@ class VoiceTile(CardWidget):
         actions.addWidget(self.previewButton)
         actions.addWidget(self.selectButton, 1)
         layout.addLayout(actions)
-
-    def _initials(self, text: str) -> str:
-        clean = text.strip()
-        return clean[:2] if clean else "VC"
 
     def setCurrent(self, current: bool):
         self.stateTag.setText(self.tr("当前") if current else "")
@@ -267,7 +263,7 @@ class DubbingInterface(ScrollArea):
         self.player = QMediaPlayer(self)
         self.scrollWidget = QWidget()
         self.expandLayout = ExpandLayout(self.scrollWidget)
-        self.titleLabel = QLabel(self.tr("配音"), self)
+        self.titleLabel = LargeTitleLabel(self.tr("配音"), self)
         self.voice_cards: list[VoiceTile] = []
         self._active_preview_button: PushButton | TransparentToolButton | None = None
 
@@ -289,11 +285,9 @@ class DubbingInterface(ScrollArea):
             """
             DubbingInterface, #scrollWidget { background-color: transparent; }
             QScrollArea { border: none; background-color: transparent; }
-            QLabel#settingLabel { font: 33px 'Microsoft YaHei'; background-color: transparent; color: white; }
             CardWidget#heroPanel, CardWidget#currentVoicePanel, CardWidget#providerConfigPanel, CardWidget#clonePanel,
             CardWidget#voiceTile { border-radius: 10px; background: #303030; border: 1px solid #4a4a4a; }
             CardWidget#voiceTile[current="true"] { border: 1px solid #3ccf91; background: #303632; }
-            QLabel#voiceAvatar { border-radius: 21px; background: rgba(60, 207, 145, 46); color: #43d99a; font-weight: 600; }
             """
         )
 

@@ -1,12 +1,15 @@
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    IconWidget,
+    InfoBadge,
     InfoBar,
+    InfoLevel,
+    LargeTitleLabel,
     PrimaryPushButton,
-    PushButton,
     ScrollArea,
     SubtitleLabel,
 )
@@ -32,25 +35,25 @@ class DoctorThread(QThread):
             self.error.emit(str(exc))
 
 
-class StatusPill(QLabel):
+class StatusPill(InfoBadge):
     def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        self.setAlignment(Qt.AlignCenter)  # type: ignore
+        super().__init__(parent=parent)
         self.setFixedHeight(24)
         if text in {"ok", "warn", "error", "pending", "checking"}:
             self.setStatus(text)
+        else:
+            self.setText(text)
 
     def setStatus(self, status: str):
         self.setText(_status_label(status))
-        colors = {
-            "ok": ("rgba(67, 217, 154, 0.16)", "#65e6ad"),
-            "warn": ("rgba(255, 191, 71, 0.16)", "#ffc857"),
-            "error": ("rgba(255, 84, 84, 0.16)", "#ff7474"),
-            "checking": ("rgba(120, 170, 255, 0.16)", "#8fb8ff"),
-            "pending": ("rgba(255,255,255,0.10)", "#cfcfcf"),
-        }.get(status, ("rgba(255,255,255,0.12)", "#d0d0d0"))
-        self.setStyleSheet(
-            f"QLabel {{ padding: 2px 10px; border-radius: 12px; background: {colors[0]}; color: {colors[1]}; }}"
+        self.setLevel(
+            {
+                "ok": InfoLevel.SUCCESS,
+                "warn": InfoLevel.WARNING,
+                "error": InfoLevel.ERROR,
+                "checking": InfoLevel.INFOAMTION,
+                "pending": InfoLevel.ATTENTION,
+            }.get(status, InfoLevel.ATTENTION)
         )
 
 
@@ -63,13 +66,9 @@ class HealthCard(CardWidget):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
         top = QHBoxLayout()
-        self.iconLabel = QLabel("•", self)
-        self.iconLabel.setObjectName("healthIcon")
-        self.iconLabel.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.iconLabel = IconWidget(self)
+        self.iconLabel.setIcon(icon)
         self.iconLabel.setFixedSize(34, 34)
-        self.iconLabel.setStyleSheet(
-            "QLabel#healthIcon { border-radius: 8px; background: rgba(67, 217, 154, 0.14); color: #65e6ad; font-size: 22px; }"
-        )
         self.badge = StatusPill("待检查", self)
         top.addWidget(self.iconLabel)
         top.addStretch(1)
@@ -123,7 +122,7 @@ class DoctorInterface(ScrollArea):
         self._auto_started = False
         self.scrollWidget = QWidget()
         self.pageLayout = QVBoxLayout(self.scrollWidget)
-        self.titleLabel = QLabel(self.tr("诊断"), self)
+        self.titleLabel = LargeTitleLabel(self.tr("诊断"), self)
         self.resultContainer = QWidget(self.scrollWidget)
         self.resultLayout = QVBoxLayout(self.resultContainer)
         self.resultLayout.setContentsMargins(0, 0, 0, 0)
@@ -144,7 +143,6 @@ class DoctorInterface(ScrollArea):
             """
             DoctorInterface, #scrollWidget { background-color: transparent; }
             QScrollArea { border: none; background-color: transparent; }
-            QLabel#settingLabel { font: 33px 'Microsoft YaHei'; background-color: transparent; color: white; }
             CardWidget#healthCard, CardWidget#checkRow { border-radius: 10px; background: rgba(38, 38, 38, 0.92); border: 1px solid rgba(255, 255, 255, 0.08); }
             CardWidget#healthCard[status="ok"], CardWidget#checkRow[status="ok"] { border: 1px solid rgba(67, 217, 154, 0.55); }
             CardWidget#healthCard[status="warn"], CardWidget#checkRow[status="warn"] { border: 1px solid rgba(255, 191, 71, 0.55); }
@@ -164,12 +162,10 @@ class DoctorInterface(ScrollArea):
         heading.addWidget(CaptionLabel(self.tr("快速项会自动检查；深度诊断会尝试真实服务请求。"), toolbar))
         toolbarLayout.addLayout(heading, 1)
         self.runButton = PrimaryPushButton(self.tr("重新检查"), toolbar, icon=FIF.SEARCH)
-        self.deepRunButton = PushButton(self.tr("深度诊断"), toolbar, icon=FIF.SYNC)
+        self.deepRunButton = PrimaryPushButton(self.tr("深度诊断"), toolbar)
+        self.deepRunButton.setIcon(FIF.SYNC)
         self.runButton.setFixedHeight(36)
         self.deepRunButton.setFixedHeight(36)
-        self.deepRunButton.setStyleSheet(
-            "PushButton { background: rgba(38, 38, 38, 0.92); color: white; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 0 12px; }"
-        )
         self.deepRunButton.setToolTip(self.tr("包含少量真实 API 请求，可能产生费用"))
         toolbarLayout.addWidget(self.runButton)
         toolbarLayout.addWidget(self.deepRunButton)
