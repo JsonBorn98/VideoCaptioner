@@ -122,8 +122,8 @@ class VideoSynthesisInterface(QWidget):
                 border: 1px solid rgba(255, 255, 255, 0.08);
             }
             CardWidget#outputOptionCard[checked="true"] {
-                border: 1px solid #3ccf91;
-                background: #26302a;
+                border: 1px solid rgba(67, 217, 154, 0.58);
+                background: #303a34;
             }
             """
         )

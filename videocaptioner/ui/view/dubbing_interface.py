@@ -292,7 +292,7 @@ class DubbingInterface(ScrollArea):
             QScrollArea { border: none; background-color: transparent; }
             CardWidget#heroPanel, CardWidget#currentVoicePanel, CardWidget#providerConfigPanel, CardWidget#clonePanel,
             CardWidget#voiceTile { border-radius: 10px; background: #303030; border: 1px solid #4a4a4a; }
-            CardWidget#voiceTile[current="true"] { border: 1px solid #3ccf91; background: #303632; }
+            CardWidget#voiceTile[current="true"] { border: 1px solid rgba(67, 217, 154, 0.58); background: #303a34; }
             """
         )
 
