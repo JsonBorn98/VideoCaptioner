@@ -22,7 +22,6 @@ from qfluentwidgets import (
     CardWidget,
     ComboBox,
     CommandBar,
-    IconWidget,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -31,7 +30,7 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     ScrollArea,
-    SwitchButton,
+    TogglePushButton,
     ToolTipFilter,
     ToolTipPosition,
     TransparentDropDownPushButton,
@@ -44,6 +43,7 @@ from videocaptioner.core.constant import (
     INFOBAR_DURATION_SUCCESS,
     INFOBAR_DURATION_WARNING,
 )
+from videocaptioner.core.dubbing import get_dubbing_preset
 from videocaptioner.core.entities import (
     DubbingTask,
     SubtitleRenderModeEnum,
@@ -59,7 +59,7 @@ from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.dubbing_thread import DubbingThread
 from videocaptioner.ui.thread.video_synthesis_thread import VideoSynthesisThread
-from videocaptioner.ui.thread.voice_preview_thread import VoicePreviewThread
+from videocaptioner.ui.thread.voice_preview_thread import VoicePreviewThread, bundled_voice_preview
 
 DUBBING_PRESET_LABELS = {
     voice.preset: f"{voice.title}（{get_provider_option(provider).title}）"
@@ -74,37 +74,6 @@ TEXT_TRACK_LABELS = {
 }
 
 
-class OutputOptionCard(CardWidget):
-    def __init__(self, icon, title: str, content: str, parent=None):
-        super().__init__(parent)
-        self.setObjectName("outputOptionCard")
-        self.setMinimumHeight(86)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(12)
-        self.iconWidget = IconWidget(icon, self)
-        self.iconWidget.setFixedSize(36, 36)
-        textBox = QVBoxLayout()
-        textBox.setSpacing(4)
-        self.titleLabel = BodyLabel(title, self)
-        self.contentLabel = CaptionLabel(content, self)
-        self.contentLabel.setWordWrap(True)
-        textBox.addWidget(self.titleLabel)
-        textBox.addWidget(self.contentLabel)
-        self.switchButton = SwitchButton(self)
-        self.switchButton.setOnText("")
-        self.switchButton.setOffText("")
-        layout.addWidget(self.iconWidget)
-        layout.addLayout(textBox, 1)
-        layout.addWidget(self.switchButton)
-
-    def setChecked(self, checked: bool):
-        self.switchButton.setChecked(checked)
-        self.setProperty("checked", checked)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-
 class VideoSynthesisInterface(QWidget):
     finished = pyqtSignal()
 
@@ -113,20 +82,6 @@ class VideoSynthesisInterface(QWidget):
         self.setObjectName("VideoSynthesisInterface")
         self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
         self.setAcceptDrops(True)  # 启用拖放功能
-        self.setStyleSheet(
-            """
-            QWidget#VideoSynthesisInterface { background-color: #1f1f1f; }
-            CardWidget#outputOptionCard {
-                border-radius: 10px;
-                background: rgba(38, 38, 38, 0.92);
-                border: 1px solid rgba(255, 255, 255, 0.08);
-            }
-            CardWidget#outputOptionCard[checked="true"] {
-                border: 1px solid rgba(67, 217, 154, 0.58);
-                background: #303a34;
-            }
-            """
-        )
         self.setup_ui()
         self.set_value()
         self.setup_signals()
@@ -152,6 +107,11 @@ class VideoSynthesisInterface(QWidget):
 
         # 设置命令栏
         self._setup_command_bar()
+
+        self.mode_label = CaptionLabel("", self)
+        self.mode_label.setMinimumWidth(220)
+        self.mode_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
+        top_layout.addWidget(self.mode_label)
 
         # 添加开始合成按钮到水平布局
         self.synthesize_button = PrimaryPushButton(
@@ -204,13 +164,25 @@ class VideoSynthesisInterface(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        title = BodyLabel(self.tr("输入文件"), card)
-        layout.addWidget(title)
+        self.input_panel = CardWidget(card)
+        self.input_panel.setObjectName("inputPanel")
+        self.input_panel_layout = QVBoxLayout(self.input_panel)
+        self.input_panel_layout.setContentsMargins(16, 14, 16, 14)
+        self.input_panel_layout.setSpacing(12)
 
-        panel = CardWidget(card)
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(16, 14, 16, 14)
-        panel_layout.setSpacing(12)
+        output_row = QHBoxLayout()
+        output_row.setSpacing(10)
+        output_label = BodyLabel(self.tr("导出内容"), self.input_panel)
+        output_label.setFixedWidth(76)
+        self.output_subtitle_button = TogglePushButton(FIF.FONT, self.tr("字幕视频"), self.input_panel)
+        self.output_dubbing_button = TogglePushButton(FIF.VOLUME, self.tr("配音音轨"), self.input_panel)
+        self.output_subtitle_button.setFixedHeight(34)
+        self.output_dubbing_button.setFixedHeight(34)
+        output_row.addWidget(output_label)
+        output_row.addWidget(self.output_subtitle_button)
+        output_row.addWidget(self.output_dubbing_button)
+        output_row.addStretch(1)
+        self.input_panel_layout.addLayout(output_row)
 
         (
             self.subtitle_layout,
@@ -218,20 +190,23 @@ class VideoSynthesisInterface(QWidget):
             self.subtitle_input,
             self.subtitle_button,
         ) = self._create_file_row(
-            panel,
-            self.tr("字幕文件"),
+            self.input_panel,
+            self.tr("字幕"),
             self.tr("选择或者拖拽字幕文件"),
         )
         self.video_layout, self.video_label, self.video_input, self.video_button = (
             self._create_file_row(
-                panel,
-                self.tr("视频文件"),
+                self.input_panel,
+                self.tr("视频"),
                 self.tr("选择或者拖拽视频文件"),
             )
         )
-        panel_layout.addLayout(self.subtitle_layout)
-        panel_layout.addLayout(self.video_layout)
-        layout.addWidget(panel)
+        self.input_panel_layout.addLayout(self.subtitle_layout)
+        self.input_panel_layout.addLayout(self.video_layout)
+        self.requirement_hint = CaptionLabel("", self.input_panel)
+        self.requirement_hint.setWordWrap(True)
+        self.input_panel_layout.addWidget(self.requirement_hint)
+        layout.addWidget(self.input_panel)
         return card
 
     def _create_file_row(self, parent, label_text: str, placeholder: str):
@@ -252,19 +227,23 @@ class VideoSynthesisInterface(QWidget):
         """设置顶部命令栏"""
         self.add_subtitle_action = Action(
             FIF.FONT,
-            self.tr("字幕：开"),
+            self.tr("字幕视频"),
             triggered=self.on_add_subtitle_action_triggered,
-            checkable=False,
+            checkable=True,
         )
         self.add_subtitle_action.setToolTip(self.tr("把字幕合成到视频里"))
+        self.command_bar.addAction(self.add_subtitle_action)
 
         self.add_dubbing_action = Action(
             FIF.VOLUME,
-            self.tr("配音：开"),
+            self.tr("配音音轨"),
             triggered=self.on_add_dubbing_action_triggered,
-            checkable=False,
+            checkable=True,
         )
         self.add_dubbing_action.setToolTip(self.tr("生成配音音轨并合入视频"))
+        self.command_bar.addAction(self.add_dubbing_action)
+
+        self.command_bar.addSeparator()
 
         # 添加软字幕选项
         self.soft_subtitle_action = Action(
@@ -348,6 +327,8 @@ class VideoSynthesisInterface(QWidget):
         self.video_button.clicked.connect(self.choose_video_file)
         self.subtitle_input.textChanged.connect(self._update_input_requirements)
         self.video_input.textChanged.connect(self._update_input_requirements)
+        self.output_subtitle_button.clicked.connect(self.on_output_subtitle_button_clicked)
+        self.output_dubbing_button.clicked.connect(self.on_output_dubbing_button_clicked)
 
         # 合成和文件夹相关信号
         self.synthesize_button.clicked.connect(
@@ -361,8 +342,6 @@ class VideoSynthesisInterface(QWidget):
         signalBus.use_subtitle_style_changed.connect(self.on_use_style_changed)
         signalBus.subtitle_render_mode_changed.connect(self.on_render_mode_changed_external)
 
-        self.subtitle_output_card.switchButton.checkedChanged.connect(self.on_add_subtitle_action_triggered)
-        self.dubbing_output_card.switchButton.checkedChanged.connect(self.on_add_dubbing_action_triggered)
         self.dubbing_preset_combo.currentTextChanged.connect(self.on_dubbing_preset_changed)
         self.text_track_combo.currentTextChanged.connect(self.on_text_track_changed)
         self.voice_preview_button.clicked.connect(self.preview_current_voice)
@@ -389,65 +368,29 @@ class VideoSynthesisInterface(QWidget):
         self.set_value()
 
     def _setup_dubbing_card(self):
-        self.output_panel = QWidget(self)
-        output_layout = QVBoxLayout(self.output_panel)
-        output_layout.setContentsMargins(0, 0, 0, 0)
-        output_layout.setSpacing(10)
-        output_layout.addWidget(BodyLabel(self.tr("输出内容"), self.output_panel))
-        output_cards = QHBoxLayout()
-        output_cards.setSpacing(12)
-        self.subtitle_output_card = OutputOptionCard(
-            FIF.FONT,
-            self.tr("字幕视频"),
-            self.tr("把字幕合成到视频里，可继续使用字幕样式。"),
-            self.output_panel,
-        )
-        self.dubbing_output_card = OutputOptionCard(
-            FIF.VOLUME,
-            self.tr("配音"),
-            self.tr("只有字幕时生成配音音频；同时有视频时可合成配音视频。"),
-            self.output_panel,
-        )
-        output_cards.addWidget(self.subtitle_output_card, 1)
-        output_cards.addWidget(self.dubbing_output_card, 1)
-        output_layout.addLayout(output_cards)
-        self.output_hint_label = CaptionLabel(
-            self.tr("请先打开“字幕视频”或“配音”，再开始生成。"),
-            self.output_panel,
-        )
-        self.output_hint_label.setObjectName("outputHintLabel")
-        output_layout.addWidget(self.output_hint_label)
-        self.content_layout.addWidget(self.output_panel)
-
-        self.dubbing_card = CardWidget(self)
-        self.dubbing_card.setMinimumHeight(118)
-        dubbing_layout = QVBoxLayout(self.dubbing_card)
-        dubbing_layout.setContentsMargins(16, 14, 16, 14)
-        dubbing_layout.setSpacing(12)
-        header = QHBoxLayout()
-        header.addWidget(BodyLabel(self.tr("配音选择"), self.dubbing_card))
-        header.addStretch(1)
-        self.voice_preview_button = PushButton(FIF.PLAY, self.tr("试听当前"), self.dubbing_card)
-        self.voice_dialog_button = PrimaryPushButton(FIF.MUSIC, self.tr("打开音色库"), self.dubbing_card)
-        self.voice_preview_button.setFixedHeight(34)
-        self.voice_dialog_button.setFixedHeight(34)
-        header.addWidget(self.voice_preview_button)
-        header.addWidget(self.voice_dialog_button)
-        form = QHBoxLayout()
-        form.setSpacing(12)
+        self.dubbing_card = QWidget(self.input_panel)
+        self.dubbing_card.setMinimumHeight(72)
+        dubbing_layout = QHBoxLayout(self.dubbing_card)
+        dubbing_layout.setContentsMargins(0, 4, 0, 0)
+        dubbing_layout.setSpacing(10)
+        dubbing_layout.addWidget(BodyLabel(self.tr("配音"), self.dubbing_card))
         self.dubbing_preset_combo = ComboBox(self.dubbing_card)
         self.dubbing_preset_combo.addItems(list(DUBBING_PRESET_LABELS.values()))
-        self.dubbing_preset_combo.setMinimumWidth(220)
+        self.dubbing_preset_combo.setMinimumWidth(260)
         self.text_track_combo = ComboBox(self.dubbing_card)
         self.text_track_combo.addItems(list(TEXT_TRACK_LABELS.values()))
         self.text_track_combo.setMinimumWidth(140)
-        form.addWidget(CaptionLabel(self.tr("音色"), self.dubbing_card))
-        form.addWidget(self.dubbing_preset_combo, 2)
-        form.addWidget(CaptionLabel(self.tr("朗读"), self.dubbing_card))
-        form.addWidget(self.text_track_combo, 1)
-        dubbing_layout.addLayout(header)
-        dubbing_layout.addLayout(form)
-        self.content_layout.addWidget(self.dubbing_card)
+        self.voice_preview_button = PushButton(FIF.PLAY, self.tr("试听"), self.dubbing_card)
+        self.voice_dialog_button = PrimaryPushButton(FIF.MUSIC, self.tr("音色库"), self.dubbing_card)
+        self.voice_preview_button.setFixedHeight(34)
+        self.voice_dialog_button.setFixedHeight(34)
+        dubbing_layout.addWidget(CaptionLabel(self.tr("音色"), self.dubbing_card))
+        dubbing_layout.addWidget(self.dubbing_preset_combo, 1)
+        dubbing_layout.addWidget(CaptionLabel(self.tr("朗读"), self.dubbing_card))
+        dubbing_layout.addWidget(self.text_track_combo)
+        dubbing_layout.addWidget(self.voice_preview_button)
+        dubbing_layout.addWidget(self.voice_dialog_button)
+        self.input_panel_layout.addWidget(self.dubbing_card)
 
     def on_soft_subtitle_action_triggered(self, checked: bool):
         """处理软字幕按钮点击（更新配置+显示InfoBar）"""
@@ -625,35 +568,31 @@ class VideoSynthesisInterface(QWidget):
         self._update_start_button_text()
 
     def _update_output_action_text(self):
-        self.add_subtitle_action.setText(
-            self.tr("字幕：开") if cfg.need_video.value else self.tr("字幕：关")
-        )
-        self.add_dubbing_action.setText(
-            self.tr("配音：开") if cfg.dubbing_enabled.value else self.tr("配音：关")
-        )
-        if hasattr(self, "subtitle_output_card"):
-            self.subtitle_output_card.switchButton.blockSignals(True)
-            self.dubbing_output_card.switchButton.blockSignals(True)
-            self.subtitle_output_card.setChecked(cfg.need_video.value)
-            self.dubbing_output_card.setChecked(cfg.dubbing_enabled.value)
-            self.subtitle_output_card.switchButton.blockSignals(False)
-            self.dubbing_output_card.switchButton.blockSignals(False)
+        self.add_subtitle_action.setChecked(cfg.need_video.value)
+        self.add_dubbing_action.setChecked(cfg.dubbing_enabled.value)
+        self.output_subtitle_button.setChecked(cfg.need_video.value)
+        self.output_dubbing_button.setChecked(cfg.dubbing_enabled.value)
 
     def _update_start_button_text(self):
         add_subtitle = cfg.need_video.value
         add_dubbing = cfg.dubbing_enabled.value
         self.synthesize_button.setEnabled(add_subtitle or add_dubbing)
-        if hasattr(self, "output_hint_label"):
-            self.output_hint_label.setVisible(not add_subtitle and not add_dubbing)
         if add_subtitle and add_dubbing:
             self.synthesize_button.setText(self.tr("生成成片"))
+            self.mode_label.setText(self.tr("输出：字幕 + 配音视频"))
         elif add_dubbing:
             if self.video_input.text().strip():
                 self.synthesize_button.setText(self.tr("生成配音视频"))
+                self.mode_label.setText(self.tr("输出：配音视频"))
             else:
                 self.synthesize_button.setText(self.tr("生成配音音频"))
+                self.mode_label.setText(self.tr("输出：配音音频"))
+        elif add_subtitle:
+            self.synthesize_button.setText(self.tr("生成字幕视频"))
+            self.mode_label.setText(self.tr("输出：字幕视频"))
         else:
-            self.synthesize_button.setText(self.tr("开始合成"))
+            self.synthesize_button.setText(self.tr("先选择输出"))
+            self.mode_label.setText(self.tr("请选择“字幕视频”或“配音音轨”"))
 
     def _update_input_requirements(self):
         add_subtitle = cfg.need_video.value
@@ -662,17 +601,21 @@ class VideoSynthesisInterface(QWidget):
         if add_subtitle and add_dubbing:
             self.video_label.setText(self.tr("视频文件"))
             self.video_input.setPlaceholderText(self.tr("必填：选择或者拖拽视频文件"))
+            self.requirement_hint.setText(self.tr("将生成带字幕和配音的视频；字幕和视频都需要提供。"))
         elif add_subtitle:
             self.video_label.setText(self.tr("视频文件"))
             self.video_input.setPlaceholderText(self.tr("必填：选择或者拖拽视频文件"))
+            self.requirement_hint.setText(self.tr("将把字幕合成到视频中；请提供字幕和视频文件。"))
         elif add_dubbing:
             self.video_label.setText(self.tr("参考视频"))
             self.video_input.setPlaceholderText(
                 self.tr("可选：选择视频可把配音合入视频")
             )
+            self.requirement_hint.setText(self.tr("仅提供字幕会生成配音音频；同时提供视频会生成配音视频。"))
         else:
             self.video_label.setText(self.tr("视频文件"))
             self.video_input.setPlaceholderText(self.tr("选择或者拖拽视频文件"))
+            self.requirement_hint.setText(self.tr("请选择要导出的内容：字幕视频、配音音轨，或两者都生成。"))
         self._update_start_button_text()
         self.synthesize_button.setToolTip(
             self.tr("{mode}；将生成：{outputs}").format(
@@ -694,6 +637,24 @@ class VideoSynthesisInterface(QWidget):
         if add_dubbing:
             return self.tr("配音音频")
         return self.tr("未选择输出")
+
+    def on_output_subtitle_button_clicked(self, checked: bool):
+        cfg.set(cfg.need_video, checked)
+        self.add_subtitle_action.setChecked(checked)
+        signalBus.need_video_changed.emit(checked)
+        self._update_output_action_text()
+        self._update_synthesis_controls_state()
+        self._update_start_button_text()
+        self._update_input_requirements()
+
+    def on_output_dubbing_button_clicked(self, checked: bool):
+        cfg.set(cfg.dubbing_enabled, checked)
+        self.add_dubbing_action.setChecked(checked)
+        signalBus.dubbing_enabled_changed.emit(checked)
+        self._update_output_action_text()
+        self._update_dubbing_controls_state()
+        self._update_start_button_text()
+        self._update_input_requirements()
 
     def _planned_outputs_text(self) -> str:
         add_subtitle = cfg.need_video.value
@@ -727,6 +688,20 @@ class VideoSynthesisInterface(QWidget):
         if hasattr(self, "voice_preview_thread") and self.voice_preview_thread.isRunning():
             return
         preset = self._key_from_label(DUBBING_PRESET_LABELS, self.dubbing_preset_combo.currentText())
+        preset_config = get_dubbing_preset(preset)
+        if (
+            preset_config.provider != "edge"
+            and not cfg.dubbing_api_key.value.strip()
+            and not bundled_voice_preview(preset)
+        ):
+            InfoBar.warning(
+                self.tr("需要 API Key"),
+                self.tr("该音色没有内置试听音频，请先在配音设置里填写 API Key。"),
+                duration=3500,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
         self.voice_preview_button.setEnabled(False)
         self.voice_preview_button.setText(self.tr("试听中..."))
         self.voice_preview_thread = VoicePreviewThread(preset)

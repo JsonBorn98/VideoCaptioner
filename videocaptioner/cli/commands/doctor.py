@@ -4,16 +4,24 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from argparse import Namespace
 from dataclasses import asdict, dataclass
 from datetime import date
+from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli.config import CONFIG_FILE, DEFAULTS, get
+from videocaptioner.core.dubbing import build_dubbing_config
 from videocaptioner.core.dubbing.presets import (
     get_dubbing_preset,
     normalize_dubbing_voice,
     validate_dubbing_voice,
+)
+from videocaptioner.core.speech import (
+    SpeechProviderConfig,
+    SynthesisRequest,
+    create_speech_synthesizer,
 )
 
 
@@ -180,9 +188,56 @@ def _check_dubbing(config: dict) -> list[Check]:
 
 def _check_api(config: dict) -> list[Check]:
     checks: list[Check] = []
-    if not get(config, "dubbing.api_key", ""):
+    provider = get(config, "dubbing.provider", "edge")
+    if provider != "edge" and not get(config, "dubbing.api_key", ""):
+        checks.append(Check("api.dubbing", "warn", "Skipped real TTS request because dubbing API key is missing", "Run 'videocaptioner config set dubbing.api_key <key>'"))
         return checks
-    checks.append(Check("api.dubbing", "warn", "--check-api is currently limited to configuration validation", "Run a short 'videocaptioner dub sample.srt' to verify billing/provider access"))
+    try:
+        preset_name = get(config, "dubbing.preset", "edge-cn-female")
+        preset = get_dubbing_preset(preset_name)
+        core_config = build_dubbing_config(
+            provider=preset.provider,
+            preset=preset_name,
+            api_key=get(config, "dubbing.api_key", ""),
+            api_base=get(config, "dubbing.api_base", "") or preset.api_base,
+            model=get(config, "dubbing.model", "") or preset.model,
+            voice=get(config, "dubbing.voice", "") or preset.voice,
+            style_prompt=preset.style_prompt,
+            tts_workers=1,
+        )
+        response_format = core_config.response_format
+        if core_config.provider == "gemini":
+            response_format = "wav"
+        elif core_config.provider == "edge":
+            response_format = "mp3"
+        synthesizer = create_speech_synthesizer(
+            SpeechProviderConfig(
+                provider=core_config.provider,
+                api_key=core_config.api_key,
+                base_url=core_config.base_url,
+                model=core_config.model,
+                default_voice=core_config.voice,
+                response_format=response_format,
+                sample_rate=core_config.sample_rate,
+                speed=core_config.speed,
+                gain=core_config.gain,
+                timeout=core_config.timeout,
+                style_prompt=core_config.style_prompt,
+            )
+        )
+        output = Path(tempfile.mkdtemp(prefix="videocaptioner-doctor-")) / "tts-preview.wav"
+        result = synthesizer.synthesize(
+            SynthesisRequest(
+                text="你好，这是卡卡字幕助手的配音诊断。",
+                output_path=str(output),
+                voice=core_config.voice,
+                style_prompt=core_config.style_prompt or None,
+            )
+        )
+        size = Path(result.output_path).stat().st_size
+        checks.append(Check("api.dubbing", "ok", f"Real TTS request succeeded: {core_config.provider}, {size} bytes"))
+    except Exception as exc:
+        checks.append(Check("api.dubbing", "error", f"Real TTS request failed: {exc}", "Open Settings > Dubbing and verify provider, API Key, Base URL, model, and voice"))
     return checks
 
 

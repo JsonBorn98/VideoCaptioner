@@ -12,21 +12,18 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    CardWidget,
-    ComboBox,
     ExpandLayout,
-    IconWidget,
     InfoBadge,
     InfoBar,
     InfoLevel,
     LineEdit,
-    PrimaryPushButton,
     PushButton,
     ScrollArea,
     SegmentedWidget,
-    SubtitleLabel,
+    SimpleCardWidget,
     TitleLabel,
     TransparentToolButton,
+    isDarkTheme,
     setFont,
 )
 from qfluentwidgets import FluentIcon as FIF
@@ -40,9 +37,11 @@ from videocaptioner.ui.common.dubbing_options import (
     get_provider_option,
     get_provider_voices,
     get_voice_title,
-    is_provider_default_base,
 )
-from videocaptioner.ui.thread.voice_preview_thread import VoicePreviewThread
+from videocaptioner.ui.thread.voice_preview_thread import (
+    VoicePreviewThread,
+    bundled_voice_preview,
+)
 
 
 class MiniTag(InfoBadge):
@@ -55,43 +54,23 @@ class MiniTag(InfoBadge):
         setFont(self, 10)
 
 
-class FieldRow(QWidget):
-    def __init__(self, title: str, placeholder: str = "", parent=None, password: bool = False):
-        super().__init__(parent)
-        self.setMinimumHeight(38)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        self.label = CaptionLabel(title, self)
-        self.label.setFixedWidth(58)
-        self.lineEdit = LineEdit(self)
-        self.lineEdit.setPlaceholderText(placeholder)
-        if password:
-            self.lineEdit.setEchoMode(LineEdit.Password)
-        self.lineEdit.setMinimumHeight(34)
-        layout.addWidget(self.label)
-        layout.addWidget(self.lineEdit, 1)
-
-
-class VoiceTile(CardWidget):
+class VoiceTile(SimpleCardWidget):
     def __init__(self, voice: DubbingVoiceOption, parent=None):
         super().__init__(parent)
         self.voice = voice
         self.setObjectName("voiceTile")
+        self.setBorderRadius(8)
         self.setCursor(Qt.PointingHandCursor)  # type: ignore
-        self.setMinimumHeight(116)
-        self.setMaximumHeight(128)
+        self.setClickEnabled(True)
+        self.setMinimumHeight(92)
+        self.setMaximumHeight(104)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(7)
 
         top = QHBoxLayout()
-        top.setSpacing(8)
-        self.avatar = IconWidget(self)
-        self.avatar.setObjectName("voiceAvatar")
-        self.avatar.setIcon(FIF.MICROPHONE)
-        self.avatar.setFixedSize(34, 34)
+        top.setSpacing(10)
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         self.titleLabel = BodyLabel(voice.title, self)
@@ -99,8 +78,15 @@ class VoiceTile(CardWidget):
         self.descLabel.setWordWrap(True)
         title_box.addWidget(self.titleLabel)
         title_box.addWidget(self.descLabel)
-        top.addWidget(self.avatar)
         top.addLayout(title_box, 1)
+        self.previewButton = PushButton(FIF.PLAY, self.tr("试听"), self)
+        self.previewButton.setToolTip(self.tr("播放内置试听"))
+        self.previewButton.setFixedHeight(30)
+        self.previewButton.setMinimumWidth(72)
+        top.addWidget(self.previewButton, 0, Qt.AlignTop)  # type: ignore
+        self.stateTag = MiniTag("", self)
+        self.stateTag.hide()
+        top.addWidget(self.stateTag, 0, Qt.AlignTop)  # type: ignore
         layout.addLayout(top)
 
         tag_row = QHBoxLayout()
@@ -108,33 +94,19 @@ class VoiceTile(CardWidget):
         for tag in voice.tags[:3]:
             tag_row.addWidget(MiniTag(tag, self))
         tag_row.addStretch(1)
-        self.stateTag = MiniTag("", self)
-        self.stateTag.hide()
-        tag_row.addWidget(self.stateTag)
+        self.selectButton = PushButton(self.tr("使用"), self)
+        self.selectButton.setFixedHeight(30)
+        self.selectButton.setMinimumWidth(76)
+        self.selectButton.setMaximumWidth(92)
+        tag_row.addWidget(self.selectButton)
         layout.addLayout(tag_row)
 
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        self.previewButton = TransparentToolButton(FIF.PLAY, self)
-        self.previewButton.setToolTip(self.tr("试听音色"))
-        self.previewButton.setFixedSize(32, 32)
-        self.selectButton = PrimaryPushButton(self.tr("使用"), self)
-        self.selectButton.setFixedHeight(32)
-        self.selectButton.setMinimumWidth(88)
-        self.selectButton.setMaximumWidth(112)
-        actions.addWidget(self.previewButton)
-        actions.addStretch(1)
-        actions.addWidget(self.selectButton)
-        layout.addLayout(actions)
-
     def setCurrent(self, current: bool):
-        self.stateTag.setText(self.tr("当前") if current else "")
+        self.stateTag.setText(self.tr("导出使用") if current else "")
         self.stateTag.setVisible(current)
         self.selectButton.setText(self.tr("已选择") if current else self.tr("使用"))
         self.selectButton.setEnabled(not current)
-        self.setProperty("current", current)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        self.setClickEnabled(not current)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:  # type: ignore
@@ -142,16 +114,17 @@ class VoiceTile(CardWidget):
         super().mousePressEvent(event)
 
 
-class CurrentVoicePanel(CardWidget):
+class CurrentVoicePanel(SimpleCardWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("currentVoicePanel")
+        self.setBorderRadius(8)
         self.setMinimumWidth(300)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(8)
 
-        self.titleLabel = SubtitleLabel(self.tr("当前音色"), self)
+        self.titleLabel = BodyLabel(self.tr("已选音色"), self)
         self.voiceLabel = BodyLabel("-", self)
         self.descLabel = CaptionLabel("", self)
         self.descLabel.setWordWrap(True)
@@ -159,14 +132,26 @@ class CurrentVoicePanel(CardWidget):
         self.tagRow = QHBoxLayout(self.tagWidget)
         self.tagRow.setContentsMargins(0, 0, 0, 0)
         self.tagRow.setSpacing(5)
-        self.previewButton = PrimaryPushButton(FIF.PLAY, self.tr("试听当前"), self)
+        self.previewInput = LineEdit(self)
+        self.previewInput.setPlaceholderText(self.tr("输入一句话，试听当前音色"))
+        self.previewInput.setMinimumHeight(34)
+        buttonRow = QHBoxLayout()
+        buttonRow.setSpacing(8)
+        self.previewButton = PushButton(FIF.PLAY, self.tr("内置试听"), self)
+        self.customPreviewButton = PushButton(FIF.PLAY, self.tr("文本试听"), self)
+        self.previewButton.setToolTip(self.tr("播放随软件内置的音色样例，不需要 API Key"))
+        self.customPreviewButton.setToolTip(self.tr("用输入文字实时生成试听；非 Edge 服务需要 API Key"))
         self.previewButton.setFixedHeight(32)
+        self.customPreviewButton.setFixedHeight(32)
+        buttonRow.addWidget(self.previewButton)
+        buttonRow.addWidget(self.customPreviewButton)
 
         layout.addWidget(self.titleLabel)
         layout.addWidget(self.voiceLabel)
         layout.addWidget(self.descLabel)
         layout.addWidget(self.tagWidget)
-        layout.addWidget(self.previewButton)
+        layout.addWidget(self.previewInput)
+        layout.addLayout(buttonRow)
 
     def setVoice(self, voice: DubbingVoiceOption):
         self.voiceLabel.setText(voice.title)
@@ -180,38 +165,53 @@ class CurrentVoicePanel(CardWidget):
         self.tagRow.addStretch(1)
 
 
-class ProviderConfigPanel(CardWidget):
+class ProviderStatusPanel(SimpleCardWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("providerConfigPanel")
+        self.setObjectName("providerStatusPanel")
+        self.setBorderRadius(8)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(9)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
 
-        self.titleLabel = BodyLabel(self.tr("服务配置"), self)
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        self.titleLabel = BodyLabel(self.tr("当前服务"), self)
+        self.statusTag = MiniTag("", self)
+        header.addWidget(self.titleLabel)
+        header.addStretch(1)
+        header.addWidget(self.statusTag)
         self.descLabel = CaptionLabel("", self)
         self.descLabel.setWordWrap(True)
-        self.keyField = FieldRow(self.tr("API Key"), self.tr("填写当前配音服务的 API Key"), self, password=True)
-        self.baseField = FieldRow(self.tr("Base URL"), self.tr("默认接口地址，可按需修改"), self)
-        self.modelLabel = CaptionLabel(self.tr("模型"), self)
-        self.modelCombo = ComboBox(self)
-        self.modelCombo.setMinimumHeight(34)
-        self.testButton = PushButton(FIF.PLAY, self.tr("测试配音"), self)
+        self.modelLabel = CaptionLabel("", self)
+        self.testButton = PushButton(FIF.PLAY, self.tr("测试服务"), self)
+        self.testButton.setToolTip(self.tr("合成一句短文本，验证当前配音服务是否可用"))
         self.testButton.setFixedHeight(32)
 
-        layout.addWidget(self.titleLabel)
+        layout.addLayout(header)
         layout.addWidget(self.descLabel)
-        layout.addWidget(self.keyField)
-        layout.addWidget(self.baseField)
         layout.addWidget(self.modelLabel)
-        layout.addWidget(self.modelCombo)
         layout.addWidget(self.testButton)
 
+    def setStatus(self, provider_title: str, description: str, model: str, ready: bool, needs_key: bool):
+        self.titleLabel.setText(provider_title)
+        self.descLabel.setText(description)
+        self.modelLabel.setText(model)
+        if needs_key:
+            self.statusTag.setText(self.tr("已配置") if ready else self.tr("缺 Key"))
+            self.statusTag.setLevel(InfoLevel.SUCCESS if ready else InfoLevel.WARNING)
+        else:
+            self.statusTag.setText(self.tr("免 Key"))
+            self.statusTag.setLevel(InfoLevel.SUCCESS)
+        self.testButton.setEnabled(True)
+        self.testButton.setText(self.tr("测试服务") if ready else self.tr("去设置填写 Key"))
 
-class ClonePanel(CardWidget):
+
+class ClonePanel(SimpleCardWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("clonePanel")
+        self.setBorderRadius(8)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(12)
@@ -223,6 +223,8 @@ class ClonePanel(CardWidget):
         header.addWidget(self.titleLabel)
         header.addWidget(self.badge)
         header.addStretch(1)
+        self.hintLabel = CaptionLabel(self.tr("上传一段自己的声音，可用输入文本试听相似音色。"), self)
+        self.hintLabel.setWordWrap(True)
 
         file_row = QHBoxLayout()
         file_row.setSpacing(8)
@@ -235,12 +237,17 @@ class ClonePanel(CardWidget):
         file_row.addWidget(self.browseButton)
 
         self.textInput = LineEdit(self)
-        self.textInput.setPlaceholderText(self.tr("参考音频中的原文，越准确越稳定"))
+        self.textInput.setPlaceholderText(self.tr("参考音频里说了什么，例如：大家好，欢迎来到我的频道"))
         self.textInput.setMinimumHeight(34)
+        self.clonePreviewButton = PushButton(FIF.PLAY, self.tr("试听克隆"), self)
+        self.clonePreviewButton.setToolTip(self.tr("填写参考音频和原文后，用上方试听文本生成相似音色"))
+        self.clonePreviewButton.setFixedHeight(34)
 
         layout.addLayout(header)
+        layout.addWidget(self.hintLabel)
         layout.addLayout(file_row)
         layout.addWidget(self.textInput)
+        layout.addWidget(self.clonePreviewButton)
         self.audioInput.setText(cfg.dubbing_clone_audio.value)
         self.textInput.setText(cfg.dubbing_clone_text.value)
         self.audioInput.textChanged.connect(lambda text: cfg.set(cfg.dubbing_clone_audio, text))
@@ -286,30 +293,13 @@ class DubbingInterface(ScrollArea):
         self.scrollWidget.setObjectName("scrollWidget")
         self.titleLabel.setObjectName("settingLabel")
         self.titleLabel.move(36, 26)
-        self.setStyleSheet(
-            """
-            DubbingInterface, #scrollWidget { background-color: transparent; }
-            QScrollArea { border: none; background-color: transparent; }
-            CardWidget#heroPanel, CardWidget#currentVoicePanel, CardWidget#providerConfigPanel, CardWidget#clonePanel,
-            CardWidget#voiceTile { border-radius: 10px; background: #303030; border: 1px solid #4a4a4a; }
-            CardWidget#voiceTile[current="true"] { border: 1px solid rgba(67, 217, 154, 0.58); background: #303a34; }
-            """
-        )
+        self.enableTransparentBackground()
 
-        self.heroPanel = CardWidget(self.scrollWidget)
-        self.heroPanel.setObjectName("heroPanel")
-        self.heroPanel.setMinimumHeight(64)
-        heroLayout = QHBoxLayout(self.heroPanel)
-        heroLayout.setContentsMargins(16, 8, 16, 8)
-        heroLayout.setSpacing(14)
-        heroText = QVBoxLayout()
-        heroText.setSpacing(2)
-        self.heroTitle = SubtitleLabel(self.tr("音色库"), self.heroPanel)
-        self.heroDesc = CaptionLabel(self.tr("选择服务、试听音色，并保存默认配音。"), self.heroPanel)
-        self.heroDesc.setWordWrap(True)
-        heroText.addWidget(self.heroTitle)
-        heroText.addWidget(self.heroDesc)
-        self.providerSegment = SegmentedWidget(self.heroPanel)
+        self.topPanel = QWidget(self.scrollWidget)
+        topLayout = QHBoxLayout(self.topPanel)
+        topLayout.setContentsMargins(0, 0, 0, 0)
+        topLayout.setSpacing(8)
+        self.providerSegment = SegmentedWidget(self.topPanel)
         for option in DUBBING_PROVIDERS:
             self.providerSegment.addItem(
                 routeKey=option.key,
@@ -317,8 +307,8 @@ class DubbingInterface(ScrollArea):
                 onClick=lambda _checked=False, key=option.key: self._on_provider_changed(key),
             )
         setFont(self.providerSegment, 13)
-        heroLayout.addLayout(heroText, 1)
-        heroLayout.addWidget(self.providerSegment, 0, Qt.AlignVCenter)  # type: ignore
+        topLayout.addWidget(self.providerSegment)
+        topLayout.addStretch(1)
 
         self.bodyPanel = QWidget(self.scrollWidget)
         bodyLayout = QHBoxLayout(self.bodyPanel)
@@ -338,8 +328,8 @@ class DubbingInterface(ScrollArea):
         self.voiceGridWidget = QWidget(self.voicePanel)
         self.voiceGrid = QGridLayout(self.voiceGridWidget)
         self.voiceGrid.setContentsMargins(0, 0, 0, 0)
-        self.voiceGrid.setHorizontalSpacing(12)
-        self.voiceGrid.setVerticalSpacing(10)
+        self.voiceGrid.setHorizontalSpacing(10)
+        self.voiceGrid.setVerticalSpacing(8)
         self.voiceLayout.addLayout(voiceHeader)
         self.voiceLayout.addWidget(self.voiceGridWidget)
 
@@ -350,7 +340,7 @@ class DubbingInterface(ScrollArea):
         sideLayout.setContentsMargins(0, 0, 0, 0)
         sideLayout.setSpacing(12)
         self.currentPanel = CurrentVoicePanel(self.sidePanel)
-        self.configPanel = ProviderConfigPanel(self.sidePanel)
+        self.configPanel = ProviderStatusPanel(self.sidePanel)
         self.clonePanel = ClonePanel(self.sidePanel)
         sideLayout.addWidget(self.currentPanel)
         sideLayout.addWidget(self.configPanel)
@@ -362,23 +352,24 @@ class DubbingInterface(ScrollArea):
 
         self.expandLayout.setSpacing(14)
         self.expandLayout.setContentsMargins(36, 6, 36, 0)
-        self.expandLayout.addWidget(self.heroPanel)
+        self.expandLayout.addWidget(self.topPanel)
         self.expandLayout.addWidget(self.bodyPanel)
 
     def _connect_signals(self):
         self.currentPanel.previewButton.clicked.connect(self._preview_current)
-        self.configPanel.testButton.clicked.connect(self._preview_current)
-        self.configPanel.keyField.lineEdit.textChanged.connect(self._on_api_key_changed)
-        self.configPanel.baseField.lineEdit.textChanged.connect(lambda text: cfg.set(cfg.dubbing_api_base, text))
-        self.configPanel.modelCombo.currentTextChanged.connect(lambda text: cfg.set(cfg.dubbing_model, text))
+        self.currentPanel.customPreviewButton.clicked.connect(self._preview_custom_text)
+        self.clonePanel.clonePreviewButton.clicked.connect(self._preview_custom_text)
+        self.configPanel.testButton.clicked.connect(self._on_service_button_clicked)
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._sync_page_background()
         self._on_provider_changed(cfg.dubbing_provider.value)
 
-    def _on_api_key_changed(self, text: str):
-        cfg.set(cfg.dubbing_api_key, text)
-        self._refresh_provider_status()
+    def _sync_page_background(self):
+        color = "#202020" if isDarkTheme() else "#f5f5f5"
+        self.setStyleSheet(f"QScrollArea {{ border: none; background: {color}; }}")
+        self.scrollWidget.setStyleSheet(f"QWidget#scrollWidget {{ background: {color}; }}")
 
     def _on_provider_changed(self, provider: str):
         cfg.set(cfg.dubbing_provider, provider)
@@ -397,31 +388,8 @@ class DubbingInterface(ScrollArea):
             cfg.set(cfg.dubbing_model, preset.model)
 
         self._refresh_provider_status(option)
-        self.configPanel.setMinimumHeight(236 if option.needs_api_key else 126)
-        self.configPanel.keyField.setVisible(option.needs_api_key)
-        self.configPanel.baseField.setVisible(option.needs_api_key)
-        self.configPanel.modelLabel.setVisible(option.needs_api_key)
-        self.configPanel.modelCombo.setVisible(option.needs_api_key)
-
-        self.configPanel.keyField.lineEdit.setText(cfg.dubbing_api_key.value)
-        self.configPanel.baseField.lineEdit.setText(cfg.dubbing_api_base.value)
-        self.configPanel.modelCombo.blockSignals(True)
-        self.configPanel.modelCombo.clear()
-        self.configPanel.modelCombo.addItems(list(option.models))
-        if cfg.dubbing_model.value:
-            self.configPanel.modelCombo.setCurrentText(cfg.dubbing_model.value)
-        elif option.models:
-            self.configPanel.modelCombo.setCurrentText(option.models[0])
+        if option.models and not cfg.dubbing_model.value:
             cfg.set(cfg.dubbing_model, option.models[0])
-        self.configPanel.modelCombo.blockSignals(False)
-
-        if not option.default_base and is_provider_default_base(cfg.dubbing_api_base.value):
-            cfg.set(cfg.dubbing_api_base, "")
-            self.configPanel.baseField.lineEdit.setText("")
-        elif option.default_base and is_provider_default_base(cfg.dubbing_api_base.value):
-            cfg.set(cfg.dubbing_api_base, option.default_base)
-            self.configPanel.baseField.lineEdit.setText(option.default_base)
-            self.configPanel.baseField.lineEdit.setCursorPosition(0)
 
         self.clonePanel.setVisible(option.supports_clone)
         self._render_voice_cards(provider)
@@ -430,16 +398,18 @@ class DubbingInterface(ScrollArea):
     def _refresh_provider_status(self, option=None):
         option = option or get_provider_option(cfg.dubbing_provider.value)
         api_key = cfg.dubbing_api_key.value.strip()
+        preset = get_dubbing_preset(cfg.dubbing_preset.value)
+        ready = not option.needs_api_key or bool(api_key)
+        desc = option.description
         if option.needs_api_key and not api_key:
-            self.configPanel.descLabel.setText(
-                self.tr("{desc} 请先填写 API Key 后再测试真实服务。").format(desc=option.description)
-            )
-            self.configPanel.testButton.setText(self.tr("填写 Key 后测试"))
-            self.configPanel.testButton.setEnabled(False)
-        else:
-            self.configPanel.descLabel.setText(option.description)
-            self.configPanel.testButton.setText(self.tr("测试配音"))
-            self.configPanel.testButton.setEnabled(True)
+            desc = self.tr("内置试听可直接播放；用自己的文字试听或正式配音前，需要先到设置页填写 Key。")
+        self.configPanel.setStatus(
+            provider_title=option.title,
+            description=desc,
+            model=self.tr("当前声音引擎：{model}").format(model=cfg.dubbing_model.value or preset.model),
+            ready=ready,
+            needs_key=option.needs_api_key,
+        )
 
     def _render_voice_cards(self, provider: str):
         self.voiceLayout.removeWidget(self.voiceGridWidget)
@@ -448,15 +418,15 @@ class DubbingInterface(ScrollArea):
         self.voiceGridWidget = QWidget(self.voicePanel)
         self.voiceGrid = QGridLayout(self.voiceGridWidget)
         self.voiceGrid.setContentsMargins(0, 0, 0, 0)
-        self.voiceGrid.setHorizontalSpacing(12)
-        self.voiceGrid.setVerticalSpacing(10)
+        self.voiceGrid.setHorizontalSpacing(10)
+        self.voiceGrid.setVerticalSpacing(8)
         self.voiceLayout.addWidget(self.voiceGridWidget)
         self.voice_cards = []
         voices = get_provider_voices(provider)
         self.voiceCountLabel.setText(self.tr("{count} 个音色").format(count=len(voices)))
         columns = 2
         rows = max(1, (len(voices) + columns - 1) // columns)
-        grid_height = rows * 126 + (rows - 1) * 10
+        grid_height = rows * 100 + (rows - 1) * 8
         content_height = grid_height + 42
         self.voiceGridWidget.setFixedHeight(grid_height)
         self.voicePanel.setFixedHeight(content_height)
@@ -492,8 +462,7 @@ class DubbingInterface(ScrollArea):
         if preset.api_base and not cfg.dubbing_api_base.value:
             cfg.set(cfg.dubbing_api_base, preset.api_base)
         self._render_voice_cards(preset.provider)
-        if self.configPanel.modelCombo.currentText() != preset.model:
-            self.configPanel.modelCombo.setCurrentText(preset.model)
+        self._refresh_provider_status()
         if show_tip:
             InfoBar.success(
                 self.tr("已选择音色"),
@@ -505,8 +474,84 @@ class DubbingInterface(ScrollArea):
     def _preview_current(self):
         self._preview(cfg.dubbing_preset.value, self.currentPanel.previewButton)
 
-    def _preview(self, preset_name: str, button: PushButton | TransparentToolButton | None = None):
+    def _on_service_button_clicked(self):
+        option = get_provider_option(cfg.dubbing_provider.value)
+        if option.needs_api_key and not cfg.dubbing_api_key.value.strip():
+            self._open_settings_for_key()
+            return
+        self._preview_current()
+
+    def _open_settings_for_key(self):
+        window = self.window()
+        setting_interface = getattr(window, "settingInterface", None)
+        if setting_interface is not None and hasattr(window, "switchTo"):
+            window.switchTo(setting_interface)
+            InfoBar.info(
+                self.tr("填写配音 Key"),
+                self.tr("请在配音配置中填写当前服务的 API Key。"),
+                duration=3500,
+                parent=setting_interface,
+            )
+            return
+        InfoBar.warning(
+            self.tr("需要 API Key"),
+            self.tr("请打开设置页，在配音配置中填写当前服务的 API Key。"),
+            duration=3500,
+            parent=self,
+        )
+
+    def _preview_custom_text(self):
+        text = self.currentPanel.previewInput.text().strip()
+        if not text:
+            InfoBar.warning(
+                self.tr("请输入试听文本"),
+                self.tr("文本试听会使用你输入的内容实时生成音频。"),
+                duration=3000,
+                parent=self,
+            )
+            return
+        self._preview(
+            cfg.dubbing_preset.value,
+            self.currentPanel.customPreviewButton,
+            text=text,
+            use_clone=True,
+        )
+
+    def _preview(
+        self,
+        preset_name: str,
+        button: PushButton | TransparentToolButton | None = None,
+        *,
+        text: str = "",
+        use_clone: bool = False,
+    ):
         if self.preview_thread and self.preview_thread.isRunning():
+            return
+        preset = get_dubbing_preset(preset_name)
+        clone_audio = ""
+        clone_text = ""
+        if use_clone and get_provider_option(preset.provider).supports_clone:
+            clone_audio = self.clonePanel.audioInput.text().strip()
+            clone_text = self.clonePanel.textInput.text().strip()
+            if bool(clone_audio) != bool(clone_text):
+                InfoBar.warning(
+                    self.tr("克隆信息不完整"),
+                    self.tr("音色克隆需要同时填写参考音频和参考音频原文。"),
+                    duration=3500,
+                    parent=self,
+                )
+                return
+        if (
+            preset.provider != "edge"
+            and not cfg.dubbing_api_key.value.strip()
+            and (text or clone_audio or not bundled_voice_preview(preset_name))
+        ):
+            InfoBar.warning(
+                self.tr("需要 API Key"),
+                self.tr("自定义文本或克隆试听需要真实请求，请先填写当前配音服务的 API Key。"),
+                duration=3500,
+                parent=self,
+            )
             return
         self._active_preview_button = button
         if button:
@@ -514,7 +559,12 @@ class DubbingInterface(ScrollArea):
             if hasattr(button, "setText"):
                 button.setText(self.tr("试听中..."))
         self.configPanel.testButton.setEnabled(False)
-        self.preview_thread = VoicePreviewThread(preset_name)
+        self.preview_thread = VoicePreviewThread(
+            preset_name,
+            text=text,
+            clone_audio_path=clone_audio,
+            clone_audio_text=clone_text,
+        )
         self.preview_thread.finished.connect(self._on_preview_finished)
         self.preview_thread.error.connect(self._on_preview_error)
         self.preview_thread.start()
@@ -522,11 +572,14 @@ class DubbingInterface(ScrollArea):
     def _reset_preview_buttons(self):
         self._refresh_provider_status()
         self.currentPanel.previewButton.setEnabled(True)
-        self.currentPanel.previewButton.setText(self.tr("试听当前"))
+        self.currentPanel.previewButton.setText(self.tr("内置试听"))
+        self.currentPanel.customPreviewButton.setEnabled(True)
+        self.currentPanel.customPreviewButton.setText(self.tr("文本试听"))
         if self._active_preview_button and self._active_preview_button is not self.currentPanel.previewButton:
             self._active_preview_button.setEnabled(True)
             if hasattr(self._active_preview_button, "setText"):
-                self._active_preview_button.setText(self.tr("试听"))
+                text = self.tr("文本试听") if self._active_preview_button is self.currentPanel.customPreviewButton else self.tr("试听")
+                self._active_preview_button.setText(text)
         self._active_preview_button = None
 
     def _on_preview_finished(self, path: str):

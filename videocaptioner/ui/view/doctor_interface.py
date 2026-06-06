@@ -3,15 +3,16 @@ from PyQt5.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    CardWidget,
-    IconWidget,
     InfoBadge,
     InfoBar,
     InfoLevel,
     PrimaryPushButton,
+    PushButton,
     ScrollArea,
+    SimpleCardWidget,
     SubtitleLabel,
     TitleLabel,
+    isDarkTheme,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -57,27 +58,24 @@ class StatusPill(InfoBadge):
         )
 
 
-class HealthCard(CardWidget):
-    def __init__(self, title: str, icon, parent=None):
+class HealthCard(SimpleCardWidget):
+    def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setObjectName("healthCard")
-        self.setMinimumHeight(112)
+        self.setBorderRadius(8)
+        self.setMinimumHeight(86)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
         top = QHBoxLayout()
-        self.iconLabel = IconWidget(self)
-        self.iconLabel.setIcon(icon)
-        self.iconLabel.setFixedSize(34, 34)
         self.badge = StatusPill("pending", self)
-        top.addWidget(self.iconLabel)
+        self.titleLabel = BodyLabel(title, self)
+        top.addWidget(self.titleLabel)
         top.addStretch(1)
         top.addWidget(self.badge)
-        self.titleLabel = BodyLabel(title, self)
         self.messageLabel = CaptionLabel("等待自动检查", self)
         self.messageLabel.setWordWrap(True)
         layout.addLayout(top)
-        layout.addWidget(self.titleLabel)
         layout.addWidget(self.messageLabel)
 
     def updateState(self, status: str, message: str):
@@ -88,16 +86,17 @@ class HealthCard(CardWidget):
         self.style().polish(self)
 
 
-class CheckRow(CardWidget):
+class CheckRow(QWidget):
     def __init__(self, check: Check, parent=None):
         super().__init__(parent)
         self.setObjectName("checkRow")
+        self.setMinimumHeight(48)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(12, 7, 12, 7)
         layout.setSpacing(12)
         self.badge = StatusPill(check.status, self)
         textBox = QVBoxLayout()
-        textBox.setSpacing(4)
+        textBox.setSpacing(2)
         primary_text = _primary_check_text(check)
         secondary_text = _secondary_check_text(check)
         self.nameLabel = BodyLabel(primary_text, self)
@@ -107,7 +106,6 @@ class CheckRow(CardWidget):
         textBox.addWidget(self.messageLabel)
         layout.addWidget(self.badge)
         layout.addLayout(textBox, 1)
-        self.setProperty("status", check.status)
 
 
 class DoctorInterface(ScrollArea):
@@ -121,10 +119,11 @@ class DoctorInterface(ScrollArea):
         self.scrollWidget = QWidget()
         self.pageLayout = QVBoxLayout(self.scrollWidget)
         self.titleLabel = TitleLabel(self.tr("诊断"), self)
-        self.resultContainer = QWidget(self.scrollWidget)
+        self.resultContainer = SimpleCardWidget(self.scrollWidget)
+        self.resultContainer.setBorderRadius(8)
         self.resultLayout = QVBoxLayout(self.resultContainer)
-        self.resultLayout.setContentsMargins(0, 0, 0, 0)
-        self.resultLayout.setSpacing(10)
+        self.resultLayout.setContentsMargins(0, 6, 0, 6)
+        self.resultLayout.setSpacing(0)
         self._init_ui()
 
     def _init_ui(self):
@@ -137,18 +136,7 @@ class DoctorInterface(ScrollArea):
         self.scrollWidget.setObjectName("scrollWidget")
         self.titleLabel.setObjectName("settingLabel")
         self.titleLabel.move(36, 30)
-        self.setStyleSheet(
-            """
-            DoctorInterface, #scrollWidget { background-color: transparent; }
-            QScrollArea { border: none; background-color: transparent; }
-            CardWidget#healthCard, CardWidget#checkRow { border-radius: 10px; background: rgba(38, 38, 38, 0.92); border: 1px solid rgba(255, 255, 255, 0.08); }
-            CardWidget#healthCard[status="ok"], CardWidget#checkRow[status="ok"] { border: 1px solid rgba(67, 217, 154, 0.55); }
-            CardWidget#healthCard[status="warn"], CardWidget#checkRow[status="warn"] { border: 1px solid rgba(255, 191, 71, 0.55); }
-            CardWidget#healthCard[status="error"], CardWidget#checkRow[status="error"] { border: 1px solid rgba(255, 84, 84, 0.55); }
-            CardWidget#healthCard[status="checking"], CardWidget#checkRow[status="checking"] { border: 1px solid rgba(120, 170, 255, 0.45); }
-            CardWidget#healthCard[status="pending"], CardWidget#checkRow[status="pending"] { border: 1px solid rgba(255, 255, 255, 0.10); }
-            """
-        )
+        self.enableTransparentBackground()
 
         toolbar = QWidget(self.scrollWidget)
         toolbarLayout = QHBoxLayout(toolbar)
@@ -157,9 +145,9 @@ class DoctorInterface(ScrollArea):
         heading = QVBoxLayout()
         heading.setSpacing(4)
         heading.addWidget(SubtitleLabel(self.tr("环境健康检查"), toolbar))
-        heading.addWidget(CaptionLabel(self.tr("快速项会自动检查；深度诊断会尝试真实服务请求。"), toolbar))
+        heading.addWidget(CaptionLabel(self.tr("自动检查本机依赖和配置；深度诊断会额外请求当前 API。"), toolbar))
         toolbarLayout.addLayout(heading, 1)
-        self.runButton = PrimaryPushButton(self.tr("重新检查"), toolbar, icon=FIF.SEARCH)
+        self.runButton = PushButton(self.tr("重新检查"), toolbar, icon=FIF.SEARCH)
         self.deepRunButton = PrimaryPushButton(self.tr("深度诊断"), toolbar)
         self.deepRunButton.setIcon(FIF.SYNC)
         self.runButton.setFixedHeight(36)
@@ -172,15 +160,15 @@ class DoctorInterface(ScrollArea):
         self.summaryGrid.setHorizontalSpacing(12)
         self.summaryGrid.setVerticalSpacing(12)
         self.healthCards = {
-            "env": HealthCard(self.tr("基础环境"), FIF.COMMAND_PROMPT, self.scrollWidget),
-            "download": HealthCard(self.tr("下载能力"), FIF.DOWNLOAD, self.scrollWidget),
-            "ai": HealthCard(self.tr("AI 配置"), FIF.ROBOT, self.scrollWidget),  # type: ignore
-            "dubbing": HealthCard(self.tr("配音服务"), FIF.VOLUME, self.scrollWidget),
+            "env": HealthCard(self.tr("基础环境"), self.scrollWidget),
+            "download": HealthCard(self.tr("下载能力"), self.scrollWidget),
+            "ai": HealthCard(self.tr("AI 配置"), self.scrollWidget),
+            "dubbing": HealthCard(self.tr("配音服务"), self.scrollWidget),
         }
         for index, card in enumerate(self.healthCards.values()):
             self.summaryGrid.addWidget(card, index // 2, index % 2)
 
-        self.pageLayout.setSpacing(18)
+        self.pageLayout.setSpacing(16)
         self.pageLayout.setContentsMargins(36, 10, 36, 0)
         self.pageLayout.addWidget(toolbar)
         self.pageLayout.addLayout(self.summaryGrid)
@@ -193,17 +181,23 @@ class DoctorInterface(ScrollArea):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._sync_page_background()
         if not self._auto_started:
             self._auto_started = True
             QTimer.singleShot(80, lambda: self._run(False))
 
+    def _sync_page_background(self):
+        color = "#202020" if isDarkTheme() else "#f5f5f5"
+        self.setStyleSheet(f"QScrollArea {{ border: none; background: {color}; }}")
+        self.scrollWidget.setStyleSheet(f"QWidget#scrollWidget {{ background: {color}; }}")
+
     def _show_pending_rows(self):
         self._clear_results()
         pending = [
-            Check("python / ffmpeg / ffprobe", "pending", self.tr("检查本机音视频依赖")),
-            Check("yt-dlp", "pending", self.tr("检查在线视频下载能力")),
-            Check("transcribe / subtitle / LLM", "pending", self.tr("检查转录、字幕和模型配置")),
-            Check("dubbing", "pending", self.tr("检查当前配音服务、音色和 Key")),
+            Check("python / ffmpeg / ffprobe", "pending", self.tr("准备检查音视频处理工具")),
+            Check("yt-dlp", "pending", self.tr("准备检查在线视频下载能力")),
+            Check("transcribe / subtitle / LLM", "pending", self.tr("准备检查转录、翻译和大模型配置")),
+            Check("dubbing", "pending", self.tr("准备检查配音音色和服务配置")),
         ]
         for check in pending:
             self.resultLayout.addWidget(CheckRow(check, self.resultContainer))
@@ -213,7 +207,8 @@ class DoctorInterface(ScrollArea):
             return
         self._set_running(True)
         self._clear_results()
-        self.resultLayout.addWidget(CheckRow(Check("running", "checking", self.tr("正在检查当前环境和配置")), self.resultContainer))
+        running_text = self.tr("正在真实请求当前服务，请稍候") if check_api else self.tr("正在检查本机依赖和基础配置")
+        self.resultLayout.addWidget(CheckRow(Check("running", "checking", running_text), self.resultContainer))
         self.thread = DoctorThread(check_api=check_api)
         self.thread.finished.connect(self._on_finished)
         self.thread.error.connect(self._on_error)
@@ -303,10 +298,46 @@ def _primary_check_text(check: Check) -> str:
 def _secondary_check_text(check: Check) -> str:
     name = _friendly_check_name(check.name)
     if check.status in {"error", "warn"} and check.fix:
-        return f"{name}：{check.message}"
+        return f"{name}：{_brief_check_message(check)}。影响：{_impact_text(check.name)}"
     if check.status in {"checking", "pending"}:
         return name
-    return check.message
+    return _brief_check_message(check)
+
+
+def _brief_check_message(check: Check) -> str:
+    message = check.message
+    if check.status == "ok":
+        if check.name in {"ffmpeg", "ffprobe", "yt-dlp"}:
+            executable = message.split(" (", 1)[0].strip()
+            executable_name = executable.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            return f"已检测到 {executable_name}"
+        if check.name == "config.file":
+            return "配置文件已保存"
+        if check.name == "api.dubbing":
+            return "真实配音请求成功"
+    if check.name == "config.file" and "Config file does not exist" in message:
+        return "还没有保存过配置文件"
+    if check.name == "yt-dlp" and "may be old" in message:
+        return "在线视频下载组件可能偏旧"
+    if check.name == "api.dubbing" and "Skipped real TTS request" in message:
+        return "未填写配音 API Key，已跳过真实请求"
+    return message
+
+
+def _impact_text(name: str) -> str:
+    if name in {"ffmpeg", "ffprobe"}:
+        return "视频合成、配音合入视频和媒体时长读取可能失败"
+    if name == "yt-dlp":
+        return "在线视频链接可能无法下载"
+    if name == "config.file":
+        return "部分设置可能无法持久保存"
+    if name.startswith("llm"):
+        return "字幕优化、断句或大模型翻译可能失败"
+    if name.startswith("whisper") or name == "transcribe.asr":
+        return "语音转字幕可能失败"
+    if name.startswith("dubbing") or name == "api.dubbing":
+        return "配音试听或正式生成配音可能失败"
+    return "相关功能可能无法正常使用"
 
 
 def _friendly_check_name(name: str) -> str:
@@ -345,6 +376,7 @@ def _friendly_fix_text(fix: str) -> str:
         "Use siliconflow, gemini, or edge": "配音服务请选择 Edge、Gemini 或 SiliconFlow",
         "Use a preset or a provider-supported voice": "选择当前服务支持的音色",
         "Run a short 'videocaptioner dub sample.srt' to verify billing/provider access": "用一小段字幕测试配音服务是否能真实返回音频",
+        "Open Settings > Dubbing and verify provider, API Key, Base URL, model, and voice": "打开设置页的配音配置，检查服务、API Key、Base URL、模型和音色",
     }
     return replacements.get(fix, fix)
 

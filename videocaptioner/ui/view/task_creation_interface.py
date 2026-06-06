@@ -9,21 +9,21 @@ from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    CardWidget,
     FluentIcon,
     HyperlinkButton,
-    ImageLabel,
     InfoBar,
     InfoBarPosition,
     LineEdit,
     PrimaryPushButton,
     ProgressBar,
+    TitleLabel,
 )
 
 from videocaptioner.config import APPDATA_PATH, ASSETS_PATH, VERSION
@@ -61,16 +61,6 @@ class TaskCreationInterface(QWidget):
 
         self.setObjectName("TaskCreationInterface")
         self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
-        self.setStyleSheet(
-            """
-            QWidget#TaskCreationInterface { background-color: #1f1f1f; }
-            CardWidget#taskCard {
-                border-radius: 12px;
-                background: rgba(38, 38, 38, 0.92);
-                border: 1px solid rgba(255, 255, 255, 0.08);
-            }
-            """
-        )
         self.setAcceptDrops(True)
 
         self.setup_ui()
@@ -80,71 +70,68 @@ class TaskCreationInterface(QWidget):
     def setup_ui(self):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setObjectName("main_layout")
-        self.main_layout.setSpacing(18)
-        self.main_layout.setContentsMargins(0, 74, 0, 16)
-        self.setup_task_card()
+        self.main_layout.setSpacing(20)
+        self.main_layout.addSpacing(90)
+        self.setup_logo()
+        self.setup_heading()
+        self.setup_search_layout()
         self.setup_status_layout()
-        self.main_layout.addStretch(1)
         self.setup_info_label()
 
-    def setup_task_card(self):
-        self.task_card = CardWidget(self)
-        self.task_card.setObjectName("taskCard")
-        self.task_card.setMinimumWidth(720)
-        self.task_card.setMaximumWidth(820)
-        self.task_layout = QVBoxLayout(self.task_card)
-        self.task_layout.setContentsMargins(28, 18, 28, 20)
-        self.task_layout.setSpacing(12)
-        self.setup_logo()
-        header = QHBoxLayout()
-        header.setSpacing(14)
-        header.addStretch(1)
-        header.addWidget(self.logo_label, 0, Qt.AlignVCenter)  # type: ignore
-        header_text = QVBoxLayout()
-        header_text.setSpacing(3)
-        title = BodyLabel(self.tr("创建字幕任务"), self.task_card)
-        desc = CaptionLabel(self.tr("拖入媒体文件，或粘贴在线视频链接开始处理"), self.task_card)
-        header_text.addWidget(title)
-        header_text.addWidget(desc)
-        header.addLayout(header_text)
-        header.addStretch(1)
-        self.task_layout.addLayout(header)
-        self.setup_search_layout()
-        self.main_layout.addWidget(self.task_card, 0, Qt.AlignCenter)  # type: ignore
-
     def setup_logo(self):
-        self.logo_label = ImageLabel(self)
-        logo_pixmap = QPixmap(str(LOGO_PATH)).scaled(
-            72,
-            72,
+        self.logo_label = QLabel(self)
+        self.logo_pixmap = QPixmap(str(LOGO_PATH))
+        self.logo_pixmap = self.logo_pixmap.scaled(
+            108,
+            108,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.SmoothTransformation,  # type: ignore
         )
 
-        self.logo_label.setPixmap(logo_pixmap)
+        self.logo_label.setPixmap(self.logo_pixmap)
         self.logo_label.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.logo_label.setFixedSize(72, 72)
+        self.main_layout.addWidget(self.logo_label)
+
+    def setup_heading(self):
+        self.heading_title = TitleLabel(self.tr("导入视频，生成字幕与配音"), self)
+        self.heading_title.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.heading_desc = CaptionLabel(self.tr("拖入本地媒体，或粘贴在线视频链接开始处理"), self)
+        self.heading_desc.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.heading_hint = CaptionLabel(self.tr("选择本地视频/音频，或粘贴 B 站、YouTube 等视频链接后点击开始处理"), self)
+        self.heading_hint.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.main_layout.addWidget(self.heading_title)
+        self.main_layout.addWidget(self.heading_desc)
+        self.main_layout.addWidget(self.heading_hint)
+        self.main_layout.addSpacing(18)
 
     def setup_search_layout(self):
         self.search_layout = QHBoxLayout()
-        self.search_layout.setContentsMargins(0, 0, 0, 0)
+        self.search_layout.setContentsMargins(120, 0, 120, 0)
         self.search_input = LineEdit(self)
-        self.search_input.setPlaceholderText(self.tr("请拖拽文件或输入视频URL"))
+        self.search_input.setPlaceholderText(self.tr("粘贴视频链接，或拖拽文件到这里"))
         self.search_input.setFixedHeight(40)
         self.search_input.setClearButtonEnabled(True)
+        self.search_input.focusOutEvent = lambda e: super(
+            LineEdit, self.search_input
+        ).focusOutEvent(e)
+        self.search_input.paintEvent = lambda e: super(
+            LineEdit, self.search_input
+        ).paintEvent(e)
         self.start_button = PrimaryPushButton(FluentIcon.FOLDER, self.tr("选择文件"), self)
         self.start_button.setFixedHeight(40)
         self.start_button.setMinimumWidth(108)
         self.search_layout.addWidget(self.search_input)
         self.search_layout.addWidget(self.start_button)
         self.search_layout.setSpacing(10)
-        self.task_layout.addLayout(self.search_layout)
+        self.main_layout.addLayout(self.search_layout)
+        self.main_layout.addSpacing(70)
 
     def setup_status_layout(self):
         self.status_layout = QVBoxLayout()
         self.status_layout.setContentsMargins(50, 0, 30, 5)
         self.status_layout.setAlignment(Qt.AlignBottom | Qt.AlignHCenter)  # type: ignore
-        self.status_label = CaptionLabel(self.tr("准备就绪"), self)
+        self.status_label = BodyLabel(self.tr("准备就绪"), self)
+        self.status_label.setStyleSheet("font-size: 14px; color: #888888;")
         self.status_layout.addWidget(self.status_label, 0, Qt.AlignCenter)  # type: ignore
         self.progress_bar = ProgressBar(self)
         self.status_label.hide()
@@ -168,10 +155,11 @@ class TaskCreationInterface(QWidget):
         self.donate_button = HyperlinkButton(url="", text=self.tr("捐助"), parent=self)
 
         # 添加版权信息标签
-        self.info_label = CaptionLabel(
+        self.info_label = BodyLabel(
             self.tr(f"©VideoCaptioner {VERSION} • By Weifeng"), self
         )
         self.info_label.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.info_label.setStyleSheet("font-size: 12px; color: #888888;")
 
         # 将组件添加到底部布局
         bottom_layout.addStretch()
@@ -180,6 +168,7 @@ class TaskCreationInterface(QWidget):
         bottom_layout.addWidget(self.donate_button)
         bottom_layout.addStretch()
 
+        self.main_layout.addStretch()
         self.main_layout.addWidget(bottom_container)
 
     def setup_signals(self):
