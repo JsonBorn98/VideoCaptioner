@@ -18,6 +18,13 @@ class SpeakerProfile:
     clone_audio_text: Optional[str] = None
     style_prompt: Optional[str] = None
 
+    def __post_init__(self):
+        self.name = self.name.strip()
+        self.voice = self.voice.strip() if self.voice else self.voice
+        self.clone_audio_path = self.clone_audio_path.strip() if self.clone_audio_path else self.clone_audio_path
+        self.clone_audio_text = self.clone_audio_text.strip() if self.clone_audio_text else self.clone_audio_text
+        self.style_prompt = self.style_prompt.strip() if self.style_prompt else self.style_prompt
+
 
 @dataclass
 class DubbingSegment:
@@ -78,6 +85,17 @@ class DubbingConfig:
     mix_original_audio: bool = False
     original_audio_volume: float = 0.25
     dubbed_audio_volume: float = 1.0
+
+    def __post_init__(self):
+        self.api_key = self.api_key.strip()
+        self.base_url = self.base_url.strip()
+        self.model = self.model.strip()
+        self.voice = self.voice.strip()
+        self.response_format = self.response_format.strip()  # type: ignore[attr-defined]
+        self.style_prompt = self.style_prompt.strip()
+        self.llm_api_key = self.llm_api_key.strip()
+        self.llm_api_base = self.llm_api_base.strip()
+        self.llm_model = self.llm_model.strip()
 
 
 @dataclass

@@ -1,5 +1,6 @@
 """Bing Translator integration tests."""
 
+import os
 from typing import Dict, List
 
 import pytest
@@ -11,6 +12,11 @@ from videocaptioner.core.translate.bing_translator import BingTranslator
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_LIVE_TRANSLATION_TESTS") != "1"
+    and os.getenv("RUN_BING_TRANSLATOR_TESTS") != "1",
+    reason="Bing free translation endpoint is network-dependent; set RUN_BING_TRANSLATOR_TESTS=1 to run.",
+)
 class TestBingTranslator:
     """Test suite for BingTranslator using public API endpoints."""
 

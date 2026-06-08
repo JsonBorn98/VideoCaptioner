@@ -5,18 +5,15 @@ from typing import Optional, Tuple
 from PIL import ImageFont
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QFontDatabase
-from PyQt5.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
-    CardWidget,
     ImageLabel,
     InfoBar,
     InfoBarPosition,
     LineEdit,
     MessageBoxBase,
-    PushSettingCard,
     ScrollArea,
-    SettingCardGroup,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -28,13 +25,17 @@ from videocaptioner.core.subtitle.style_manager import StyleMode
 from videocaptioner.core.subtitle.styles import RoundedBgStyle
 from videocaptioner.core.utils.platform_utils import open_folder
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.common.signal_bus import signalBus
-from videocaptioner.ui.components.MySettingCard import (
-    ColorSettingCard,
-    ComboBoxSettingCard,
-    DoubleSpinBoxSettingCard,
-    SpinBoxSettingCard,
+from videocaptioner.ui.common.theme_tokens import app_palette
+from videocaptioner.ui.components.form_cards import FormGroup, PushFormCard
+from videocaptioner.ui.components.subtitle_style_controls import (
+    SubtitleStyleColorRow,
+    SubtitleStyleComboRow,
+    SubtitleStyleDoubleSpinRow,
+    SubtitleStyleLineEditRow,
+    SubtitleStyleSpinRow,
 )
+
+CUSTOM_PREVIEW_TEXT = "自定义"
 
 PERVIEW_TEXTS = {
     "长文本": (
@@ -130,6 +131,9 @@ class SubtitleStyleInterface(QWidget):
         self.setObjectName("SubtitleStyleInterface")
         self.setWindowTitle(self.tr("字幕样式配置"))
         self.setAcceptDrops(True)  # 启用拖放功能
+        self.preview_thread: QThread | None = None
+        self._preview_threads: list[QThread] = []
+        self._preview_generation = 0
 
         # 创建主布局
         self.hBoxLayout = QHBoxLayout(self)
@@ -137,7 +141,7 @@ class SubtitleStyleInterface(QWidget):
         # 初始化界面组件
         self._initSettingsArea()
         self._initPreviewArea()
-        self._initSettingCards()
+        self._init_setting_rows()
         self._initLayout()
         self._initStyle()
 
@@ -149,44 +153,53 @@ class SubtitleStyleInterface(QWidget):
 
         # 连接信号
         self.connectSignals()
+        self.updatePreview()
 
     def _initSettingsArea(self):
         """初始化左侧设置区域"""
         self.settingsScrollArea = ScrollArea()
-        self.settingsScrollArea.setFixedWidth(350)
+        self.settingsScrollArea.setFixedWidth(390)
+        self.settingsScrollArea.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.settingsWidget = QWidget()
         self.settingsLayout = QVBoxLayout(self.settingsWidget)
+        self.settingsLayout.setContentsMargins(20, 20, 20, 20)
+        self.settingsLayout.setSpacing(18)
         self.settingsScrollArea.setWidget(self.settingsWidget)
         self.settingsScrollArea.setWidgetResizable(True)
 
         # 创建设置组 - 通用
-        self.layoutGroup = SettingCardGroup(self.tr("字幕排布"), self.settingsWidget)
+        self.layoutGroup = FormGroup(self.tr("字幕排布"), self.settingsWidget)
 
         # ASS 样式设置组
-        self.assPrimaryGroup = SettingCardGroup(
+        self.assPrimaryGroup = FormGroup(
             self.tr("主字幕样式"), self.settingsWidget
         )
-        self.assSecondaryGroup = SettingCardGroup(
+        self.assSecondaryGroup = FormGroup(
             self.tr("副字幕样式"), self.settingsWidget
         )
 
         # 圆角背景设置组
-        self.roundedBgGroup = SettingCardGroup(
+        self.roundedBgGroup = FormGroup(
             self.tr("圆角背景样式"), self.settingsWidget
         )
 
         # 预览设置组
-        self.previewGroup = SettingCardGroup(self.tr("预览设置"), self.settingsWidget)
+        self.previewGroup = FormGroup(self.tr("预览设置"), self.settingsWidget)
 
     def _initPreviewArea(self):
         """初始化右侧预览区域"""
-        self.previewCard = CardWidget()
+        self.previewCard = QFrame()
+        self.previewCard.setObjectName("subtitleStylePreviewCard")
+        self.previewCard.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
+        self.previewCard.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.previewLayout = QVBoxLayout(self.previewCard)
+        self.previewLayout.setContentsMargins(24, 24, 24, 24)
         self.previewLayout.setSpacing(16)
 
         # 顶部预览区域
         self.previewTopWidget = QWidget()
-        self.previewTopWidget.setFixedHeight(430)
+        self.previewTopWidget.setMinimumHeight(320)
+        self.previewTopWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.previewTopLayout = QVBoxLayout(self.previewTopWidget)
 
         self.previewLabel = BodyLabel(self.tr("预览效果"))
@@ -197,41 +210,43 @@ class SubtitleStyleInterface(QWidget):
 
         # 底部控件区域
         self.previewBottomWidget = QWidget()
+        self.previewBottomWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.previewBottomLayout = QVBoxLayout(self.previewBottomWidget)
 
-        self.styleNameComboBox = ComboBoxSettingCard(
+        self.styleNameComboBox = SubtitleStyleComboRow(
             FIF.VIEW,  # type: ignore
             self.tr("选择样式"),
             self.tr("选择已保存的字幕样式"),
             texts=[],  # type: ignore
         )
 
-        self.newStyleButton = PushSettingCard(
+        self.newStyleButton = PushFormCard(
             self.tr("新建样式"),
             FIF.ADD,
             self.tr("新建样式"),
             self.tr("基于当前样式新建预设"),
         )
 
-        self.openStyleFolderButton = PushSettingCard(
+        self.openStyleFolderButton = PushFormCard(
             self.tr("打开样式文件夹"),
             FIF.FOLDER,
             self.tr("打开样式文件夹"),
             self.tr("在文件管理器中打开样式文件夹"),
         )
 
-        self.previewBottomLayout.addWidget(self.styleNameComboBox)
-        self.previewBottomLayout.addWidget(self.newStyleButton)
-        self.previewBottomLayout.addWidget(self.openStyleFolderButton)
+        self.previewActionsGroup = FormGroup(self.tr("样式管理"), self.previewBottomWidget)
+        self.previewActionsGroup.addCard(self.styleNameComboBox)
+        self.previewActionsGroup.addCard(self.newStyleButton)
+        self.previewActionsGroup.addCard(self.openStyleFolderButton)
+        self.previewBottomLayout.addWidget(self.previewActionsGroup)
 
-        self.previewLayout.addWidget(self.previewTopWidget)
-        self.previewLayout.addWidget(self.previewBottomWidget)
-        self.previewLayout.addStretch(1)
+        self.previewLayout.addWidget(self.previewTopWidget, 1)
+        self.previewLayout.addWidget(self.previewBottomWidget, 0)
 
-    def _initSettingCards(self):
+    def _init_setting_rows(self):
         """初始化所有设置卡片"""
         # 渲染模式切换
-        self.renderModeCard = ComboBoxSettingCard(
+        self.renderModeCard = SubtitleStyleComboRow(
             FIF.BRUSH,  # type: ignore
             self.tr("渲染模式"),
             self.tr("选择字幕渲染方式"),
@@ -239,7 +254,7 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # 字幕排布设置
-        self.layoutCard = ComboBoxSettingCard(
+        self.layoutCard = SubtitleStyleComboRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("字幕排布"),
             self.tr("设置主字幕和副字幕的显示方式"),
@@ -247,7 +262,7 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 垂直间距
-        self.assVerticalSpacingCard = SpinBoxSettingCard(
+        self.assVerticalSpacingCard = SubtitleStyleSpinRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("垂直间距"),
             self.tr("设置字幕的垂直间距"),
@@ -256,13 +271,13 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 主字幕样式
-        self.assPrimaryFontCard = ComboBoxSettingCard(
+        self.assPrimaryFontCard = SubtitleStyleComboRow(
             FIF.FONT,  # type: ignore
             self.tr("主字幕字体"),
             self.tr("设置主字幕的字体"),
         )
 
-        self.assPrimarySizeCard = SpinBoxSettingCard(
+        self.assPrimarySizeCard = SubtitleStyleSpinRow(
             FIF.FONT_SIZE,  # type: ignore
             self.tr("主字幕字号"),
             self.tr("设置主字幕的大小"),
@@ -270,7 +285,7 @@ class SubtitleStyleInterface(QWidget):
             maximum=1000,
         )
 
-        self.assPrimarySpacingCard = DoubleSpinBoxSettingCard(
+        self.assPrimarySpacingCard = SubtitleStyleDoubleSpinRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("主字幕间距"),
             self.tr("设置主字幕的字符间距"),
@@ -279,21 +294,21 @@ class SubtitleStyleInterface(QWidget):
             decimals=1,
         )
 
-        self.assPrimaryColorCard = ColorSettingCard(
+        self.assPrimaryColorCard = SubtitleStyleColorRow(
             QColor(255, 255, 255),
             FIF.PALETTE,  # type: ignore
             self.tr("主字幕颜色"),
             self.tr("设置主字幕的颜色"),
         )
 
-        self.assPrimaryOutlineColorCard = ColorSettingCard(
+        self.assPrimaryOutlineColorCard = SubtitleStyleColorRow(
             QColor(0, 0, 0),
             FIF.PALETTE,  # type: ignore
             self.tr("主字幕边框颜色"),
             self.tr("设置主字幕的边框颜色"),
         )
 
-        self.assPrimaryOutlineSizeCard = DoubleSpinBoxSettingCard(
+        self.assPrimaryOutlineSizeCard = SubtitleStyleDoubleSpinRow(
             FIF.ZOOM,  # type: ignore
             self.tr("主字幕边框大小"),
             self.tr("设置主字幕的边框粗细"),
@@ -303,13 +318,13 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 副字幕样式
-        self.assSecondaryFontCard = ComboBoxSettingCard(
+        self.assSecondaryFontCard = SubtitleStyleComboRow(
             FIF.FONT,  # type: ignore
             self.tr("副字幕字体"),
             self.tr("设置副字幕的字体"),
         )
 
-        self.assSecondarySizeCard = SpinBoxSettingCard(
+        self.assSecondarySizeCard = SubtitleStyleSpinRow(
             FIF.FONT_SIZE,  # type: ignore
             self.tr("副字幕字号"),
             self.tr("设置副字幕的大小"),
@@ -317,7 +332,7 @@ class SubtitleStyleInterface(QWidget):
             maximum=1000,
         )
 
-        self.assSecondarySpacingCard = DoubleSpinBoxSettingCard(
+        self.assSecondarySpacingCard = SubtitleStyleDoubleSpinRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("副字幕间距"),
             self.tr("设置副字幕的字符间距"),
@@ -326,21 +341,21 @@ class SubtitleStyleInterface(QWidget):
             decimals=1,
         )
 
-        self.assSecondaryColorCard = ColorSettingCard(
+        self.assSecondaryColorCard = SubtitleStyleColorRow(
             QColor(255, 255, 255),
             FIF.PALETTE,  # type: ignore
             self.tr("副字幕颜色"),
             self.tr("设置副字幕的颜色"),
         )
 
-        self.assSecondaryOutlineColorCard = ColorSettingCard(
+        self.assSecondaryOutlineColorCard = SubtitleStyleColorRow(
             QColor(0, 0, 0),
             FIF.PALETTE,  # type: ignore
             self.tr("副字幕边框颜色"),
             self.tr("设置副字幕的边框颜色"),
         )
 
-        self.assSecondaryOutlineSizeCard = DoubleSpinBoxSettingCard(
+        self.assSecondaryOutlineSizeCard = SubtitleStyleDoubleSpinRow(
             FIF.ZOOM,  # type: ignore
             self.tr("副字幕边框大小"),
             self.tr("设置副字幕的边框粗细"),
@@ -350,13 +365,13 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # 圆角背景样式设置
-        self.roundedFontCard = ComboBoxSettingCard(
+        self.roundedFontCard = SubtitleStyleComboRow(
             FIF.FONT,  # type: ignore
             self.tr("字体"),
             self.tr("设置字幕字体"),
         )
 
-        self.roundedFontSizeCard = SpinBoxSettingCard(
+        self.roundedFontSizeCard = SubtitleStyleSpinRow(
             FIF.FONT_SIZE,  # type: ignore
             self.tr("字体大小"),
             self.tr("设置字幕字体大小"),
@@ -364,14 +379,14 @@ class SubtitleStyleInterface(QWidget):
             maximum=120,
         )
 
-        self.roundedTextColorCard = ColorSettingCard(
+        self.roundedTextColorCard = SubtitleStyleColorRow(
             QColor(255, 255, 255),
             FIF.PALETTE,  # type: ignore
             self.tr("文字颜色"),
             self.tr("设置字幕文字颜色"),
         )
 
-        self.roundedBgColorCard = ColorSettingCard(
+        self.roundedBgColorCard = SubtitleStyleColorRow(
             QColor(25, 25, 25, 200),
             FIF.PALETTE,  # type: ignore
             self.tr("背景颜色"),
@@ -379,7 +394,7 @@ class SubtitleStyleInterface(QWidget):
             enableAlpha=True,
         )
 
-        self.roundedCornerRadiusCard = SpinBoxSettingCard(
+        self.roundedCornerRadiusCard = SubtitleStyleSpinRow(
             FIF.ZOOM,  # type: ignore
             self.tr("圆角半径"),
             self.tr("设置背景圆角大小"),
@@ -387,7 +402,7 @@ class SubtitleStyleInterface(QWidget):
             maximum=50,
         )
 
-        self.roundedPaddingHCard = SpinBoxSettingCard(
+        self.roundedPaddingHCard = SubtitleStyleSpinRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("水平内边距"),
             self.tr("文字与背景边缘的水平距离"),
@@ -395,7 +410,7 @@ class SubtitleStyleInterface(QWidget):
             maximum=100,
         )
 
-        self.roundedPaddingVCard = SpinBoxSettingCard(
+        self.roundedPaddingVCard = SubtitleStyleSpinRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("垂直内边距"),
             self.tr("文字与背景边缘的垂直距离"),
@@ -403,7 +418,7 @@ class SubtitleStyleInterface(QWidget):
             maximum=50,
         )
 
-        self.roundedMarginBottomCard = SpinBoxSettingCard(
+        self.roundedMarginBottomCard = SubtitleStyleSpinRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("底部边距"),
             self.tr("字幕距视频底部的距离"),
@@ -411,7 +426,7 @@ class SubtitleStyleInterface(QWidget):
             maximum=300,
         )
 
-        self.roundedLineSpacingCard = SpinBoxSettingCard(
+        self.roundedLineSpacingCard = SubtitleStyleSpinRow(
             FIF.ALIGNMENT,  # type: ignore
             self.tr("行间距"),
             self.tr("双语字幕的行间距"),
@@ -419,7 +434,7 @@ class SubtitleStyleInterface(QWidget):
             maximum=50,
         )
 
-        self.roundedLetterSpacingCard = SpinBoxSettingCard(
+        self.roundedLetterSpacingCard = SubtitleStyleSpinRow(
             FIF.FONT,  # type: ignore
             self.tr("字符间距"),
             self.tr("每个字符之间的额外间距"),
@@ -429,15 +444,31 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # 预览设置
-        self.previewTextCard = ComboBoxSettingCard(
+        self.previewTextCard = SubtitleStyleComboRow(
             FIF.MESSAGE,  # type: ignore
             self.tr("预览文字"),
             self.tr("设置预览显示的文字内容"),
-            texts=list(PERVIEW_TEXTS.keys()),
+            texts=[*PERVIEW_TEXTS.keys(), CUSTOM_PREVIEW_TEXT],
             parent=self.previewGroup,
         )
 
-        self.orientationCard = ComboBoxSettingCard(
+        self.previewOriginalTextCard = SubtitleStyleLineEditRow(
+            FIF.MESSAGE,  # type: ignore
+            self.tr("原文"),
+            self.tr("预览中使用的原文内容"),
+            placeholder=self.tr("输入原文"),
+            parent=self.previewGroup,
+        )
+
+        self.previewTranslationTextCard = SubtitleStyleLineEditRow(
+            FIF.MESSAGE,  # type: ignore
+            self.tr("译文"),
+            self.tr("预览中使用的译文内容"),
+            placeholder=self.tr("输入译文"),
+            parent=self.previewGroup,
+        )
+
+        self.orientationCard = SubtitleStyleComboRow(
             FIF.LAYOUT,  # type: ignore
             self.tr("预览方向"),
             self.tr("设置预览图片的显示方向"),
@@ -445,7 +476,7 @@ class SubtitleStyleInterface(QWidget):
             parent=self.previewGroup,
         )
 
-        self.previewImageCard = PushSettingCard(
+        self.previewImageCard = PushFormCard(
             self.tr("选择图片"),
             FIF.PHOTO,
             self.tr("预览背景"),
@@ -455,42 +486,46 @@ class SubtitleStyleInterface(QWidget):
 
     def _initLayout(self):
         """初始化布局"""
+        self.hBoxLayout.setContentsMargins(28, 28, 28, 28)
+        self.hBoxLayout.setSpacing(24)
         # 通用设置
-        self.layoutGroup.addSettingCard(self.renderModeCard)
-        self.layoutGroup.addSettingCard(self.layoutCard)
-        self.layoutGroup.addSettingCard(self.assVerticalSpacingCard)
+        self.layoutGroup.addCard(self.renderModeCard)
+        self.layoutGroup.addCard(self.layoutCard)
+        self.layoutGroup.addCard(self.assVerticalSpacingCard)
 
         # ASS 样式卡片
-        self.assPrimaryGroup.addSettingCard(self.assPrimaryFontCard)
-        self.assPrimaryGroup.addSettingCard(self.assPrimarySizeCard)
-        self.assPrimaryGroup.addSettingCard(self.assPrimarySpacingCard)
-        self.assPrimaryGroup.addSettingCard(self.assPrimaryColorCard)
-        self.assPrimaryGroup.addSettingCard(self.assPrimaryOutlineColorCard)
-        self.assPrimaryGroup.addSettingCard(self.assPrimaryOutlineSizeCard)
+        self.assPrimaryGroup.addCard(self.assPrimaryFontCard)
+        self.assPrimaryGroup.addCard(self.assPrimarySizeCard)
+        self.assPrimaryGroup.addCard(self.assPrimarySpacingCard)
+        self.assPrimaryGroup.addCard(self.assPrimaryColorCard)
+        self.assPrimaryGroup.addCard(self.assPrimaryOutlineColorCard)
+        self.assPrimaryGroup.addCard(self.assPrimaryOutlineSizeCard)
 
-        self.assSecondaryGroup.addSettingCard(self.assSecondaryFontCard)
-        self.assSecondaryGroup.addSettingCard(self.assSecondarySizeCard)
-        self.assSecondaryGroup.addSettingCard(self.assSecondarySpacingCard)
-        self.assSecondaryGroup.addSettingCard(self.assSecondaryColorCard)
-        self.assSecondaryGroup.addSettingCard(self.assSecondaryOutlineColorCard)
-        self.assSecondaryGroup.addSettingCard(self.assSecondaryOutlineSizeCard)
+        self.assSecondaryGroup.addCard(self.assSecondaryFontCard)
+        self.assSecondaryGroup.addCard(self.assSecondarySizeCard)
+        self.assSecondaryGroup.addCard(self.assSecondarySpacingCard)
+        self.assSecondaryGroup.addCard(self.assSecondaryColorCard)
+        self.assSecondaryGroup.addCard(self.assSecondaryOutlineColorCard)
+        self.assSecondaryGroup.addCard(self.assSecondaryOutlineSizeCard)
 
         # 圆角背景卡片
-        self.roundedBgGroup.addSettingCard(self.roundedFontCard)
-        self.roundedBgGroup.addSettingCard(self.roundedFontSizeCard)
-        self.roundedBgGroup.addSettingCard(self.roundedTextColorCard)
-        self.roundedBgGroup.addSettingCard(self.roundedBgColorCard)
-        self.roundedBgGroup.addSettingCard(self.roundedCornerRadiusCard)
-        self.roundedBgGroup.addSettingCard(self.roundedPaddingHCard)
-        self.roundedBgGroup.addSettingCard(self.roundedPaddingVCard)
-        self.roundedBgGroup.addSettingCard(self.roundedMarginBottomCard)
-        self.roundedBgGroup.addSettingCard(self.roundedLineSpacingCard)
-        self.roundedBgGroup.addSettingCard(self.roundedLetterSpacingCard)
+        self.roundedBgGroup.addCard(self.roundedFontCard)
+        self.roundedBgGroup.addCard(self.roundedFontSizeCard)
+        self.roundedBgGroup.addCard(self.roundedTextColorCard)
+        self.roundedBgGroup.addCard(self.roundedBgColorCard)
+        self.roundedBgGroup.addCard(self.roundedCornerRadiusCard)
+        self.roundedBgGroup.addCard(self.roundedPaddingHCard)
+        self.roundedBgGroup.addCard(self.roundedPaddingVCard)
+        self.roundedBgGroup.addCard(self.roundedMarginBottomCard)
+        self.roundedBgGroup.addCard(self.roundedLineSpacingCard)
+        self.roundedBgGroup.addCard(self.roundedLetterSpacingCard)
 
         # 预览设置
-        self.previewGroup.addSettingCard(self.previewTextCard)
-        self.previewGroup.addSettingCard(self.orientationCard)
-        self.previewGroup.addSettingCard(self.previewImageCard)
+        self.previewGroup.addCard(self.previewTextCard)
+        self.previewGroup.addCard(self.previewOriginalTextCard)
+        self.previewGroup.addCard(self.previewTranslationTextCard)
+        self.previewGroup.addCard(self.orientationCard)
+        self.previewGroup.addCard(self.previewImageCard)
 
         # 添加组到布局
         self.settingsLayout.addWidget(self.layoutGroup)
@@ -501,23 +536,52 @@ class SubtitleStyleInterface(QWidget):
         self.settingsLayout.addStretch(1)
 
         # 添加左右两侧到主布局
-        self.hBoxLayout.addWidget(self.settingsScrollArea)
-        self.hBoxLayout.addWidget(self.previewCard)
+        self.hBoxLayout.addWidget(self.settingsScrollArea, 0)
+        self.hBoxLayout.addWidget(self.previewCard, 1)
 
     def _initStyle(self):
         """初始化样式"""
+        palette = app_palette()
         self.settingsWidget.setObjectName("settingsWidget")
         self.setStyleSheet(
-            """
-            SubtitleStyleInterface, #settingsWidget {
-                background-color: transparent;
-            }
-            QScrollArea {
+            f"""
+            SubtitleStyleInterface, #settingsWidget {{
+                background-color: {palette.bg};
+            }}
+            QScrollArea {{
                 border: none;
-                background-color: transparent;
-            }
+                background-color: {palette.bg};
+            }}
+            QWidget#subtitleStylePreviewCard, #subtitleStylePreviewCard {{
+                background-color: {palette.panel};
+                border: 1px solid {palette.line};
+                border-radius: 12px;
+            }}
         """
         )
+        self.previewCard.setStyleSheet(
+            f"""
+            QWidget#subtitleStylePreviewCard, #subtitleStylePreviewCard {{
+                background-color: {palette.panel};
+                border: 1px solid {palette.line};
+                border-radius: 12px;
+            }}
+            """
+        )
+        self.previewTopWidget.setStyleSheet("background: transparent; border: none;")
+        self.previewBottomWidget.setStyleSheet("background: transparent; border: none;")
+
+    def syncStyle(self) -> None:  # noqa: N802
+        self._initStyle()
+        for group in [
+            self.layoutGroup,
+            self.assPrimaryGroup,
+            self.assSecondaryGroup,
+            self.roundedBgGroup,
+            self.previewGroup,
+            self.previewActionsGroup,
+        ]:
+            group.syncStyle()
 
     def __setValues(self):
         """设置初始值"""
@@ -596,6 +660,7 @@ class SubtitleStyleInterface(QWidget):
 
         # 根据当前渲染模式显示/隐藏设置组
         self._updateVisibleGroups()
+        self._apply_preview_text_preset(update=False)
 
     def connectSignals(self):
         """连接所有设置变更的信号到预览更新函数"""
@@ -666,7 +731,9 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # 预览设置（通用设置）
-        self.previewTextCard.currentTextChanged.connect(self.updatePreview)
+        self.previewTextCard.currentTextChanged.connect(self._apply_preview_text_preset)
+        self.previewOriginalTextCard.textChanged.connect(self.updatePreview)
+        self.previewTranslationTextCard.textChanged.connect(self.updatePreview)
         self.orientationCard.currentTextChanged.connect(self.onOrientationChanged)
         self.previewImageCard.clicked.connect(self.selectPreviewImage)
 
@@ -676,13 +743,15 @@ class SubtitleStyleInterface(QWidget):
         self.openStyleFolderButton.clicked.connect(self.on_open_style_folder_clicked)
 
         # 连接字幕排布信号
-        self.layoutCard.comboBox.currentTextChanged.connect(
-            signalBus.subtitle_layout_changed
+        self.layoutCard.comboBox.currentTextChanged.connect(self.on_subtitle_layout_changed)
+        cfg.subtitle_layout.valueChanged.connect(
+            lambda value: self.on_subtitle_layout_changed(value.value)
         )
-        signalBus.subtitle_layout_changed.connect(self.on_subtitle_layout_changed)
 
         # 连接渲染模式信号（从视频合成界面同步）
-        signalBus.subtitle_render_mode_changed.connect(self.on_render_mode_changed_external)
+        cfg.subtitle_render_mode.valueChanged.connect(
+            lambda value: self.on_render_mode_changed_external(value.value)
+        )
 
     def on_open_style_folder_clicked(self):
         """打开样式文件夹"""
@@ -690,7 +759,7 @@ class SubtitleStyleInterface(QWidget):
 
     def on_subtitle_layout_changed(self, layout: str):
         layout_enum = SubtitleLayoutEnum(layout)
-        cfg.subtitle_layout.value = layout_enum
+        cfg.set(cfg.subtitle_layout, layout_enum)
         self.layoutCard.setCurrentText(layout)
 
     def on_render_mode_changed_external(self, mode_text: str):
@@ -709,10 +778,6 @@ class SubtitleStyleInterface(QWidget):
         mode_text = self.renderModeCard.comboBox.currentText()
         mode = SubtitleRenderModeEnum(mode_text)
         cfg.set(cfg.subtitle_render_mode, mode)
-        # 断开自身监听，避免信号回传导致重复执行
-        signalBus.subtitle_render_mode_changed.disconnect(self.on_render_mode_changed_external)
-        signalBus.subtitle_render_mode_changed.emit(mode_text)
-        signalBus.subtitle_render_mode_changed.connect(self.on_render_mode_changed_external)
         self._updateVisibleGroups()
         self._refreshStyleList()
         self.updatePreview()
@@ -906,10 +971,40 @@ class SubtitleStyleInterface(QWidget):
 
         return f"[V4+ Styles]\n{style_format}\n{primary_style}\n{secondary_style}"
 
+    def _apply_preview_text_preset(self, update: bool = True):
+        """Switch between preset preview text and editable custom text."""
+        is_custom = self.previewTextCard.comboBox.currentText() == CUSTOM_PREVIEW_TEXT
+        self.previewOriginalTextCard.setVisible(is_custom)
+        self.previewTranslationTextCard.setVisible(is_custom)
+        if is_custom and not (
+            self.previewOriginalTextCard.text().strip()
+            or self.previewTranslationTextCard.text().strip()
+        ):
+            original, translation = PERVIEW_TEXTS["中文本"]
+            self.previewOriginalTextCard.setText(original)
+            self.previewTranslationTextCard.setText(translation)
+        if update:
+            self.updatePreview()
+
+    def _preview_texts(self) -> tuple[str, str]:
+        if self.previewTextCard.comboBox.currentText() != CUSTOM_PREVIEW_TEXT:
+            return PERVIEW_TEXTS.get(
+                self.previewTextCard.comboBox.currentText(),
+                PERVIEW_TEXTS["中文本"],
+            )
+
+        fallback_original, fallback_translation = PERVIEW_TEXTS.get(
+            self.previewTextCard.comboBox.currentText(),
+            PERVIEW_TEXTS["中文本"],
+        )
+        original = self.previewOriginalTextCard.text().strip() or fallback_original
+        translation = self.previewTranslationTextCard.text().strip() or fallback_translation
+        return original, translation
+
     def updatePreview(self):
         """更新预览图片"""
         # 获取预览文本
-        main_text, sub_text = PERVIEW_TEXTS[self.previewTextCard.comboBox.currentText()]
+        main_text, sub_text = self._preview_texts()
 
         # 字幕布局
         layout = self.layoutCard.comboBox.currentText()
@@ -956,7 +1051,7 @@ class SubtitleStyleInterface(QWidget):
                 letter_spacing=self.roundedLetterSpacingCard.spinBox.value(),
             )
 
-            self.preview_thread = RoundedBgPreviewThread(
+            preview_thread = RoundedBgPreviewThread(
                 preview_text=(main_text, sub_text),
                 style=style,
                 bg_image_path=str(path),
@@ -964,14 +1059,29 @@ class SubtitleStyleInterface(QWidget):
         else:
             # ASS 样式模式（样式720P基准，由渲染层自动缩放）
             style_str = self.generateAssStyles()
-            self.preview_thread = AssPreviewThread(
+            preview_thread = AssPreviewThread(
                 preview_text=(main_text, sub_text),
                 style_str=style_str,
                 bg_image_path=str(path),
             )
 
-        self.preview_thread.previewReady.connect(self.onPreviewReady)
-        self.preview_thread.start()
+        self._preview_generation += 1
+        generation = self._preview_generation
+        preview_thread.previewReady.connect(
+            lambda preview_path, gen=generation: self.onPreviewReady(preview_path)
+            if gen == self._preview_generation
+            else None
+        )
+        preview_thread.finished.connect(
+            lambda thread=preview_thread: self._remove_preview_thread(thread)
+        )
+        self.preview_thread = preview_thread
+        self._preview_threads.append(preview_thread)
+        preview_thread.start()
+
+    def _remove_preview_thread(self, thread: QThread) -> None:
+        if thread in self._preview_threads:
+            self._preview_threads.remove(thread)
 
     def onPreviewReady(self, preview_path):
         """预览图片生成完成的回调"""
@@ -995,6 +1105,13 @@ class SubtitleStyleInterface(QWidget):
         """窗口显示事件"""
         super().showEvent(event)
         self.updatePreviewImage()
+
+    def closeEvent(self, event):
+        for thread in list(self._preview_threads):
+            if thread.isRunning():
+                thread.wait(3000)
+        self._preview_threads.clear()
+        super().closeEvent(event)
 
     def _resolve_style_path(self, style_name: str) -> Path:
         """Resolve style name to file path, trying prefixed names."""
@@ -1025,16 +1142,6 @@ class SubtitleStyleInterface(QWidget):
         cfg.set(cfg.subtitle_style_name, style_name)
         self._loading_style = False
         self.updatePreview()
-
-        InfoBar.success(
-            title=self.tr("成功"),
-            content=self.tr("已加载样式 ") + style_name,
-            orient=Qt.Horizontal,  # type: ignore
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=INFOBAR_DURATION_SUCCESS,
-            parent=self,
-        )
 
     def _loadAssStyle(self, style_path: Path):
         """加载 ASS 样式 (.json)"""

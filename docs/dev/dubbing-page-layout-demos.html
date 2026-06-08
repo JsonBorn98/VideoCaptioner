@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VideoCaptioner 配音页 D1 优化稿</title>
+  <style>
+    :root {
+      --bg: #1f2020;
+      --chrome: #191a1a;
+      --panel: #292b2b;
+      --panel-2: #323535;
+      --panel-3: #3b3e3d;
+      --line: #454948;
+      --line-soft: #363a39;
+      --text: #f4f6f5;
+      --muted: #b8bfbc;
+      --subtle: #8f9793;
+      --brand: #00f0a0;
+      --brand-soft: rgba(0, 240, 160, .11);
+      --brand-line: rgba(0, 240, 160, .46);
+      --warning: #f0bd58;
+      --radius: 8px;
+      --shadow: 0 22px 70px rgba(0, 0, 0, .34);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", Segoe UI, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #151616;
+      color: var(--text);
+      font-family: var(--font);
+      letter-spacing: 0;
+    }
+
+    button, textarea {
+      font: inherit;
+    }
+
+    button {
+      cursor: default;
+    }
+
+    .stage {
+      min-height: 100vh;
+      padding: 28px;
+    }
+
+    .intro {
+      max-width: 1480px;
+      margin: 0 auto 22px;
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+    }
+
+    .intro h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      line-height: 1.16;
+    }
+
+    .intro p {
+      margin: 0;
+      max-width: 840px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .design-note {
+      flex: 0 0 auto;
+      min-height: 40px;
+      padding: 0 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      background: #202222;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .note-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px var(--brand-soft);
+    }
+
+    .app {
+      max-width: 1480px;
+      min-height: 860px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 68px 1fr;
+      overflow: hidden;
+      border: 1px solid #303332;
+      border-radius: 18px;
+      background: var(--bg);
+      box-shadow: var(--shadow);
+    }
+
+    .sidebar {
+      padding: 20px 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      background: var(--chrome);
+      border-right: 1px solid #262928;
+    }
+
+    .side-btn {
+      width: 42px;
+      height: 42px;
+      border: 0;
+      border-radius: var(--radius);
+      display: grid;
+      place-items: center;
+      color: #d7ddda;
+      background: transparent;
+    }
+
+    .side-btn.active {
+      color: var(--brand);
+      background: #252827;
+      box-shadow: inset 3px 0 0 var(--brand);
+    }
+
+    .icon {
+      width: 22px;
+      height: 22px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.1;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .main {
+      min-width: 0;
+      padding: 34px 42px 42px;
+    }
+
+    .topbar {
+      min-height: 48px;
+      margin-bottom: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 22px;
+    }
+
+    .topbar.simple {
+      justify-content: flex-start;
+    }
+
+    .page-title {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1.12;
+    }
+
+    .subline {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .spacer { flex: 1; }
+
+    .btn {
+      height: 40px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--text);
+      background: var(--panel-3);
+      font-weight: 700;
+    }
+
+    .btn.primary {
+      border-color: var(--brand);
+      color: #061810;
+      background: var(--brand);
+      font-weight: 850;
+    }
+
+    .btn.soft {
+      border-color: var(--brand-line);
+      color: var(--brand);
+      background: var(--brand-soft);
+    }
+
+    .btn.icon-btn {
+      width: 40px;
+      padding: 0;
+      flex: 0 0 40px;
+    }
+
+    .provider-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .provider {
+      min-height: 88px;
+      padding: 15px 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      display: grid;
+      grid-template-rows: 24px 1fr;
+      gap: 8px;
+      background: var(--panel);
+    }
+
+    .provider.active {
+      border-color: var(--brand);
+      background: linear-gradient(180deg, rgba(0, 240, 160, .105), rgba(0, 240, 160, .035)), var(--panel);
+    }
+
+    .provider-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .provider strong {
+      font-size: 15px;
+    }
+
+    .provider p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .badge {
+      height: 24px;
+      padding: 0 10px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      color: #d9dfdc;
+      background: #4a4d4c;
+      font-size: 12px;
+      font-weight: 750;
+      line-height: 24px;
+      white-space: nowrap;
+    }
+
+    .badge.brand {
+      color: #061810;
+      background: var(--brand);
+    }
+
+    .badge.warning {
+      color: #d9dfdc;
+      background: #4a4d4c;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(740px, 1fr) 386px;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .filter-bar {
+      min-height: 60px;
+      margin-bottom: 14px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .filter-label {
+      color: var(--subtle);
+      font-size: 12px;
+      font-weight: 800;
+      margin-right: 2px;
+    }
+
+    .filter-btn {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid #3c403f;
+      border-radius: 7px;
+      color: var(--muted);
+      background: #272a29;
+      font-weight: 750;
+    }
+
+    .filter-btn.active {
+      border-color: var(--brand);
+      color: #071912;
+      background: var(--brand);
+    }
+
+    .table {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .voice-row {
+      height: 74px;
+      display: grid;
+      grid-template-columns: 42px minmax(360px, 1fr) 170px;
+      column-gap: 16px;
+      align-items: center;
+      padding: 0 16px;
+      border-bottom: 1px solid #383b3a;
+    }
+
+    .voice-row:last-child {
+      border-bottom: 0;
+    }
+
+    .voice-row.header {
+      height: 44px;
+      color: var(--subtle);
+      background: #222424;
+      font-size: 12px;
+      font-weight: 800;
+      align-items: center;
+    }
+
+    .voice-row.selected {
+      background: rgba(0, 240, 160, .08);
+      box-shadow: inset 3px 0 0 var(--brand);
+    }
+
+    .mic {
+      width: 38px;
+      height: 38px;
+      border: 1px solid #39403d;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      color: var(--brand);
+      background: #242727;
+    }
+
+    .mic .icon {
+      width: 20px;
+      height: 20px;
+    }
+
+    .voice-title {
+      margin: 0 0 4px;
+      font-size: 15px;
+      line-height: 18px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .voice-desc {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 16px;
+    }
+
+    .voice-row > .row {
+      justify-content: flex-end;
+    }
+
+    .voice-row > .row .btn:not(.icon-btn) {
+      width: 96px;
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    .right {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .sample {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+      min-height: 378px;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .section-title h3 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .section-title small {
+      color: var(--subtle);
+      font-size: 12px;
+    }
+
+    .textarea {
+      width: 100%;
+      height: 176px;
+      padding: 14px;
+      resize: none;
+      outline: none;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--text);
+      background: #202222;
+      line-height: 1.6;
+    }
+
+    .sample-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--subtle);
+      font-size: 12px;
+    }
+
+    .player {
+      height: 72px;
+      padding: 0 14px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: #202222;
+    }
+
+    .wave {
+      height: 32px;
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      opacity: .82;
+    }
+
+    .wave i {
+      width: 3px;
+      border-radius: 999px;
+      background: var(--brand);
+    }
+
+    .wave i:nth-child(1) { height: 8px; opacity: .45; }
+    .wave i:nth-child(2) { height: 18px; opacity: .65; }
+    .wave i:nth-child(3) { height: 12px; opacity: .55; }
+    .wave i:nth-child(4) { height: 25px; opacity: .9; }
+    .wave i:nth-child(5) { height: 15px; opacity: .7; }
+    .wave i:nth-child(6) { height: 10px; opacity: .5; }
+    .wave i:nth-child(7) { height: 22px; opacity: .85; }
+    .wave i:nth-child(8) { height: 13px; opacity: .55; }
+    .wave i:nth-child(9) { height: 28px; opacity: .95; }
+    .wave i:nth-child(10) { height: 16px; opacity: .68; }
+
+    .service {
+      padding: 16px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .field {
+      min-height: 40px;
+      padding: 0 12px;
+      border: 1px solid var(--line-soft);
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: #252827;
+    }
+
+    .field span {
+      color: var(--muted);
+    }
+
+    @media (max-width: 1180px) {
+      .stage { padding: 18px; }
+      .intro { display: grid; }
+      .app { grid-template-columns: 56px 1fr; }
+      .main { padding: 26px; }
+      .provider-row, .layout { grid-template-columns: 1fr; }
+      .voice-row {
+        grid-template-columns: 42px 1fr;
+        padding: 14px 16px;
+      }
+      .voice-row.header { display: none; }
+      .voice-row > .row { grid-column: 2; }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <header class="intro">
+      <div>
+        <h1>配音页 D1 优化稿</h1>
+        <p>只保留一个方向：提供商切换、按声线筛选、音色表格、自定义试听文案。去掉搜索、当前任务、生成策略、语言标签和重复提供商列，把页面收敛成“选声音并试听”的干净流程。</p>
+      </div>
+      <div class="design-note"><span class="note-dot"></span><span>D1 refined · ready for PyQt translation</span></div>
+    </header>
+
+    <main class="app">
+      <aside class="sidebar">
+        <button class="side-btn" title="菜单">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
+        </button>
+        <button class="side-btn" title="首页">
+          <svg class="icon" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8"></path><path d="M5 10v10h14V10"></path></svg>
+        </button>
+        <button class="side-btn" title="字幕">
+          <svg class="icon" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M8 10h8M8 14h5"></path></svg>
+        </button>
+        <button class="side-btn active" title="配音">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg>
+        </button>
+        <div class="spacer"></div>
+        <button class="side-btn" title="设置">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.33 1.82V22a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 20a1.65 1.65 0 0 0-1.82-.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1H4a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 8a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-.6V4a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 .6 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.32.32.69.33 1.07H20a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-.51.93Z"></path></svg>
+        </button>
+      </aside>
+
+      <section class="main">
+        <div class="topbar simple">
+          <div>
+            <h2 class="page-title">配音</h2>
+            <div class="subline">选择提供商和音色，输入一句自己的试听文案。</div>
+          </div>
+        </div>
+
+        <div class="provider-row">
+          <article class="provider active">
+            <div class="provider-head"><strong>Edge 免费配音</strong><span class="badge brand">已选</span></div>
+            <p>免 API Key，适合默认中文/英文快速配音。</p>
+          </article>
+          <article class="provider">
+            <div class="provider-head"><strong>Gemini TTS</strong><span class="badge warning">需 Key</span></div>
+            <p>更自然的英文表达，配置后显示可用音色。</p>
+          </article>
+          <article class="provider">
+            <div class="provider-head"><strong>SiliconFlow CosyVoice</strong><span class="badge warning">需 Key</span></div>
+            <p>支持更丰富音色和克隆，适合高级用户。</p>
+          </article>
+        </div>
+
+        <div class="filter-bar">
+          <span class="filter-label">声线</span>
+          <button class="filter-btn active">全部</button>
+          <button class="filter-btn">女声</button>
+          <button class="filter-btn">男声</button>
+        </div>
+
+        <div class="layout">
+          <div>
+            <div class="table">
+              <div class="voice-row header">
+                <span></span>
+                <span>音色</span>
+                <span>操作</span>
+              </div>
+
+              <div class="voice-row selected">
+                <div class="mic"><svg class="icon" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg></div>
+                <div><h3 class="voice-title">晓晓</h3><div class="voice-desc">清晰自然普通话女声，适合默认字幕配音。</div></div>
+                <div class="row"><button class="btn icon-btn"><svg class="icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"></path></svg></button><button class="btn">已选择</button></div>
+              </div>
+
+              <div class="voice-row">
+                <div class="mic"><svg class="icon" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg></div>
+                <div><h3 class="voice-title">云希</h3><div class="voice-desc">年轻自然普通话男声，适合教程和解说。</div></div>
+                <div class="row"><button class="btn icon-btn"><svg class="icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"></path></svg></button><button class="btn primary">使用</button></div>
+              </div>
+
+              <div class="voice-row">
+                <div class="mic"><svg class="icon" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg></div>
+                <div><h3 class="voice-title">晓伊</h3><div class="voice-desc">温和明亮普通话女声，适合知识类视频。</div></div>
+                <div class="row"><button class="btn icon-btn"><svg class="icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"></path></svg></button><button class="btn primary">使用</button></div>
+              </div>
+
+              <div class="voice-row">
+                <div class="mic"><svg class="icon" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg></div>
+                <div><h3 class="voice-title">Jenny</h3><div class="voice-desc">自然英文女声，适合英文旁白和翻译字幕。</div></div>
+                <div class="row"><button class="btn icon-btn"><svg class="icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"></path></svg></button><button class="btn primary">使用</button></div>
+              </div>
+
+              <div class="voice-row">
+                <div class="mic"><svg class="icon" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg></div>
+                <div><h3 class="voice-title">晓佳</h3><div class="voice-desc">粤语女声，适合粤语内容试听。</div></div>
+                <div class="row"><button class="btn icon-btn"><svg class="icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"></path></svg></button><button class="btn primary">使用</button></div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="right">
+            <section class="panel sample">
+              <div class="section-title">
+                <h3>试听文案</h3>
+                <small>用户可自行输入</small>
+              </div>
+              <textarea class="textarea">你好，这是我想用于测试的配音文案。请用自然清晰的语气朗读这一句话。</textarea>
+              <div class="sample-meta"><span>建议 10-80 字，试听更快</span><span>43 字</span></div>
+              <div class="player">
+                <button class="btn icon-btn primary"><svg class="icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"></path></svg></button>
+                <div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+              </div>
+              <button class="btn primary"><svg class="icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"></path></svg>试听这句话</button>
+            </section>
+
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

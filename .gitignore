@@ -28,6 +28,7 @@ cookies.txt
 .pytest_cache/
 .coverage
 htmlcov/
+screenshots/
 
 # Node.js (docs site)
 node_modules/
@@ -45,5 +46,6 @@ docs/.vitepress/dist/
 
 # Claude Code
 .claude/
-CLAUDE.md
+# CLAUDE.md is a tracked symlink to AGENTS.md.
+!CLAUDE.md
 videocaptioner/_version.py

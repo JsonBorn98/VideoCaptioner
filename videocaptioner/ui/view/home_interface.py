@@ -1,10 +1,12 @@
 from pathlib import Path
 from typing import Optional
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import SegmentedWidget
 
 from videocaptioner.core.llm.context import generate_task_id
+from videocaptioner.ui.common.theme_tokens import app_palette
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.view.subtitle_interface import SubtitleInterface
 from videocaptioner.ui.view.task_creation_interface import TaskCreationInterface
@@ -18,9 +20,11 @@ class HomeInterface(QWidget):
         self._current_task_id: Optional[str] = None  # 当前流程的任务 ID
 
         self.setObjectName("HomeInterface")
+        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
 
         # 创建分段控件和堆叠控件
         self.pivot = SegmentedWidget(self)
+        self.pivot.setObjectName("homePivot")
         self.pivot.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
         self.stackedWidget = QStackedWidget(self)
@@ -63,6 +67,46 @@ class HomeInterface(QWidget):
         )
         self.subtitle_optimization_interface.finished.connect(
             self.switch_to_video_synthesis
+        )
+        self._sync_style()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_style()
+
+    def _sync_style(self):
+        palette = app_palette()
+        self.setStyleSheet(
+            f"""
+            QWidget#HomeInterface {{
+                background: {palette.bg};
+            }}
+            QStackedWidget {{
+                background: {palette.bg};
+                border: none;
+            }}
+            SegmentedWidget#homePivot {{
+                background: {palette.panel};
+                border: 1px solid {palette.line_soft};
+                border-radius: 8px;
+            }}
+            SegmentedWidget#homePivot QPushButton {{
+                color: {palette.muted};
+                background: transparent;
+                border: none;
+                min-height: 36px;
+                font-weight: 760;
+            }}
+            SegmentedWidget#homePivot QPushButton:hover,
+            SegmentedWidget#homePivot QPushButton:checked {{
+                color: {palette.text};
+                background: {palette.selected};
+            }}
+            SegmentedWidget#homePivot QLabel {{
+                color: {palette.text};
+                background: transparent;
+            }}
+            """
         )
 
     def switch_to_transcription(self, file_path, subtitle_path=None):

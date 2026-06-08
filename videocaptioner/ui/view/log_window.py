@@ -1,10 +1,11 @@
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import FluentStyleSheet, PushButton, TextEdit, isDarkTheme
+from qfluentwidgets import FluentStyleSheet, PushButton, TextEdit
 
 from videocaptioner.config import LOG_PATH, RESOURCE_PATH
 from videocaptioner.core.utils.platform_utils import reveal_in_explorer
+from videocaptioner.ui.common.theme_tokens import is_dark_theme
 
 
 class LogWindow(QWidget):
@@ -15,7 +16,7 @@ class LogWindow(QWidget):
 
         FluentStyleSheet.FLUENT_WINDOW.apply(self)
 
-        theme = "dark" if isDarkTheme() else "light"
+        theme = "dark" if is_dark_theme() else "light"
         with open(
             RESOURCE_PATH / "assets" / "qss" / theme / "demo.qss", encoding="utf-8"
         ) as f:

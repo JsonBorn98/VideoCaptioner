@@ -19,7 +19,7 @@ from qfluentwidgets import (
 from videocaptioner.config import ASSETS_PATH, GITHUB_REPO_URL
 from videocaptioner.core.constant import INFOBAR_DURATION_FOREVER
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.components.DonateDialog import DonateDialog
+from videocaptioner.ui.components.donate_dialog import DonateDialog
 from videocaptioner.ui.thread.version_checker_thread import VersionChecker
 from videocaptioner.ui.view.batch_process_interface import BatchProcessInterface
 from videocaptioner.ui.view.doctor_interface import DoctorInterface
@@ -30,6 +30,9 @@ from videocaptioner.ui.view.setting_interface import SettingInterface
 from videocaptioner.ui.view.subtitle_style_interface import SubtitleStyleInterface
 
 LOGO_PATH = ASSETS_PATH / "logo.png"
+NAV_EXPAND_WIDTH = 132
+NAV_MINIMUM_EXPAND_WIDTH = 760
+WINDOW_MINIMUM_WIDTH = 960
 
 
 class MainWindow(FluentWindow):
@@ -45,6 +48,8 @@ class MainWindow(FluentWindow):
         self.doctorInterface = DoctorInterface(self)
         self.batchProcessInterface = BatchProcessInterface(self)
         self.llmLogsInterface = LLMLogsInterface(self)
+        self._lastContentInterface = self.homeInterface
+        self._settingsFullChrome = False
 
         # 初始化版本检查器
         self.versionChecker = VersionChecker()
@@ -68,6 +73,9 @@ class MainWindow(FluentWindow):
 
     def initNavigation(self):
         """初始化导航栏"""
+        self.navigationInterface.setExpandWidth(NAV_EXPAND_WIDTH)
+        self.navigationInterface.setMinimumExpandWidth(NAV_MINIMUM_EXPAND_WIDTH)
+
         # 添加导航项
         self.addSubInterface(self.homeInterface, FIF.HOME, self.tr("主页"))
         self.addSubInterface(self.batchProcessInterface, FIF.VIDEO, self.tr("批量处理"))
@@ -89,9 +97,10 @@ class MainWindow(FluentWindow):
         self.addSubInterface(
             self.settingInterface,
             FIF.SETTING,
-            self.tr("Settings"),
+            self.tr("设置"),
             NavigationItemPosition.BOTTOM,
         )
+        self.settingInterface.backRequested.connect(self._return_from_settings)
 
         # 设置默认界面
         self.switchTo(self.homeInterface)
@@ -101,12 +110,32 @@ class MainWindow(FluentWindow):
             self.setWindowTitle(interface.windowTitle())
         else:
             self.setWindowTitle(self.tr("卡卡字幕助手 -- VideoCaptioner"))
+        if interface is not self.settingInterface:
+            self._lastContentInterface = interface
         self.stackedWidget.setCurrentWidget(interface, popOut=False)
+        self._sync_chrome_for_interface(interface)
+
+    def openSettingsPage(self, page_key: str) -> bool:  # noqa: N802
+        if not self.settingInterface.setCurrentPage(page_key):
+            return False
+        self.switchTo(self.settingInterface)
+        return True
+
+    def _return_from_settings(self):
+        self.switchTo(self._lastContentInterface or self.homeInterface)
+
+    def _sync_chrome_for_interface(self, interface=None):
+        is_settings = interface is self.settingInterface
+        self._settingsFullChrome = is_settings
+        self.navigationInterface.setVisible(not is_settings)
+        left = 0 if is_settings else 46
+        self.titleBar.move(left, 0)
+        self.titleBar.resize(self.width() - left, self.titleBar.height())
 
     def initWindow(self):
         """初始化窗口"""
         self.resize(1050, 800)
-        self.setMinimumWidth(700)
+        self.setMinimumWidth(WINDOW_MINIMUM_WIDTH)
         self.setWindowIcon(QIcon(str(LOGO_PATH)))
         self.setWindowTitle(self.tr("卡卡字幕助手 -- VideoCaptioner"))
 
@@ -180,6 +209,9 @@ class MainWindow(FluentWindow):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        left = 0 if getattr(self, "_settingsFullChrome", False) else 46
+        self.titleBar.move(left, 0)
+        self.titleBar.resize(self.width() - left, self.titleBar.height())
         if hasattr(self, "splashScreen"):
             self.splashScreen.resize(self.size())
 

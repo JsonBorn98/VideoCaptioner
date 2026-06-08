@@ -38,8 +38,8 @@ from videocaptioner.core.entities import (
     SupportedVideoFormats,
 )
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.common.signal_bus import signalBus
-from videocaptioner.ui.components.DonateDialog import DonateDialog
+from videocaptioner.ui.common.theme_tokens import app_palette
+from videocaptioner.ui.components.donate_dialog import DonateDialog
 from videocaptioner.ui.thread.video_download_thread import VideoDownloadThread
 from videocaptioner.ui.view.log_window import LogWindow
 
@@ -70,13 +70,15 @@ class TaskCreationInterface(QWidget):
     def setup_ui(self):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setObjectName("main_layout")
-        self.main_layout.setSpacing(20)
-        self.main_layout.addSpacing(90)
+        self.main_layout.setContentsMargins(0, 0, 0, 14)
+        self.main_layout.setSpacing(14)
+        self.main_layout.addSpacing(48)
         self.setup_logo()
         self.setup_heading()
         self.setup_search_layout()
         self.setup_status_layout()
         self.setup_info_label()
+        self._sync_style()
 
     def setup_logo(self):
         self.logo_label = QLabel(self)
@@ -94,20 +96,20 @@ class TaskCreationInterface(QWidget):
 
     def setup_heading(self):
         self.heading_title = TitleLabel(self.tr("导入视频，生成字幕与配音"), self)
+        self.heading_title.setObjectName("taskHeadingTitle")
         self.heading_title.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.heading_desc = CaptionLabel(self.tr("拖入本地媒体，或粘贴在线视频链接开始处理"), self)
+        self.heading_desc = CaptionLabel(self.tr("拖入本地媒体，或粘贴视频链接开始处理"), self)
+        self.heading_desc.setObjectName("taskHeadingDesc")
         self.heading_desc.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.heading_hint = CaptionLabel(self.tr("选择本地视频/音频，或粘贴 B 站、YouTube 等视频链接后点击开始处理"), self)
-        self.heading_hint.setAlignment(Qt.AlignCenter)  # type: ignore
         self.main_layout.addWidget(self.heading_title)
         self.main_layout.addWidget(self.heading_desc)
-        self.main_layout.addWidget(self.heading_hint)
         self.main_layout.addSpacing(18)
 
     def setup_search_layout(self):
         self.search_layout = QHBoxLayout()
         self.search_layout.setContentsMargins(120, 0, 120, 0)
         self.search_input = LineEdit(self)
+        self.search_input.setObjectName("taskSearchInput")
         self.search_input.setPlaceholderText(self.tr("粘贴视频链接，或拖拽文件到这里"))
         self.search_input.setFixedHeight(40)
         self.search_input.setClearButtonEnabled(True)
@@ -124,14 +126,14 @@ class TaskCreationInterface(QWidget):
         self.search_layout.addWidget(self.start_button)
         self.search_layout.setSpacing(10)
         self.main_layout.addLayout(self.search_layout)
-        self.main_layout.addSpacing(70)
+        self.main_layout.addSpacing(18)
 
     def setup_status_layout(self):
         self.status_layout = QVBoxLayout()
         self.status_layout.setContentsMargins(50, 0, 30, 5)
         self.status_layout.setAlignment(Qt.AlignBottom | Qt.AlignHCenter)  # type: ignore
         self.status_label = BodyLabel(self.tr("准备就绪"), self)
-        self.status_label.setStyleSheet("font-size: 14px; color: #888888;")
+        self.status_label.setObjectName("taskStatusLabel")
         self.status_layout.addWidget(self.status_label, 0, Qt.AlignCenter)  # type: ignore
         self.progress_bar = ProgressBar(self)
         self.status_label.hide()
@@ -139,7 +141,6 @@ class TaskCreationInterface(QWidget):
         self.progress_bar.setFixedWidth(300)
         self.status_layout.addWidget(self.progress_bar, 0, Qt.AlignCenter)  # type: ignore
 
-        self.main_layout.addStretch(1)
         self.main_layout.addLayout(self.status_layout)
 
     def setup_info_label(self):
@@ -158,8 +159,8 @@ class TaskCreationInterface(QWidget):
         self.info_label = BodyLabel(
             self.tr(f"©VideoCaptioner {VERSION} • By Weifeng"), self
         )
+        self.info_label.setObjectName("taskInfoLabel")
         self.info_label.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.info_label.setStyleSheet("font-size: 12px; color: #888888;")
 
         # 将组件添加到底部布局
         bottom_layout.addStretch()
@@ -171,6 +172,47 @@ class TaskCreationInterface(QWidget):
         self.main_layout.addStretch()
         self.main_layout.addWidget(bottom_container)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_style()
+
+    def _sync_style(self):
+        palette = app_palette()
+        self.setStyleSheet(
+            f"""
+            QWidget#TaskCreationInterface {{
+                background: {palette.bg};
+            }}
+            TitleLabel#taskHeadingTitle {{
+                color: {palette.text};
+                background: transparent;
+                font-weight: 840;
+            }}
+            CaptionLabel#taskHeadingDesc {{
+                color: {palette.muted};
+                background: transparent;
+            }}
+            BodyLabel#taskStatusLabel,
+            BodyLabel#taskInfoLabel {{
+                color: {palette.subtle};
+                background: transparent;
+                font-size: 12px;
+            }}
+            LineEdit#taskSearchInput {{
+                color: {palette.text};
+                background: {palette.field};
+                border: 1px solid {palette.line};
+                border-radius: 8px;
+                padding: 0 12px;
+            }}
+            HyperlinkButton {{
+                color: {palette.accent};
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+
     def setup_signals(self):
         self.start_button.clicked.connect(self.on_start_clicked)
         self.search_input.textChanged.connect(self.on_search_input_changed)
@@ -180,7 +222,6 @@ class TaskCreationInterface(QWidget):
     def setup_values(self):
         self.search_input.setText("")
         cfg.set(cfg.need_translate, True)
-        signalBus.subtitle_translation_changed.emit(True)
 
     def on_start_clicked(self):
         if self._start_mode == "browse":

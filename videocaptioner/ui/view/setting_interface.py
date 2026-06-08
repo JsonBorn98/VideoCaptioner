@@ -1,35 +1,27 @@
+from __future__ import annotations
+
 import webbrowser
 from pathlib import Path
+from typing import Any
 
-from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtWidgets import QFileDialog, QLabel, QWidget
-from qfluentwidgets import (
-    ComboBoxSettingCard,
-    CustomColorSettingCard,
-    ExpandLayout,
-    HyperlinkCard,
-    InfoBar,
-    OptionsSettingCard,
-    PrimaryPushSettingCard,
-    PushSettingCard,
-    RangeSettingCard,
-    ScrollArea,
-    SettingCardGroup,
-    SwitchSettingCard,
-    setTheme,
-    setThemeColor,
-)
-from qfluentwidgets import FluentIcon as FIF
+from PyQt5.QtCore import QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import QColor, QDesktopServices
+from PyQt5.QtWidgets import QColorDialog, QFileDialog, QHBoxLayout, QSizePolicy, QWidget
+from qfluentwidgets import InfoBar, setTheme, setThemeColor
 
 from videocaptioner.config import AUTHOR, FEEDBACK_URL, HELP_URL, RELEASE_URL, VERSION, YEAR
+from videocaptioner.core.asr.fun_asr import check_fun_asr_connection
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
     INFOBAR_DURATION_SUCCESS,
     INFOBAR_DURATION_WARNING,
 )
 from videocaptioner.core.dubbing import build_dubbing_config, get_dubbing_preset
-from videocaptioner.core.entities import LLMServiceEnum, TranscribeModelEnum, TranslatorServiceEnum
+from videocaptioner.core.entities import (
+    LLMServiceEnum,
+    TranscribeModelEnum,
+    TranslatorServiceEnum,
+)
 from videocaptioner.core.llm import check_whisper_connection
 from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
 from videocaptioner.core.speech import (
@@ -38,349 +30,1339 @@ from videocaptioner.core.speech import (
     create_speech_synthesizer,
 )
 from videocaptioner.core.utils.cache import disable_cache, enable_cache
-from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.common.config import DEFAULT_THEME_COLOR, cfg
 from videocaptioner.ui.common.dubbing_options import (
-    get_provider_key_by_title,
     get_provider_option,
-    get_provider_titles,
     get_provider_voices,
-    get_voice_title,
     is_provider_default_base,
 )
-from videocaptioner.ui.common.signal_bus import signalBus
-from videocaptioner.ui.components.EditComboBoxSettingCard import EditComboBoxSettingCard
-from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
+from videocaptioner.ui.components.settings_controls import (
+    CONTROL_WIDTH,
+    BoundComboBox,
+    BoundEditableComboBox,
+    BoundFloatSlider,
+    BoundLineEdit,
+    BoundSlider,
+    BoundSwitch,
+    ColorSwatchButton,
+    Option,
+    SettingRow,
+    SettingsGroup,
+    SettingsShell,
+    make_button,
+    make_value_label,
+    options_from,
+)
+
+SETTINGS_PAGE_ALIASES = {
+    "asr": "transcribe",
+    "transcription": "transcribe",
+    "transcribe": "transcribe",
+    "llm": "llm",
+    "model": "llm",
+    "models": "llm",
+    "translate-service": "translate-service",
+    "translator": "translate-service",
+    "translation-service": "translate-service",
+    "translate": "translate",
+    "translation": "translate",
+    "optimize": "translate",
+    "subtitle": "subtitle",
+    "subtitle-synthesis": "subtitle",
+    "video-synthesis": "subtitle",
+    "dubbing": "dubbing",
+    "tts": "dubbing",
+    "voice": "dubbing",
+    "save": "save",
+    "output": "save",
+    "personal": "personal",
+    "appearance": "personal",
+    "about": "about",
+}
 
 
-class SettingInterface(ScrollArea):
-    """设置界面"""
+def normalize_settings_page_key(page_key: str) -> str:
+    return SETTINGS_PAGE_ALIASES.get(str(page_key or "").strip().lower(), page_key)
+
+
+class SettingInterface(SettingsShell):
+    """First-party settings page backed by the shared TOML config."""
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setWindowTitle(self.tr("设置"))
-        self.scrollWidget = QWidget()
-        self.expandLayout = ExpandLayout(self.scrollWidget)
-        self.settingLabel = QLabel(self.tr("设置"), self)
+        self._threads: list[QThread] = []
 
-        # 初始化所有设置组
-        self.__initGroups()
-        # 初始化所有配置卡片
-        self.__initCards()
-        # 初始化界面
-        self.__initWidget()
-        # 初始化布局
-        self.__initLayout()
-        # 连接信号和槽
-        self.__connectSignalToSlot()
+        self._build_pages()
+        self._connect_signals()
+        self._refresh_transcribe_rows(cfg.transcribe_model.value)
+        self._refresh_llm_rows(cfg.llm_service.value)
+        self._refresh_translate_rows(cfg.translator_service.value)
+        self._refresh_dubbing_rows(cfg.dubbing_provider.value)
+        self._sync_theme_color_swatch(cfg.themeColor.value)
+        self.setCurrentPage("transcribe")
 
-    def __initGroups(self):
-        """初始化所有设置组"""
-        # 转录配置组
-        self.transcribeGroup = SettingCardGroup(self.tr("转录配置"), self.scrollWidget)
-        # LLM配置组
-        self.llmGroup = SettingCardGroup(self.tr("LLM配置"), self.scrollWidget)
-        # 翻译服务组
-        self.translate_serviceGroup = SettingCardGroup(
-            self.tr("翻译服务"), self.scrollWidget
+    def _build_pages(self) -> None:
+        self.transcribePage = self.addPage("transcribe", "转录配置")
+        self.llmPage = self.addPage("llm", "LLM 配置")
+        self.translateServicePage = self.addPage("translate-service", "翻译服务")
+        self.translatePage = self.addPage("translate", "翻译与优化")
+        self.subtitlePage = self.addPage("subtitle", "字幕合成配置")
+        self.dubbingPage = self.addPage("dubbing", "配音配置")
+        self.savePage = self.addPage("save", "保存配置")
+        self.personalPage = self.addPage("personal", "个性化")
+        self.aboutPage = self.addPage("about", "关于")
+
+        self._build_transcribe_page()
+        self._build_llm_page()
+        self._build_translate_service_page()
+        self._build_translate_page()
+        self._build_subtitle_page()
+        self._build_dubbing_page()
+        self._build_save_page()
+        self._build_personal_page()
+        self._build_about_page()
+
+    def setCurrentPage(self, key: str) -> bool:  # noqa: N802
+        return super().setCurrentPage(normalize_settings_page_key(key))
+
+    def _build_transcribe_page(self) -> None:
+        group = SettingsGroup("", self.transcribePage.container)
+        self.transcribeModelControl = BoundComboBox(
+            cfg.transcribe_model,
+            options_from(cfg.transcribe_model.validator.options),
+            group,
         )
-        # 翻译与优化组
-        self.translateGroup = SettingCardGroup(self.tr("翻译与优化"), self.scrollWidget)
-        # 字幕合成配置组
-        self.subtitleGroup = SettingCardGroup(
-            self.tr("字幕合成配置"), self.scrollWidget
-        )
-        # 配音配置组
-        self.dubbingGroup = SettingCardGroup(self.tr("配音配置"), self.scrollWidget)
-        # 保存配置组
-        self.saveGroup = SettingCardGroup(self.tr("保存配置"), self.scrollWidget)
-        # 个性化组
-        self.personalGroup = SettingCardGroup(self.tr("个性化"), self.scrollWidget)
-        # 关于组
-        self.aboutGroup = SettingCardGroup(self.tr("关于"), self.scrollWidget)
-
-    def __initCards(self):
-        """初始化所有配置卡片"""
-
-        # ASR 服务配置卡片
-        self.__createASRServiceCards()
-
-        # LLM配置卡片
-        self.__createLLMServiceCards()
-
-        # 翻译配置卡片
-        self.__createTranslateServiceCards()
-
-        # 翻译与优化配置卡片
-        self.subtitleCorrectCard = SwitchSettingCard(
-            FIF.EDIT,
-            self.tr("字幕校正"),
-            self.tr("字幕处理过程是否对生成的字幕错别字、名词等进行校正"),
-            cfg.need_optimize,
-            self.translateGroup,
-        )
-        self.subtitleTranslateCard = SwitchSettingCard(
-            FIF.LANGUAGE,
-            self.tr("字幕翻译"),
-            self.tr("字幕处理过程是否对生成的字幕进行翻译"),
-            cfg.need_translate,
-            self.translateGroup,
-        )
-        self.targetLanguageCard = ComboBoxSettingCard(
-            cfg.target_language,
-            FIF.LANGUAGE,
-            self.tr("目标语言"),
-            self.tr("选择翻译字幕的目标语言"),
-            texts=[lang.value for lang in cfg.target_language.validator.options],  # type: ignore
-            parent=self.translateGroup,
+        self.transcribeModelRow = group.addRow(
+            SettingRow(
+                self.tr("转录模型"),
+                self.tr("选择生成原始字幕时使用的语音识别服务。"),
+                self.transcribeModelControl,
+                group,
+            )
         )
 
-        # 字幕合成配置卡片
-        self.subtitleStyleCard = HyperlinkCard(
-            "",
-            self.tr("修改"),
-            FIF.FONT,
-            self.tr("字幕样式"),
-            self.tr("选择字幕的样式（颜色、大小、字体等）"),
-            self.subtitleGroup,
+        self.transcribeOutputRow = group.addRow(
+            SettingRow(
+                self.tr("输出格式"),
+                self.tr("转录完成后保存的字幕文件格式。"),
+                BoundComboBox(
+                    cfg.transcribe_output_format,
+                    options_from(cfg.transcribe_output_format.validator.options),
+                    group,
+                ),
+                group,
+            )
         )
-        self.subtitleLayoutCard = HyperlinkCard(
-            "",
-            self.tr("修改"),
-            FIF.FONT,
-            self.tr("字幕布局"),
-            self.tr("选择字幕的布局（单语、双语）"),
-            self.subtitleGroup,
-        )
-        self.needVideoCard = SwitchSettingCard(
-            FIF.VIDEO,
-            self.tr("需要合成视频"),
-            self.tr("开启时触发合成视频，关闭时跳过"),
-            cfg.need_video,
-            self.subtitleGroup,
-        )
-        self.softSubtitleCard = SwitchSettingCard(
-            FIF.FONT,
-            self.tr("软字幕"),
-            self.tr("开启时字幕可在播放器中关闭或调整，关闭时字幕烧录到视频画面上"),
-            cfg.soft_subtitle,
-            self.subtitleGroup,
-        )
-        self.videoQualityCard = ComboBoxSettingCard(
-            cfg.video_quality,
-            FIF.SPEED_HIGH,
-            self.tr("视频合成质量"),
-            self.tr("硬字幕视频合成时的质量等级（质量越高文件越大，编码时间越长）"),
-            texts=[quality.value for quality in cfg.video_quality.validator.options],  # type: ignore
-            parent=self.subtitleGroup,
+        self.transcribeLanguageRow = group.addRow(
+            SettingRow(
+                self.tr("源语言"),
+                self.tr("音视频中说话的语言，不确定时保持自动检测。"),
+                BoundComboBox(
+                    cfg.transcribe_language,
+                    options_from(cfg.transcribe_language.validator.options),
+                    group,
+                ),
+                group,
+            )
         )
 
-        # 配音配置卡片
-        self.dubbingProviderCard = ComboBoxSettingCard(
-            cfg.dubbing_provider,
-            FIF.ROBOT,
-            self.tr("配音提供商"),
-            self.tr("Edge 免费免 Key；Gemini 和 SiliconFlow 需要 API Key"),
-            texts=get_provider_titles(),
-            parent=self.dubbingGroup,
+        self.whisperApiBaseRow = group.addRow(
+            SettingRow(
+                self.tr("Whisper API Base URL"),
+                self.tr("使用 Whisper API 时请求的服务地址。"),
+                BoundLineEdit(cfg.whisper_api_base, "https://api.openai.com/v1", group),
+                group,
+            )
         )
-        self.dubbingEnabledCard = SwitchSettingCard(
-            FIF.VOLUME,
-            self.tr("默认添加配音"),
-            self.tr("开启后，最终合成页会默认生成配音"),
-            cfg.dubbing_enabled,
-            self.dubbingGroup,
+        self.whisperApiKeyRow = group.addRow(
+            SettingRow(
+                self.tr("Whisper API Key"),
+                self.tr("使用 Whisper API 转录时需要填写。"),
+                BoundLineEdit(cfg.whisper_api_key, "sk-", group, password=True),
+                group,
+            )
         )
-        self.dubbingPresetCard = ComboBoxSettingCard(
-            cfg.dubbing_preset,
-            FIF.VOLUME,
-            self.tr("默认配音音色"),
-            self.tr("Edge 音色免 API Key；Gemini 和 SiliconFlow 需要填写配音 API Key"),
-            texts=list(cfg.dubbing_preset.validator.options),  # type: ignore
-            parent=self.dubbingGroup,
+        self.whisperApiModelControl = BoundEditableComboBox(
+            cfg.whisper_api_model,
+            ["whisper-1", "whisper-large-v3-turbo"],
+            group,
         )
-        self.dubbingApiKeyCard = LineEditSettingCard(
-            cfg.dubbing_api_key,
-            FIF.FINGERPRINT,
-            self.tr("配音 API Key"),
-            self.tr("Gemini 或 SiliconFlow 配音需要填写；Edge 可留空"),
-            "",
-            self.dubbingGroup,
+        self.whisperApiModelRow = group.addRow(
+            SettingRow(
+                self.tr("Whisper 模型"),
+                self.tr("填写服务商支持的音频转录模型名。"),
+                self.whisperApiModelControl,
+                group,
+            )
         )
-        self.dubbingApiBaseCard = LineEditSettingCard(
-            cfg.dubbing_api_base,
-            FIF.LINK,
-            self.tr("配音 Base URL"),
-            self.tr("仅自定义 SiliconFlow/Gemini 接口时需要修改"),
-            "https://api.siliconflow.cn/v1",
-            self.dubbingGroup,
+        self.whisperApiPromptRow = group.addRow(
+            SettingRow(
+                self.tr("提示词"),
+                self.tr("可选的转录提示词，默认空。"),
+                BoundLineEdit(cfg.whisper_api_prompt, self.tr("未填写"), group),
+                group,
+            )
         )
-        self.dubbingModelCard = EditComboBoxSettingCard(
-            cfg.dubbing_model,
-            FIF.ROBOT,  # type: ignore
-            self.tr("配音模型"),
-            self.tr("Gemini 或 SiliconFlow 使用的文字转语音模型；Edge 会自动使用 edge-tts"),
-            [],
-            self.dubbingGroup,
-        )
-        self.checkDubbingConnectionCard = PushSettingCard(
-            self.tr("测试配音"),
-            FIF.CONNECT,
-            self.tr("测试当前配音配置"),
-            self.tr("合成一句试听音频，验证音色、API Key、Base URL 和模型是否可用"),
-            self.dubbingGroup,
-        )
-        self.dubbingWorkersCard = RangeSettingCard(
-            cfg.dubbing_tts_workers,
-            FIF.SPEED_HIGH,
-            self.tr("配音并发"),
-            self.tr("同时合成的字幕行数，默认 5"),
-            parent=self.dubbingGroup,
+        self.checkWhisperButton = make_button(self.tr("测试连接"), parent=group)
+        self.checkWhisperRow = group.addRow(
+            SettingRow(
+                self.tr("Whisper 连接"),
+                self.tr("用当前 Base URL、API Key 和模型发起一次短音频测试。"),
+                self.checkWhisperButton,
+                group,
+            )
         )
 
-        # 保存配置卡片
-        self.savePathCard = PushSettingCard(
-            self.tr("工作文件夹"),
-            FIF.SAVE,
-            self.tr("工作目录路径"),
-            cfg.get(cfg.work_dir),
-            self.saveGroup,
+        self.whisperCppModelRow = group.addRow(
+            SettingRow(
+                self.tr("WhisperCpp 模型"),
+                self.tr("选择本地 whisper.cpp 转录模型。"),
+                BoundComboBox(
+                    cfg.whisper_model,
+                    options_from(cfg.whisper_model.validator.options),
+                    group,
+                ),
+                group,
+            )
         )
 
-        # 个性化配置卡片
-        self.cacheEnabledCard = SwitchSettingCard(
-            FIF.HISTORY,
-            self.tr("启用缓存"),
-            self.tr("相同配置下会复用之前的 ASR 和 LLM 结果；关闭缓存后每次重新生成"),
-            cfg.cache_enabled,
-            self.personalGroup,
+        self.fasterWhisperModelRow = group.addRow(
+            SettingRow(
+                self.tr("Faster Whisper 模型"),
+                self.tr("选择已下载的 Faster Whisper 模型。"),
+                BoundComboBox(
+                    cfg.faster_whisper_model,
+                    options_from(cfg.faster_whisper_model.validator.options),
+                    group,
+                ),
+                group,
+            )
         )
-        self.themeCard = OptionsSettingCard(
-            cfg.themeMode,
-            FIF.BRUSH,
-            self.tr("应用主题"),
-            self.tr("更改应用程序的外观"),
-            texts=[self.tr("浅色"), self.tr("深色"), self.tr("使用系统设置")],
-            parent=self.personalGroup,
+        self.fasterWhisperDirLabel = make_value_label(cfg.faster_whisper_model_dir.value or self.tr("未选择"), group)
+        self.fasterWhisperDirButton = make_button(self.tr("选择目录"), parent=group)
+        self.fasterWhisperDirRow = group.addRow(
+            SettingRow(
+                self.tr("模型目录"),
+                self.tr("Faster Whisper 模型所在文件夹。"),
+                self._two_controls(self.fasterWhisperDirLabel, self.fasterWhisperDirButton, group),
+                group,
+            )
         )
-        self.themeColorCard = CustomColorSettingCard(
-            cfg.themeColor,
-            FIF.PALETTE,
-            self.tr("主题颜色"),
-            self.tr("更改应用程序的主题颜色"),
-            self.personalGroup,
+        self.fasterWhisperDeviceRow = group.addRow(
+            SettingRow(
+                self.tr("运行设备"),
+                self.tr("模型运行设备，通常保持 auto。"),
+                BoundComboBox(
+                    cfg.faster_whisper_device,
+                    options_from(cfg.faster_whisper_device.validator.options),
+                    group,
+                ),
+                group,
+            )
         )
-        self.zoomCard = OptionsSettingCard(
-            cfg.dpiScale,
-            FIF.ZOOM,
-            self.tr("界面缩放"),
-            self.tr("更改小部件和字体的大小"),
-            texts=["100%", "125%", "150%", "175%", "200%", self.tr("使用系统设置")],
-            parent=self.personalGroup,
+        self.fasterWhisperVadFilterRow = group.addRow(
+            SettingRow(
+                self.tr("VAD 过滤"),
+                self.tr("过滤无人声片段，减少识别幻觉。"),
+                BoundSwitch(cfg.faster_whisper_vad_filter, group),
+                group,
+            )
         )
-        self.languageCard = ComboBoxSettingCard(
-            cfg.language,
-            FIF.LANGUAGE,
-            self.tr("语言"),
-            self.tr("设置您偏好的界面语言"),
-            texts=["简体中文", "繁體中文", "English", self.tr("使用系统设置")],
-            parent=self.personalGroup,
+        self.fasterWhisperVadThresholdRow = group.addRow(
+            SettingRow(
+                self.tr("VAD 阈值"),
+                self.tr("语音概率阈值，高于此值视为语音。"),
+                BoundFloatSlider(cfg.faster_whisper_vad_threshold, 2, group),
+                group,
+            )
+        )
+        self.fasterWhisperVadMethodRow = group.addRow(
+            SettingRow(
+                self.tr("VAD 方法"),
+                self.tr("选择语音活动检测方法。"),
+                BoundComboBox(
+                    cfg.faster_whisper_vad_method,
+                    options_from(cfg.faster_whisper_vad_method.validator.options),
+                    group,
+                ),
+                group,
+            )
+        )
+        self.fasterWhisperVoiceExtractionRow = group.addRow(
+            SettingRow(
+                self.tr("人声分离"),
+                self.tr("处理前分离人声和背景音乐。"),
+                BoundSwitch(cfg.faster_whisper_ff_mdx_kim2, group),
+                group,
+            )
+        )
+        self.fasterWhisperOneWordRow = group.addRow(
+            SettingRow(
+                self.tr("单字时间戳"),
+                self.tr("开启后生成单字级时间戳。"),
+                BoundSwitch(cfg.faster_whisper_one_word, group),
+                group,
+            )
+        )
+        self.fasterWhisperPromptRow = group.addRow(
+            SettingRow(
+                self.tr("提示词"),
+                self.tr("可选的转录提示词，默认空。"),
+                BoundLineEdit(cfg.faster_whisper_prompt, self.tr("未填写"), group),
+                group,
+            )
         )
 
-        # 关于卡片
-        self.helpCard = HyperlinkCard(
-            HELP_URL,
-            self.tr("打开帮助页面"),
-            FIF.HELP,
-            self.tr("帮助"),
-            self.tr("发现新功能并了解有关VideoCaptioner的使用技巧"),
-            self.aboutGroup,
+        self.funAsrKeyRow = group.addRow(
+            SettingRow(
+                self.tr("百炼 API Key"),
+                self.tr("百炼 Fun-ASR 转录需要填写。"),
+                BoundLineEdit(cfg.fun_asr_api_key, "sk-", group, password=True),
+                group,
+            )
         )
-        self.feedbackCard = PrimaryPushSettingCard(
-            self.tr("提供反馈"),
-            FIF.FEEDBACK,
-            self.tr("提供反馈"),
-            self.tr("提供反馈帮助我们改进VideoCaptioner"),
-            self.aboutGroup,
+        self.funAsrModelControl = BoundEditableComboBox(
+            cfg.fun_asr_model,
+            [
+                "fun-asr",
+                "fun-asr-2025-11-07",
+                "fun-asr-2025-08-25",
+                "fun-asr-mtl",
+                "fun-asr-mtl-2025-08-25",
+            ],
+            group,
         )
-        self.aboutCard = PrimaryPushSettingCard(
-            self.tr("检查更新"),
-            FIF.INFO,
-            self.tr("关于"),
-            "© "
-            + self.tr("版权所有")
-            + f" {YEAR}, {AUTHOR}. "
-            + self.tr("版本")
-            + " "
-            + VERSION,
-            self.aboutGroup,
+        self.funAsrModelRow = group.addRow(
+            SettingRow(
+                self.tr("百炼 ASR 模型"),
+                self.tr("填写百炼控制台里可用的语音识别模型 Code。"),
+                self.funAsrModelControl,
+                group,
+            )
         )
+        self.checkFunAsrButton = make_button(self.tr("测试连接"), parent=group)
+        self.checkFunAsrRow = group.addRow(
+            SettingRow(
+                self.tr("百炼连接"),
+                self.tr("验证 API Key 和模型是否可访问。"),
+                self.checkFunAsrButton,
+                group,
+            )
+        )
+        self.transcribePage.addGroup(group)
 
-        # 添加卡片到对应的组
-        self.translateGroup.addSettingCard(self.subtitleCorrectCard)
-        self.translateGroup.addSettingCard(self.subtitleTranslateCard)
-        self.translateGroup.addSettingCard(self.targetLanguageCard)
-
-        self.subtitleGroup.addSettingCard(self.subtitleStyleCard)
-        self.subtitleGroup.addSettingCard(self.subtitleLayoutCard)
-        self.subtitleGroup.addSettingCard(self.needVideoCard)
-        self.subtitleGroup.addSettingCard(self.softSubtitleCard)
-        self.subtitleGroup.addSettingCard(self.videoQualityCard)
-
-        self.dubbingGroup.addSettingCard(self.dubbingEnabledCard)
-        self.dubbingGroup.addSettingCard(self.dubbingProviderCard)
-        self.dubbingGroup.addSettingCard(self.dubbingPresetCard)
-        self.dubbingGroup.addSettingCard(self.dubbingApiKeyCard)
-        self.dubbingGroup.addSettingCard(self.dubbingApiBaseCard)
-        self.dubbingGroup.addSettingCard(self.dubbingModelCard)
-        self.dubbingGroup.addSettingCard(self.checkDubbingConnectionCard)
-        self.dubbingGroup.addSettingCard(self.dubbingWorkersCard)
-
-        self.saveGroup.addSettingCard(self.savePathCard)
-        self.saveGroup.addSettingCard(self.cacheEnabledCard)
-
-        self.personalGroup.addSettingCard(self.themeCard)
-        self.personalGroup.addSettingCard(self.themeColorCard)
-        self.personalGroup.addSettingCard(self.zoomCard)
-        self.personalGroup.addSettingCard(self.languageCard)
-
-        self.aboutGroup.addSettingCard(self.helpCard)
-        self.aboutGroup.addSettingCard(self.feedbackCard)
-        self.aboutGroup.addSettingCard(self.aboutCard)
-
-    def __createLLMServiceCards(self):
-        """创建LLM服务相关的配置卡片"""
-        # 服务选择卡片
-        self.llmServiceCard = ComboBoxSettingCard(
+    def _build_llm_page(self) -> None:
+        group = SettingsGroup("", self.llmPage.container)
+        self.llmServiceControl = BoundComboBox(
             cfg.llm_service,
-            FIF.ROBOT,
-            self.tr("LLM 提供商"),
-            self.tr("选择大模型提供商，用于字幕断句、优化、翻译"),
-            texts=[service.value for service in cfg.llm_service.validator.options],  # type: ignore
-            parent=self.llmGroup,
+            options_from(cfg.llm_service.validator.options),
+            group,
         )
-        self.llmServiceCard.comboBox.setMinimumWidth(150)
-
-        # 创建OPENAI官方API链接卡片
-        self.openaiOfficialApiCard = HyperlinkCard(
-            "https://api.videocaptioner.cn/register?aff=UrLB",
-            self.tr("访问"),
-            FIF.DEVELOPER_TOOLS,
-            self.tr("VideoCaptioner 官方API"),
-            self.tr("集成多种大语言模型，支持高并发字幕优化、翻译"),
-            self.llmGroup,
+        self.llmServiceRow = group.addRow(
+            SettingRow(
+                self.tr("LLM 提供商"),
+                self.tr("用于字幕断句、校正和 LLM 翻译。"),
+                self.llmServiceControl,
+                group,
+            )
         )
-        # 默认隐藏
-        self.openaiOfficialApiCard.setVisible(False)
 
-        # 定义每个服务的配置
-        service_configs = {
+        self.llmProviderRows: dict[LLMServiceEnum, list[SettingRow]] = {}
+        self.llmApiBaseRows: dict[LLMServiceEnum, SettingRow] = {}
+        self.llmDefaultBases: dict[LLMServiceEnum, str] = {}
+        self.llmProviderSpecs = self._llm_provider_specs()
+        self.llmProviderControls: dict[LLMServiceEnum, dict[str, BoundLineEdit | BoundEditableComboBox]] = {}
+        for service, provider in self.llmProviderSpecs.items():
+            api_key = BoundLineEdit(provider["api_key"], "sk-", group, password=True)
+            api_base = BoundLineEdit(provider["api_base"], provider["default_base"], group)
+            model = BoundEditableComboBox(
+                provider["model"],
+                self._llm_model_options_for_provider(provider),
+                group,
+            )
+            api_key_row = group.addRow(
+                SettingRow(
+                    self.tr("API Key"),
+                    self.tr("{service} 调用大模型时使用。").format(service=service.value),
+                    api_key,
+                    group,
+                )
+            )
+            api_base_row = group.addRow(
+                SettingRow(
+                    self.tr("Base URL"),
+                    self.tr("仅 OpenAI 兼容或本地服务需要修改。"),
+                    api_base,
+                    group,
+                )
+            )
+            model_row = group.addRow(
+                SettingRow(
+                    self.tr("模型"),
+                    self.tr("用于断句、校正、翻译的大模型名称。"),
+                    model,
+                    group,
+                )
+            )
+            rows = [api_key_row, api_base_row, model_row]
+            self.llmApiBaseRows[service] = api_base_row
+            self.llmDefaultBases[service] = str(provider["default_base"])
+            self.llmProviderRows[service] = rows
+            self.llmProviderControls[service] = {
+                "api_key": api_key,
+                "api_base": api_base,
+                "model": model,
+            }
+
+        self.loadLLMModelsButton = make_button(self.tr("加载模型"), parent=group)
+        self.checkLLMButton = make_button(self.tr("测试连接"), parent=group)
+        self.checkLLMRow = group.addRow(
+            SettingRow(
+                self.tr("模型服务"),
+                self.tr("先加载可用模型，再用当前模型测试连通性。"),
+                self._two_controls(self.loadLLMModelsButton, self.checkLLMButton, group),
+                group,
+            )
+        )
+        self.llmPage.addGroup(group)
+
+    def _build_translate_service_page(self) -> None:
+        group = SettingsGroup("", self.translateServicePage.container)
+        self.translatorServiceControl = BoundComboBox(
+            cfg.translator_service,
+            options_from(cfg.translator_service.validator.options),
+            group,
+        )
+        self.translatorServiceRow = group.addRow(
+            SettingRow(
+                self.tr("翻译服务"),
+                self.tr("选择字幕翻译使用的服务。"),
+                self.translatorServiceControl,
+                group,
+            )
+        )
+        self.needReflectTranslateRow = group.addRow(
+            SettingRow(
+                self.tr("反思翻译"),
+                self.tr("仅 LLM 翻译时使用，会增加模型调用量。"),
+                BoundSwitch(cfg.need_reflect_translate, group),
+                group,
+            )
+        )
+        self.deeplxEndpointRow = group.addRow(
+            SettingRow(
+                self.tr("DeepLx 后端"),
+                self.tr("选择 DeepLx 翻译时需要填写。"),
+                BoundLineEdit(cfg.deeplx_endpoint, "https://api.deeplx.org/translate", group),
+                group,
+            )
+        )
+        self.batchSizeRow = group.addRow(
+            SettingRow(
+                self.tr("批处理大小"),
+                self.tr("LLM 翻译每批处理的字幕数量。"),
+                BoundSlider(cfg.batch_size, group),
+                group,
+            )
+        )
+        self.threadNumRow = group.addRow(
+            SettingRow(
+                self.tr("并发数"),
+                self.tr("模型服务允许的情况下可以调高。"),
+                BoundSlider(cfg.thread_num, group),
+                group,
+            )
+        )
+        self.translateServicePage.addGroup(group)
+
+    def _build_translate_page(self) -> None:
+        group = SettingsGroup("", self.translatePage.container)
+        group.addRow(
+            SettingRow(
+                self.tr("字幕校正"),
+                self.tr("处理字幕时修正识别错误和专有名词。"),
+                BoundSwitch(cfg.need_optimize, group),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("字幕翻译"),
+                self.tr("处理字幕时生成目标语言译文。"),
+                BoundSwitch(cfg.need_translate, group),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("字幕断句"),
+                self.tr("按字数和语义重新切分长字幕。"),
+                BoundSwitch(cfg.need_split, group),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("目标语言"),
+                self.tr("翻译字幕输出的目标语言。"),
+                BoundComboBox(
+                    cfg.target_language,
+                    options_from(cfg.target_language.validator.options),
+                    group,
+                ),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("中文字幕长度"),
+                self.tr("断句时每条字幕的中文最大字数。"),
+                BoundSlider(cfg.max_word_count_cjk, group),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("英文字幕长度"),
+                self.tr("断句时每条字幕的英文最大词数。"),
+                BoundSlider(cfg.max_word_count_english, group),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("自定义提示词"),
+                self.tr("补充给字幕校正和翻译的大模型提示。"),
+                BoundLineEdit(cfg.custom_prompt_text, self.tr("未填写"), group),
+                group,
+            )
+        )
+        self.translatePage.addGroup(group)
+
+    def _build_subtitle_page(self) -> None:
+        synth_group = SettingsGroup("", self.subtitlePage.container)
+        self.subtitleStyleButton = make_button(self.tr("打开样式页"), parent=synth_group)
+        synth_group.addRow(
+            SettingRow(
+                self.tr("字幕样式"),
+                self.tr("字体、颜色和预览图在样式页调整。"),
+                self.subtitleStyleButton,
+                synth_group,
+            )
+        )
+        synth_group.addRow(
+            SettingRow(
+                self.tr("使用字幕样式"),
+                self.tr("开启后使用样式页配置渲染字幕。"),
+                BoundSwitch(cfg.use_subtitle_style, synth_group),
+                synth_group,
+            )
+        )
+        synth_group.addRow(
+            SettingRow(
+                self.tr("字幕布局"),
+                self.tr("选择单语、双语以及原文译文位置。"),
+                BoundComboBox(
+                    cfg.subtitle_layout,
+                    options_from(cfg.subtitle_layout.validator.options),
+                    synth_group,
+                ),
+                synth_group,
+            )
+        )
+        synth_group.addRow(
+            SettingRow(
+                self.tr("渲染模式"),
+                self.tr("选择 ASS 样式或圆角背景渲染。"),
+                BoundComboBox(
+                    cfg.subtitle_render_mode,
+                    options_from(cfg.subtitle_render_mode.validator.options),
+                    synth_group,
+                ),
+                synth_group,
+            )
+        )
+        synth_group.addRow(
+            SettingRow(
+                self.tr("合成视频"),
+                self.tr("关闭后只输出字幕文件，不生成成片。"),
+                BoundSwitch(cfg.need_video, synth_group),
+                synth_group,
+            )
+        )
+        synth_group.addRow(
+            SettingRow(
+                self.tr("软字幕"),
+                self.tr("开启后字幕不烧录进画面。"),
+                BoundSwitch(cfg.soft_subtitle, synth_group),
+                synth_group,
+            )
+        )
+        synth_group.addRow(
+            SettingRow(
+                self.tr("视频质量"),
+                self.tr("硬字幕合成时使用的编码质量。"),
+                BoundComboBox(
+                    cfg.video_quality,
+                    options_from(cfg.video_quality.validator.options),
+                    synth_group,
+                ),
+                synth_group,
+            )
+        )
+        self.subtitlePage.addGroup(synth_group)
+
+    def _build_dubbing_page(self) -> None:
+        group = SettingsGroup("", self.dubbingPage.container)
+        group.addRow(
+            SettingRow(
+                self.tr("默认添加配音"),
+                self.tr("开启后，全流程处理默认生成配音音轨。"),
+                BoundSwitch(cfg.dubbing_enabled, group),
+                group,
+            )
+        )
+        self.dubbingProviderControl = BoundComboBox(
+            cfg.dubbing_provider,
+            [Option(option.key, option.title) for option in self._dubbing_provider_options()],
+            group,
+        )
+        self.dubbingProviderRow = group.addRow(
+            SettingRow(
+                self.tr("配音提供商"),
+                self.tr("Edge 免 Key；Gemini 和 SiliconFlow 需要 API Key。"),
+                self.dubbingProviderControl,
+                group,
+            )
+        )
+        self.dubbingPresetControl = BoundComboBox(cfg.dubbing_preset, [], group)
+        self.dubbingPresetRow = group.addRow(
+            SettingRow(
+                self.tr("默认音色"),
+                self.tr("保存后会作为配音页和全流程的默认音色。"),
+                self.dubbingPresetControl,
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("配音文本轨道"),
+                self.tr("选择用原文、译文，或自动判断生成配音。"),
+                BoundComboBox(
+                    cfg.dubbing_text_track,
+                    [
+                        Option("auto", self.tr("自动选择")),
+                        Option("first", self.tr("第一行")),
+                        Option("second", self.tr("第二行")),
+                    ],
+                    group,
+                ),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("时间对齐"),
+                self.tr("控制配音语速与字幕时间轴的贴合程度。"),
+                BoundComboBox(
+                    cfg.dubbing_timing,
+                    [
+                        Option("natural", self.tr("自然")),
+                        Option("balanced", self.tr("均衡")),
+                        Option("strict", self.tr("严格")),
+                    ],
+                    group,
+                ),
+                group,
+            )
+        )
+        group.addRow(
+            SettingRow(
+                self.tr("原声处理"),
+                self.tr("生成视频时如何处理原视频声音。"),
+                BoundComboBox(
+                    cfg.dubbing_audio_mode,
+                    [
+                        Option("replace", self.tr("替换原声")),
+                        Option("mix", self.tr("混合原声")),
+                        Option("duck", self.tr("压低原声")),
+                    ],
+                    group,
+                ),
+                group,
+            )
+        )
+        self.dubbingApiKeyControl = BoundLineEdit(
+            cfg.dubbing_api_key, "sk-", group, password=True
+        )
+        self.dubbingApiKeyRow = group.addRow(
+            SettingRow(
+                self.tr("配音 API Key"),
+                self.tr("Gemini 或 SiliconFlow 配音需要填写。"),
+                self.dubbingApiKeyControl,
+                group,
+            )
+        )
+        self.dubbingModelControl = BoundEditableComboBox(cfg.dubbing_model, [], group)
+        self.dubbingModelRow = group.addRow(
+            SettingRow(
+                self.tr("配音模型"),
+                self.tr("当前配音提供商使用的文字转语音模型。"),
+                self.dubbingModelControl,
+                group,
+            )
+        )
+        self.dubbingWorkersRow = group.addRow(
+            SettingRow(
+                self.tr("配音并发"),
+                self.tr("同时合成的字幕行数。"),
+                BoundSlider(cfg.dubbing_tts_workers, group),
+                group,
+            )
+        )
+        self.checkDubbingButton = make_button(self.tr("测试配音"), parent=group)
+        self.checkDubbingRow = group.addRow(
+            SettingRow(
+                self.tr("配音测试"),
+                self.tr("用当前音色合成一句试听音频。"),
+                self.checkDubbingButton,
+                group,
+            )
+        )
+        self.dubbingPage.addGroup(group)
+
+    def _build_save_page(self) -> None:
+        save_group = SettingsGroup("", self.savePage.container)
+        self.workDirLabel = make_value_label(cfg.work_dir.value, save_group)
+        self.workDirButton = make_button(self.tr("选择文件夹"), parent=save_group)
+        save_group.addRow(
+            SettingRow(
+                self.tr("工作目录"),
+                self.tr("缓存、临时文件和处理结果会写入这里。"),
+                self._two_controls(self.workDirLabel, self.workDirButton, save_group),
+                save_group,
+            )
+        )
+        save_group.addRow(
+            SettingRow(
+                self.tr("启用缓存"),
+                self.tr("相同配置下复用 ASR、翻译和模型调用结果。"),
+                BoundSwitch(cfg.cache_enabled, save_group),
+                save_group,
+            )
+        )
+        self.savePage.addGroup(save_group)
+
+    def _build_personal_page(self) -> None:
+        ui_group = SettingsGroup("", self.personalPage.container)
+        self.themeControl = BoundComboBox(
+            cfg.themeMode,
+            [
+                Option(option, text)
+                for option, text in zip(
+                    cfg.themeMode.validator.options,
+                    [self.tr("浅色"), self.tr("深色"), self.tr("跟随系统")],
+                )
+            ],
+            ui_group,
+        )
+        ui_group.addRow(
+            SettingRow(
+                self.tr("应用主题"),
+                self.tr("切换浅色、深色或跟随系统。"),
+                self.themeControl,
+                ui_group,
+            )
+        )
+        self.themeColorSwatch = ColorSwatchButton(
+            cfg.themeColor.value if isinstance(cfg.themeColor.value, QColor) else QColor(str(cfg.themeColor.value)),
+            ui_group,
+        )
+        self.themeColorResetButton = make_button(self.tr("恢复默认"), parent=ui_group)
+        self.themeColorResetButton.setToolTip(self.tr("恢复为项目默认绿色"))
+        ui_group.addRow(
+            SettingRow(
+                self.tr("主题颜色"),
+                self.tr("影响按钮、高亮和选中状态。"),
+                self._two_controls(self.themeColorSwatch, self.themeColorResetButton, ui_group),
+                ui_group,
+            )
+        )
+        self.zoomControl = BoundComboBox(
+            cfg.dpiScale,
+            [
+                Option(1, "100%"),
+                Option(1.25, "125%"),
+                Option(1.5, "150%"),
+                Option(1.75, "175%"),
+                Option(2, "200%"),
+                Option("Auto", self.tr("跟随系统")),
+            ],
+            ui_group,
+        )
+        ui_group.addRow(
+            SettingRow(
+                self.tr("界面缩放"),
+                self.tr("修改后需要重启应用。"),
+                self.zoomControl,
+                ui_group,
+            )
+        )
+        self.languageControl = BoundComboBox(
+            cfg.language,
+            [
+                Option(option, text)
+                for option, text in zip(
+                    cfg.language.validator.options,
+                    ["简体中文", "繁體中文", "English", self.tr("跟随系统")],
+                )
+            ],
+            ui_group,
+        )
+        ui_group.addRow(
+            SettingRow(
+                self.tr("语言"),
+                self.tr("修改后需要重启应用。"),
+                self.languageControl,
+                ui_group,
+            )
+        )
+        self.personalPage.addGroup(ui_group)
+
+    def _build_about_page(self) -> None:
+        about_group = SettingsGroup("", self.aboutPage.container)
+        self.helpButton = make_button(self.tr("打开帮助"), parent=about_group)
+        about_group.addRow(
+            SettingRow(
+                self.tr("帮助"),
+                self.tr("查看使用说明和常见问题。"),
+                self.helpButton,
+                about_group,
+            )
+        )
+        self.feedbackButton = make_button(self.tr("提交反馈"), primary=True, parent=about_group)
+        about_group.addRow(
+            SettingRow(
+                self.tr("反馈"),
+                self.tr("遇到问题时提交反馈。"),
+                self.feedbackButton,
+                about_group,
+            )
+        )
+        self.updateButton = make_button(self.tr("检查更新"), primary=True, parent=about_group)
+        about_group.addRow(
+            SettingRow(
+                self.tr("版本"),
+                f"© {YEAR}, {AUTHOR}. {self.tr('当前版本')} {VERSION}",
+                self.updateButton,
+                about_group,
+            )
+        )
+        self.aboutPage.addGroup(about_group)
+
+    def _connect_signals(self) -> None:
+        cfg.appRestartSig.connect(self._show_restart_tip)
+        cfg.themeChanged.connect(setTheme)
+        cfg.themeChanged.connect(lambda _theme: self._sync_visual_style())
+        cfg.themeColorChanged.connect(self._apply_theme_color)
+        cfg.themeColorChanged.connect(lambda _color: self._sync_visual_style())
+        self.transcribeModelControl.currentValueChanged.connect(self._refresh_transcribe_rows)
+        cfg.transcribe_model.valueChanged.connect(self._refresh_transcribe_rows)
+        self.checkWhisperButton.clicked.connect(self.check_whisper_connection)
+        self.checkFunAsrButton.clicked.connect(self.check_fun_asr_connection)
+        self.fasterWhisperDirButton.clicked.connect(self._choose_faster_whisper_dir)
+
+        self.llmServiceControl.currentValueChanged.connect(self._refresh_llm_rows)
+        cfg.llm_service.valueChanged.connect(self._refresh_llm_rows)
+        self.loadLLMModelsButton.clicked.connect(self.load_llm_models)
+        self.checkLLMButton.clicked.connect(self.check_llm_connection)
+
+        self.translatorServiceControl.currentValueChanged.connect(self._refresh_translate_rows)
+        cfg.translator_service.valueChanged.connect(self._refresh_translate_rows)
+
+        self.subtitleStyleButton.clicked.connect(self._open_subtitle_style_page)
+
+        self.dubbingProviderControl.currentValueChanged.connect(self._refresh_dubbing_rows)
+        cfg.dubbing_provider.valueChanged.connect(self._refresh_dubbing_rows)
+        self.dubbingPresetControl.currentValueChanged.connect(self._on_dubbing_preset_changed)
+        self.checkDubbingButton.clicked.connect(self.check_dubbing_connection)
+
+        self.workDirButton.clicked.connect(self._choose_work_dir)
+        cfg.work_dir.valueChanged.connect(self._sync_work_dir_label)
+        cfg.faster_whisper_model_dir.valueChanged.connect(self._sync_faster_whisper_dir_label)
+        cfg.cache_enabled.valueChanged.connect(self._on_cache_enabled_changed)
+        self.themeColorSwatch.clicked.connect(self._choose_theme_color)
+        self.themeColorResetButton.clicked.connect(self._reset_theme_color)
+        cfg.themeColor.valueChanged.connect(self._sync_theme_color_swatch)
+        self.helpButton.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HELP_URL)))
+        self.feedbackButton.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(FEEDBACK_URL)))
+        self.updateButton.clicked.connect(lambda: webbrowser.open(RELEASE_URL))
+
+    def _refresh_transcribe_rows(self, value: Any) -> None:
+        is_whisper_api = value == TranscribeModelEnum.WHISPER_API
+        is_fun_asr = value == TranscribeModelEnum.BAILIAN_FUN_ASR
+        is_whisper_cpp = value == TranscribeModelEnum.WHISPER_CPP
+        is_faster_whisper = value == TranscribeModelEnum.FASTER_WHISPER
+        for row in [
+            self.whisperApiBaseRow,
+            self.whisperApiKeyRow,
+            self.whisperApiModelRow,
+            self.whisperApiPromptRow,
+            self.checkWhisperRow,
+        ]:
+            row.setVisible(is_whisper_api)
+        self.whisperCppModelRow.setVisible(is_whisper_cpp)
+        for row in [
+            self.fasterWhisperModelRow,
+            self.fasterWhisperDirRow,
+            self.fasterWhisperDeviceRow,
+            self.fasterWhisperVadFilterRow,
+            self.fasterWhisperVadThresholdRow,
+            self.fasterWhisperVadMethodRow,
+            self.fasterWhisperVoiceExtractionRow,
+            self.fasterWhisperOneWordRow,
+            self.fasterWhisperPromptRow,
+        ]:
+            row.setVisible(is_faster_whisper)
+        for row in [
+            self.funAsrKeyRow,
+            self.funAsrModelRow,
+            self.checkFunAsrRow,
+        ]:
+            row.setVisible(is_fun_asr)
+        if is_fun_asr and cfg.fun_asr_api_base.value.strip() != "https://dashscope.aliyuncs.com":
+            cfg.set(cfg.fun_asr_api_base, "https://dashscope.aliyuncs.com")
+
+    def _refresh_llm_rows(self, value: Any) -> None:
+        current = value if isinstance(value, LLMServiceEnum) else LLMServiceEnum(str(value))
+        custom_base_services = {LLMServiceEnum.OPENAI, LLMServiceEnum.OLLAMA, LLMServiceEnum.LM_STUDIO}
+        for service, rows in self.llmProviderRows.items():
+            for row in rows:
+                row.setVisible(service == current)
+            base_row = self.llmApiBaseRows.get(service)
+            if base_row is not None:
+                base_row.setVisible(service == current and service in custom_base_services)
+
+        controls = self.llmProviderControls.get(current)
+        if controls is not None:
+            self._apply_llm_model_options(current, self._llm_model_options(current))
+            if current not in custom_base_services:
+                default_base = self.llmDefaultBases.get(current, "")
+                api_base_control = controls["api_base"]
+                if default_base and api_base_control.text().strip() != default_base:
+                    cfg.set(api_base_control.config_item, default_base)
+            if current == LLMServiceEnum.OLLAMA and not controls["api_key"].text():
+                controls["api_key"].setText("ollama")
+            elif current == LLMServiceEnum.LM_STUDIO and not controls["api_key"].text():
+                controls["api_key"].setText("lm-studio")
+
+    def _refresh_translate_rows(self, value: Any) -> None:
+        service = value if isinstance(value, TranslatorServiceEnum) else TranslatorServiceEnum(str(value))
+        is_llm = service == TranslatorServiceEnum.OPENAI
+        is_deeplx = service == TranslatorServiceEnum.DEEPLX
+        self.needReflectTranslateRow.setVisible(is_llm)
+        self.batchSizeRow.setVisible(is_llm)
+        self.threadNumRow.setVisible(is_llm)
+        self.deeplxEndpointRow.setVisible(is_deeplx)
+
+    def _refresh_dubbing_rows(self, provider: Any) -> None:
+        provider_key = str(provider)
+        option = get_provider_option(provider_key)
+        voice_options = get_provider_voices(provider_key)
+        preset_options = [Option(voice.preset, voice.title) for voice in voice_options]
+        current = cfg.dubbing_preset.value
+        if current not in {voice.preset for voice in voice_options}:
+            current = voice_options[0].preset
+        self.dubbingPresetControl.setOptions(preset_options, keep_value=current)
+        self.dubbingModelControl.setItems(option.models)
+        if cfg.dubbing_model.value not in option.models:
+            cfg.set(cfg.dubbing_model, option.models[0] if option.models else "")
+        if option.default_base:
+            cfg.set(cfg.dubbing_api_base, option.default_base)
+        for row in [self.dubbingApiKeyRow, self.dubbingModelRow]:
+            row.setVisible(option.needs_api_key)
+        self._on_dubbing_preset_changed(current)
+
+    def _on_dubbing_preset_changed(self, preset_name: Any) -> None:
+        try:
+            preset = get_dubbing_preset(str(preset_name))
+        except ValueError:
+            return
+        cfg.set(cfg.dubbing_provider, preset.provider)
+        cfg.set(cfg.dubbing_voice, preset.voice)
+        cfg.set(cfg.dubbing_model, preset.model)
+        option = get_provider_option(preset.provider)
+        if option.needs_api_key and is_provider_default_base(cfg.dubbing_api_base.value):
+            cfg.set(cfg.dubbing_api_base, preset.api_base or option.default_base)
+
+    def _choose_work_dir(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, self.tr("选择工作目录"), cfg.work_dir.value)
+        if not folder:
+            return
+        cfg.set(cfg.work_dir, folder)
+        self._sync_work_dir_label(folder)
+
+    def _choose_faster_whisper_dir(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            self.tr("选择 Faster Whisper 模型目录"),
+            cfg.faster_whisper_model_dir.value or cfg.work_dir.value,
+        )
+        if not folder:
+            return
+        cfg.set(cfg.faster_whisper_model_dir, folder)
+        self._sync_faster_whisper_dir_label(folder)
+
+    def _sync_work_dir_label(self, value: Any) -> None:
+        text = str(value or "")
+        self.workDirLabel.setText(text)
+        self.workDirLabel.setToolTip(text)
+
+    def _sync_faster_whisper_dir_label(self, value: Any) -> None:
+        text = str(value or self.tr("未选择"))
+        self.fasterWhisperDirLabel.setText(text)
+        self.fasterWhisperDirLabel.setToolTip(str(value or ""))
+
+    def _on_cache_enabled_changed(self, enabled: bool) -> None:
+        if enabled:
+            enable_cache()
+            InfoBar.success(
+                self.tr("缓存已启用"),
+                self.tr("后续任务会优先复用已有结果。"),
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+        else:
+            disable_cache()
+            InfoBar.warning(
+                self.tr("缓存已禁用"),
+                self.tr("后续任务会重新生成结果。"),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+
+    def _choose_theme_color(self) -> None:
+        color = QColorDialog.getColor(cfg.themeColor.value, self, self.tr("选择主题颜色"))
+        if not color.isValid():
+            return
+        cfg.set(cfg.themeColor, color)
+
+    def _reset_theme_color(self) -> None:
+        default_color = QColor(DEFAULT_THEME_COLOR)
+        current_color = cfg.themeColor.value if isinstance(cfg.themeColor.value, QColor) else QColor(str(cfg.themeColor.value))
+        if current_color.isValid() and current_color.name(QColor.HexRgb).lower() == default_color.name(QColor.HexRgb).lower():
+            return
+        cfg.set(cfg.themeColor, default_color)
+
+    def _apply_theme_color(self, color: Any, attempt: int = 0) -> None:
+        try:
+            setThemeColor(color)
+        except RuntimeError:
+            if attempt >= 2:
+                raise
+            retry_color = QColor(color)
+            QTimer.singleShot(0, lambda: self._apply_theme_color(retry_color, attempt + 1))
+
+    def _sync_theme_color_swatch(self, value: Any) -> None:
+        color = value if isinstance(value, QColor) else QColor(str(value))
+        if not color.isValid():
+            color = QColor(DEFAULT_THEME_COLOR)
+        self.themeColorSwatch.setColor(color)
+        self.themeColorSwatch.setToolTip(
+            self.tr("点击选择主题颜色：{color}").format(color=color.name(QColor.HexRgb))
+        )
+        if hasattr(self, "themeColorResetButton"):
+            default_color = QColor(DEFAULT_THEME_COLOR).name(QColor.HexRgb).lower()
+            is_default = color.name(QColor.HexRgb).lower() == default_color
+            self.themeColorResetButton.setEnabled(not is_default)
+            self.themeColorResetButton.setToolTip(
+                self.tr("当前已经是项目默认绿色")
+                if is_default
+                else self.tr("恢复为项目默认绿色")
+            )
+
+    def _sync_visual_style(self) -> None:
+        self.syncStyle()
+        if hasattr(self, "themeColorSwatch"):
+            self._sync_theme_color_swatch(cfg.themeColor.value)
+
+    def _open_subtitle_style_page(self) -> None:
+        window = self.window()
+        target = getattr(window, "subtitleStyleInterface", None)
+        switch_to = getattr(window, "switchTo", None)
+        if target is not None and callable(switch_to):
+            switch_to(target)
+
+    def _show_restart_tip(self) -> None:
+        InfoBar.success(
+            self.tr("更新成功"),
+            self.tr("这项设置将在重启后生效。"),
+            duration=INFOBAR_DURATION_SUCCESS,
+            parent=self,
+        )
+
+    def check_llm_connection(self) -> None:
+        service = cfg.llm_service.value
+        controls = self.llmProviderControls.get(service)
+        if controls is None:
+            return
+        api_base = controls["api_base"].text().strip()
+        api_key = controls["api_key"].text().strip()
+        model = controls["model"].currentText().strip()
+        if not api_base or not api_key or not model:
+            InfoBar.warning(
+                self.tr("配置不完整"),
+                self.tr("请先填写当前提供商的 Base URL、API Key 和模型。"),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+            return
+        self._run_button_thread(
+            self.checkLLMButton,
+            self.tr("测试连接"),
+            self.tr("正在测试..."),
+            LLMConnectionThread(api_base, api_key, model),
+            self._on_llm_check_finished,
+            self._on_llm_check_error,
+        )
+
+    def load_llm_models(self) -> None:
+        service = cfg.llm_service.value
+        controls = self.llmProviderControls.get(service)
+        if controls is None:
+            return
+        api_base = controls["api_base"].text().strip()
+        api_key = controls["api_key"].text().strip()
+        if not api_base or not api_key:
+            InfoBar.warning(
+                self.tr("配置不完整"),
+                self.tr("请先填写当前提供商的 Base URL 和 API Key。"),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+            return
+        self._run_button_thread(
+            self.loadLLMModelsButton,
+            self.tr("加载模型"),
+            self.tr("正在加载..."),
+            LLMModelLoadThread(service, api_base, api_key),
+            self._on_llm_models_loaded,
+            self._on_llm_models_load_error,
+        )
+
+    def _on_llm_check_finished(self, success: bool, message: str) -> None:
+        if success:
+            InfoBar.success(
+                self.tr("LLM 连接成功"),
+                message,
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+        else:
+            InfoBar.error(
+                self.tr("LLM 连接失败"),
+                message,
+                duration=INFOBAR_DURATION_ERROR,
+                parent=self,
+            )
+
+    def _on_llm_check_error(self, message: str) -> None:
+        InfoBar.error(
+            self.tr("LLM 连接错误"),
+            message,
+            duration=INFOBAR_DURATION_ERROR,
+            parent=self,
+        )
+
+    def _on_llm_models_loaded(self, service: object, models: list[str]) -> None:
+        try:
+            service = service if isinstance(service, LLMServiceEnum) else LLMServiceEnum(str(service))
+        except ValueError:
+            service = cfg.llm_service.value
+        models = self._clean_model_options(models)
+        if not models:
+            InfoBar.warning(
+                self.tr("没有可用模型"),
+                self.tr("没有从当前提供商获取到模型列表，请检查 Base URL 和 API Key。"),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+            return
+        self._save_llm_model_options(service, models)
+        if cfg.llm_service.value == service:
+            self._apply_llm_model_options(service, models)
+        InfoBar.success(
+            self.tr("模型已加载"),
+            self.tr("已加载 {count} 个模型。").format(count=len(models)),
+            duration=INFOBAR_DURATION_SUCCESS,
+            parent=self,
+        )
+
+    def _on_llm_models_load_error(self, message: str) -> None:
+        InfoBar.error(
+            self.tr("模型加载失败"),
+            message,
+            duration=INFOBAR_DURATION_ERROR,
+            parent=self,
+        )
+
+    def check_whisper_connection(self) -> None:
+        api_base = cfg.whisper_api_base.value.strip()
+        api_key = cfg.whisper_api_key.value.strip()
+        model = cfg.whisper_api_model.value.strip()
+        if not api_base or not api_key or not model:
+            InfoBar.warning(
+                self.tr("配置不完整"),
+                self.tr("请先填写 Whisper Base URL、API Key 和模型。"),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+            return
+        self._run_button_thread(
+            self.checkWhisperButton,
+            self.tr("测试连接"),
+            self.tr("正在测试..."),
+            WhisperConnectionThread(api_base, api_key, model),
+            self._on_whisper_check_finished,
+            self._on_whisper_check_error,
+        )
+
+    def _on_whisper_check_finished(self, success: bool, result: str) -> None:
+        if success:
+            InfoBar.success(
+                self.tr("Whisper 连接成功"),
+                result,
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+        else:
+            InfoBar.error(
+                self.tr("Whisper 连接失败"),
+                result,
+                duration=INFOBAR_DURATION_ERROR,
+                parent=self,
+            )
+
+    def _on_whisper_check_error(self, message: str) -> None:
+        InfoBar.error(self.tr("Whisper 测试错误"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
+
+    def check_fun_asr_connection(self) -> None:
+        api_base = cfg.fun_asr_api_base.value.strip() or "https://dashscope.aliyuncs.com"
+        api_key = cfg.fun_asr_api_key.value.strip()
+        model = cfg.fun_asr_model.value.strip()
+        if not api_base or not api_key or not model:
+            InfoBar.warning(
+                self.tr("配置不完整"),
+                self.tr("请先填写百炼 API Key 和模型。"),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+            return
+        self._run_button_thread(
+            self.checkFunAsrButton,
+            self.tr("测试连接"),
+            self.tr("正在测试..."),
+            FunAsrConnectionThread(api_base, api_key, model),
+            self._on_fun_asr_check_finished,
+            self._on_fun_asr_check_error,
+        )
+
+    def _on_fun_asr_check_finished(self, success: bool, result: str) -> None:
+        if success:
+            InfoBar.success(self.tr("百炼连接成功"), result, duration=INFOBAR_DURATION_SUCCESS, parent=self)
+        else:
+            InfoBar.error(self.tr("百炼连接失败"), result, duration=INFOBAR_DURATION_ERROR, parent=self)
+
+    def _on_fun_asr_check_error(self, message: str) -> None:
+        InfoBar.error(self.tr("百炼测试错误"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
+
+    def check_dubbing_connection(self) -> None:
+        preset_name = str(cfg.dubbing_preset.value)
+        try:
+            preset = get_dubbing_preset(preset_name)
+        except ValueError as exc:
+            InfoBar.error(self.tr("配音配置错误"), str(exc), duration=INFOBAR_DURATION_ERROR, parent=self)
+            return
+
+        api_key = cfg.dubbing_api_key.value.strip()
+        api_base = cfg.dubbing_api_base.value.strip() or preset.api_base
+        model = cfg.dubbing_model.value.strip() or preset.model
+        if preset.provider != "edge" and not api_key:
+            InfoBar.warning(
+                self.tr("配置不完整"),
+                self.tr("当前配音提供商需要 API Key。"),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+            return
+
+        output_dir = Path(cfg.work_dir.value) / "dubbing-test"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{preset_name}.wav"
+        self._run_button_thread(
+            self.checkDubbingButton,
+            self.tr("测试配音"),
+            self.tr("正在测试..."),
+            DubbingConnectionThread(
+                provider=preset.provider,
+                api_key=api_key if preset.provider != "edge" else "",
+                api_base=api_base if preset.provider != "edge" else "",
+                model=model if preset.provider != "edge" else preset.model,
+                voice=preset.voice,
+                output_path=str(output_path),
+                style_prompt=preset.style_prompt,
+            ),
+            self._on_dubbing_check_finished,
+            self._on_dubbing_check_error,
+        )
+
+    def _on_dubbing_check_finished(self, audio_path: str, provider: str) -> None:
+        InfoBar.success(
+            self.tr("配音测试成功"),
+            self.tr("{provider} 已生成试听音频：{path}").format(provider=provider, path=audio_path),
+            duration=INFOBAR_DURATION_SUCCESS,
+            parent=self,
+        )
+
+    def _on_dubbing_check_error(self, message: str) -> None:
+        InfoBar.error(self.tr("配音测试失败"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
+
+    def _run_button_thread(
+        self,
+        button,
+        idle_text: str,
+        busy_text: str,
+        thread: QThread,
+        finished_slot,
+        error_slot,
+    ) -> None:
+        button.setEnabled(False)
+        button.setText(busy_text)
+
+        def restore_button(*_args):
+            button.setEnabled(True)
+            button.setText(idle_text)
+            if thread in self._threads:
+                self._threads.remove(thread)
+
+        thread.finished.connect(restore_button)
+        thread.finished.connect(finished_slot)
+        thread.error.connect(restore_button)
+        thread.error.connect(error_slot)
+        self._threads.append(thread)
+        thread.start()
+
+    @staticmethod
+    def _llm_provider_specs() -> dict[LLMServiceEnum, dict[str, Any]]:
+        return {
             LLMServiceEnum.OPENAI: {
-                "prefix": "openai",
-                "api_key_cfg": cfg.openai_api_key,
-                "api_base_cfg": cfg.openai_api_base,
-                "model_cfg": cfg.openai_model,
+                "api_key": cfg.openai_api_key,
+                "api_base": cfg.openai_api_base,
+                "model": cfg.openai_model,
+                "model_options": cfg.openai_model_options,
                 "default_base": "https://api.openai.com/v1",
-                "default_models": [
+                "models": [
                     "gemini-2.5-pro",
                     "gpt-5",
                     "claude-sonnet-4-5-20250929",
@@ -389,873 +1371,121 @@ class SettingInterface(ScrollArea):
                 ],
             },
             LLMServiceEnum.SILICON_CLOUD: {
-                "prefix": "silicon_cloud",
-                "api_key_cfg": cfg.silicon_cloud_api_key,
-                "api_base_cfg": cfg.silicon_cloud_api_base,
-                "model_cfg": cfg.silicon_cloud_model,
+                "api_key": cfg.silicon_cloud_api_key,
+                "api_base": cfg.silicon_cloud_api_base,
+                "model": cfg.silicon_cloud_model,
+                "model_options": cfg.silicon_cloud_model_options,
                 "default_base": "https://api.siliconflow.cn/v1",
-                "default_models": [
-                    "moonshotai/Kimi-K2-Instruct-0905",
-                    "deepseek-ai/DeepSeek-V3",
-                ],
+                "models": ["moonshotai/Kimi-K2-Instruct-0905", "deepseek-ai/DeepSeek-V3"],
             },
             LLMServiceEnum.DEEPSEEK: {
-                "prefix": "deepseek",
-                "api_key_cfg": cfg.deepseek_api_key,
-                "api_base_cfg": cfg.deepseek_api_base,
-                "model_cfg": cfg.deepseek_model,
+                "api_key": cfg.deepseek_api_key,
+                "api_base": cfg.deepseek_api_base,
+                "model": cfg.deepseek_model,
+                "model_options": cfg.deepseek_model_options,
                 "default_base": "https://api.deepseek.com/v1",
-                "default_models": ["deepseek-chat", "deepseek-reasoner"],
+                "models": ["deepseek-chat", "deepseek-reasoner"],
             },
             LLMServiceEnum.OLLAMA: {
-                "prefix": "ollama",
-                "api_key_cfg": cfg.ollama_api_key,
-                "api_base_cfg": cfg.ollama_api_base,
-                "model_cfg": cfg.ollama_model,
+                "api_key": cfg.ollama_api_key,
+                "api_base": cfg.ollama_api_base,
+                "model": cfg.ollama_model,
+                "model_options": cfg.ollama_model_options,
                 "default_base": "http://localhost:11434/v1",
-                "default_models": ["qwen3:8b"],
+                "models": ["qwen3:8b"],
             },
             LLMServiceEnum.LM_STUDIO: {
-                "prefix": "LM Studio",
-                "api_key_cfg": cfg.lm_studio_api_key,
-                "api_base_cfg": cfg.lm_studio_api_base,
-                "model_cfg": cfg.lm_studio_model,
+                "api_key": cfg.lm_studio_api_key,
+                "api_base": cfg.lm_studio_api_base,
+                "model": cfg.lm_studio_model,
+                "model_options": cfg.lm_studio_model_options,
                 "default_base": "http://localhost:1234/v1",
-                "default_models": ["qwen3:8b"],
+                "models": ["qwen3:8b"],
             },
             LLMServiceEnum.GEMINI: {
-                "prefix": "gemini",
-                "api_key_cfg": cfg.gemini_api_key,
-                "api_base_cfg": cfg.gemini_api_base,
-                "model_cfg": cfg.gemini_model,
+                "api_key": cfg.gemini_api_key,
+                "api_base": cfg.gemini_api_base,
+                "model": cfg.gemini_model,
+                "model_options": cfg.gemini_model_options,
                 "default_base": "https://generativelanguage.googleapis.com/v1beta/openai/",
-                "default_models": [
-                    "gemini-2.5-pro",
-                    "gemini-2.5-flash",
-                    "gemini-2.0-flash-lite",
-                ],
+                "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash-lite"],
             },
             LLMServiceEnum.CHATGLM: {
-                "prefix": "chatglm",
-                "api_key_cfg": cfg.chatglm_api_key,
-                "api_base_cfg": cfg.chatglm_api_base,
-                "model_cfg": cfg.chatglm_model,
+                "api_key": cfg.chatglm_api_key,
+                "api_base": cfg.chatglm_api_base,
+                "model": cfg.chatglm_model,
+                "model_options": cfg.chatglm_model_options,
                 "default_base": "https://open.bigmodel.cn/api/paas/v4",
-                "default_models": ["glm-4-plus", "glm-4-air-250414", "glm-4-flash"],
+                "models": ["glm-4-plus", "glm-4-air-250414", "glm-4-flash"],
             },
         }
 
-        # 创建服务配置映射
-        self.llm_service_configs = {}
+    def _llm_model_options(self, service: LLMServiceEnum) -> list[str]:
+        provider = self.llmProviderSpecs.get(service)
+        if provider is None:
+            return []
+        return self._llm_model_options_for_provider(provider)
 
-        # 为每个服务创建配置卡片
-        for service, config in service_configs.items():
-            prefix = config["prefix"]
+    def _llm_model_options_for_provider(self, provider: dict[str, Any]) -> list[str]:
+        cached = self._clean_model_options(provider["model_options"].value)
+        if cached:
+            return cached
+        return self._clean_model_options(provider["models"])
 
-            # 创建API Key卡片
-            api_key_card = LineEditSettingCard(
-                config["api_key_cfg"],
-                FIF.FINGERPRINT,
-                self.tr("API Key"),
-                self.tr(f"输入您的 {service.value} API Key"),
-                "sk-" if service != LLMServiceEnum.OLLAMA else "",
-                self.llmGroup,
-            )
-            setattr(self, f"{prefix}_api_key_card", api_key_card)
-
-            # 创建Base URL卡片
-            api_base_card = LineEditSettingCard(
-                config["api_base_cfg"],
-                FIF.LINK,
-                self.tr("Base URL"),
-                self.tr(f"输入 {service.value} Base URL"),
-                config["default_base"],
-                self.llmGroup,
-            )
-            setattr(self, f"{prefix}_api_base_card", api_base_card)
-
-            # 设置只读状态：只有 OpenAI、Ollama、LM Studio 可以编辑 Base URL
-            if service not in [
-                LLMServiceEnum.OPENAI,
-                LLMServiceEnum.OLLAMA,
-                LLMServiceEnum.LM_STUDIO,
-            ]:
-                api_base_card.lineEdit.setReadOnly(True)
-
-            # 创建模型选择卡片
-            model_card = EditComboBoxSettingCard(
-                config["model_cfg"],
-                FIF.ROBOT,  # type: ignore
-                self.tr("模型"),
-                self.tr(f"选择 {service.value} 模型"),
-                config["default_models"],
-                self.llmGroup,
-            )
-            setattr(self, f"{prefix}_model_card", model_card)
-
-            # 存储服务配置
-            cards = [api_key_card, api_base_card, model_card]
-
-            self.llm_service_configs[service] = {
-                "cards": cards,
-                "api_base": api_base_card,
-                "api_key": api_key_card,
-                "model": model_card,
-            }
-
-        # 创建检查连接卡片
-        self.checkLLMConnectionCard = PushSettingCard(
-            self.tr("检查连接"),
-            FIF.LINK,
-            self.tr("检查 LLM 连接"),
-            self.tr("点击检查 API 连接是否正常，并获取模型列表"),
-            self.llmGroup,
-        )
-
-        # 初始化显示状态
-        self.__onLLMServiceChanged(self.llmServiceCard.comboBox.currentText())
-
-    def __createASRServiceCards(self):
-        """创建 Whisper API 配置卡片"""
-        # 转录配置卡片
-        self.transcribeModelCard = ComboBoxSettingCard(
-            cfg.transcribe_model,
-            FIF.MICROPHONE,
-            self.tr("转录模型"),
-            self.tr("语音转换文字要使用的语音识别服务"),
-            texts=[model.value for model in cfg.transcribe_model.validator.options],  # type: ignore
-            parent=self.transcribeGroup,
-        )
-        self.transcribeModelCard.comboBox.setMinimumWidth(150)
-
-        # API Base URL
-        self.whisperApiBaseCard = LineEditSettingCard(
-            cfg.whisper_api_base,
-            FIF.LINK,
-            self.tr("Whisper API Base URL"),
-            self.tr("输入 Whisper API Base URL"),
-            "https://api.openai.com/v1",
-            self.transcribeGroup,
-        )
-
-        # API Key
-        self.whisperApiKeyCard = LineEditSettingCard(
-            cfg.whisper_api_key,
-            FIF.FINGERPRINT,
-            self.tr("Whisper API Key"),
-            self.tr("输入 Whisper API Key"),
-            "sk-",
-            self.transcribeGroup,
-        )
-
-        # 模型选择
-        self.whisperApiModelCard = EditComboBoxSettingCard(
-            cfg.whisper_api_model,
-            FIF.ROBOT,  # type: ignore
-            self.tr("Whisper 模型"),
-            self.tr("选择 Whisper 模型"),
-            [
-                "whisper-1",
-                "whisper-large-v3-turbo",
-            ],
-            self.transcribeGroup,
-        )
-
-        # 测试连接按钮
-        self.checkWhisperConnectionCard = PushSettingCard(
-            self.tr("测试 Whisper 连接"),
-            FIF.CONNECT,
-            self.tr("测试 Whisper API 连接"),
-            self.tr("点击测试 API 连接是否正常"),
-            self.transcribeGroup,
-        )
-
-        # 默认隐藏 Whisper API 配置卡片（仅在选择 Whisper API 时显示）
-        self.whisperApiBaseCard.setVisible(False)
-        self.whisperApiKeyCard.setVisible(False)
-        self.whisperApiModelCard.setVisible(False)
-        self.checkWhisperConnectionCard.setVisible(False)
-
-    def __createTranslateServiceCards(self):
-        """创建翻译服务相关的配置卡片"""
-        # 翻译服务选择卡片
-        self.translatorServiceCard = ComboBoxSettingCard(
-            cfg.translator_service,
-            FIF.ROBOT,
-            self.tr("翻译服务"),
-            self.tr("选择翻译服务"),
-            texts=[
-                service.value
-                for service in cfg.translator_service.validator.options  # type: ignore
-            ],
-            parent=self.translate_serviceGroup,
-        )
-        self.translatorServiceCard.comboBox.setMinimumWidth(150)
-
-        # 反思翻译开关
-        self.needReflectTranslateCard = SwitchSettingCard(
-            FIF.EDIT,
-            self.tr("需要反思翻译"),
-            self.tr("启用反思翻译可以提高翻译质量，但耗费更多时间和token"),
-            cfg.need_reflect_translate,
-            self.translate_serviceGroup,
-        )
-
-        # DeepLx端点配置
-        self.deeplxEndpointCard = LineEditSettingCard(
-            cfg.deeplx_endpoint,
-            FIF.LINK,
-            self.tr("DeepLx 后端"),
-            self.tr("输入 DeepLx 的后端地址(开启deeplx翻译时必填)"),
-            "https://api.deeplx.org/translate",
-            self.translate_serviceGroup,
-        )
-
-        # 批处理大小配置
-        self.batchSizeCard = RangeSettingCard(
-            cfg.batch_size,
-            FIF.ALIGNMENT,
-            self.tr("批处理大小"),
-            self.tr("每批处理字幕的数量，建议为 10 的倍数"),
-            parent=self.translate_serviceGroup,
-        )
-
-        # 线程数配置
-        self.threadNumCard = RangeSettingCard(
-            cfg.thread_num,
-            FIF.SPEED_HIGH,
-            self.tr("线程数"),
-            self.tr(
-                "请求并行处理的数量，模型服务商允许的情况下建议尽可能大，数值越大速度越快"
-            ),
-            parent=self.translate_serviceGroup,
-        )
-
-        # 添加卡片到翻译服务组
-        self.translate_serviceGroup.addSettingCard(self.translatorServiceCard)
-        self.translate_serviceGroup.addSettingCard(self.needReflectTranslateCard)
-        self.translate_serviceGroup.addSettingCard(self.deeplxEndpointCard)
-        self.translate_serviceGroup.addSettingCard(self.batchSizeCard)
-        self.translate_serviceGroup.addSettingCard(self.threadNumCard)
-
-        # 初始化显示状态
-        self.__onTranslatorServiceChanged(
-            self.translatorServiceCard.comboBox.currentText()
-        )
-
-    def __initWidget(self):
-        self.resize(1000, 800)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
-        self.setViewportMargins(0, 80, 0, 20)
-        self.setWidget(self.scrollWidget)
-        self.setWidgetResizable(True)
-        self.setObjectName("settingInterface")
-
-        # 初始化样式表
-        self.scrollWidget.setObjectName("scrollWidget")
-        self.settingLabel.setObjectName("settingLabel")
-
-        # 初始化转录模型配置卡片的显示状态
-        self.__onTranscribeModelChanged(self.transcribeModelCard.comboBox.currentText())
-
-        # 初始化翻译服务配置卡片的显示状态
-        self.__onTranslatorServiceChanged(
-            self.translatorServiceCard.comboBox.currentText()
-        )
-
-        # 初始化配音配置卡片的显示状态
-        self.__onDubbingProviderChanged(self.dubbingProviderCard.comboBox.currentText())
-
-        self.setStyleSheet(
-            """
-            SettingInterface, #scrollWidget {
-                background-color: transparent;
-            }
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QLabel#settingLabel {
-                font: 33px 'Microsoft YaHei';
-                background-color: transparent;
-                color: white;
-            }
-        """
-        )
-
-    def __initLayout(self):
-        """初始化布局"""
-        self.settingLabel.move(36, 30)
-
-        # 添加转录配置卡片
-        self.transcribeGroup.addSettingCard(self.transcribeModelCard)
-        # 添加 Whisper API 配置卡片
-        self.transcribeGroup.addSettingCard(self.whisperApiBaseCard)
-        self.transcribeGroup.addSettingCard(self.whisperApiKeyCard)
-        self.transcribeGroup.addSettingCard(self.whisperApiModelCard)
-        self.transcribeGroup.addSettingCard(self.checkWhisperConnectionCard)
-
-        # 添加LLM配置卡片
-        self.llmGroup.addSettingCard(self.llmServiceCard)
-        # 添加OPENAI官方API链接卡片
-        self.llmGroup.addSettingCard(self.openaiOfficialApiCard)
-        for config in self.llm_service_configs.values():
-            for card in config["cards"]:
-                self.llmGroup.addSettingCard(card)
-        self.llmGroup.addSettingCard(self.checkLLMConnectionCard)
-
-        # 将所有组添加到布局
-        self.expandLayout.setSpacing(28)
-        self.expandLayout.setContentsMargins(36, 10, 36, 0)
-        self.expandLayout.addWidget(self.transcribeGroup)
-        self.expandLayout.addWidget(self.llmGroup)
-        self.expandLayout.addWidget(self.translate_serviceGroup)
-        self.expandLayout.addWidget(self.translateGroup)
-        self.expandLayout.addWidget(self.subtitleGroup)
-        self.expandLayout.addWidget(self.dubbingGroup)
-        self.expandLayout.addWidget(self.saveGroup)
-        self.expandLayout.addWidget(self.personalGroup)
-        self.expandLayout.addWidget(self.aboutGroup)
-
-    def __connectSignalToSlot(self):
-        """连接信号与槽"""
-        cfg.appRestartSig.connect(self.__showRestartTooltip)
-
-        # LLM服务切换
-        self.llmServiceCard.comboBox.currentTextChanged.connect(
-            self.__onLLMServiceChanged
-        )
-
-        # 翻译服务切换
-        self.translatorServiceCard.comboBox.currentTextChanged.connect(
-            self.__onTranslatorServiceChanged
-        )
-
-        # 转录模型切换
-        self.transcribeModelCard.comboBox.currentTextChanged.connect(
-            self.__onTranscribeModelChanged
-        )
-
-        # 检查 LLM 连接
-        self.checkLLMConnectionCard.clicked.connect(self.checkLLMConnection)
-
-        # 检查 Whisper 连接
-        self.checkWhisperConnectionCard.clicked.connect(self.checkWhisperConnection)
-
-        # 配音配置
-        self.dubbingProviderCard.comboBox.currentTextChanged.connect(
-            self.__onDubbingProviderChanged
-        )
-        self.dubbingPresetCard.comboBox.currentTextChanged.connect(
-            self.__onDubbingPresetChanged
-        )
-        self.checkDubbingConnectionCard.clicked.connect(self.checkDubbingConnection)
-
-        # 保存路径
-        self.savePathCard.clicked.connect(self.__onsavePathCardClicked)
-
-        # 字幕样式修改跳转
-        self.subtitleStyleCard.linkButton.clicked.connect(
-            lambda: self.window().switchTo(self.window().subtitleStyleInterface)  # type: ignore
-        )
-        self.subtitleLayoutCard.linkButton.clicked.connect(
-            lambda: self.window().switchTo(self.window().subtitleStyleInterface)  # type: ignore
-        )
-
-        # 个性化
-        self.cacheEnabledCard.checkedChanged.connect(self.__onCacheEnabledChanged)
-        self.themeCard.optionChanged.connect(lambda ci: setTheme(cfg.get(ci)))
-        self.themeColorCard.colorChanged.connect(setThemeColor)
-
-        # 反馈
-        self.feedbackCard.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(FEEDBACK_URL))  # type: ignore
-        )
-
-        # 关于
-        self.aboutCard.clicked.connect(self.checkUpdate)
-
-        # 全局 signalBus
-        self.transcribeModelCard.comboBox.currentTextChanged.connect(
-            signalBus.transcription_model_changed
-        )
-        self.subtitleCorrectCard.checkedChanged.connect(
-            signalBus.subtitle_optimization_changed
-        )
-        self.subtitleTranslateCard.checkedChanged.connect(
-            signalBus.subtitle_translation_changed
-        )
-        self.targetLanguageCard.comboBox.currentTextChanged.connect(
-            signalBus.target_language_changed
-        )
-        self.softSubtitleCard.checkedChanged.connect(signalBus.soft_subtitle_changed)
-        self.needVideoCard.checkedChanged.connect(signalBus.need_video_changed)
-        self.videoQualityCard.comboBox.currentTextChanged.connect(
-            signalBus.video_quality_changed
-        )
-        self.dubbingEnabledCard.checkedChanged.connect(
-            signalBus.dubbing_enabled_changed
-        )
-
-    def __showRestartTooltip(self):
-        """显示重启提示"""
-        InfoBar.success(
-            self.tr("更新成功"),
-            self.tr("配置将在重启后生效"),
-            duration=INFOBAR_DURATION_SUCCESS,
-            parent=self,
-        )
-
-    def __onsavePathCardClicked(self):
-        """处理保存路径卡片点击事件"""
-        folder = QFileDialog.getExistingDirectory(self, self.tr("选择文件夹"), "./")
-        if not folder or cfg.get(cfg.work_dir) == folder:
+    def _apply_llm_model_options(self, service: LLMServiceEnum, models: list[str]) -> None:
+        controls = self.llmProviderControls.get(service)
+        if controls is None:
             return
-        cfg.set(cfg.work_dir, folder)
-        self.savePathCard.setContent(folder)
+        model_control = controls["model"]
+        current = model_control.currentText().strip()
+        model_control.setItems(models)
+        if not current and models:
+            model_control.setValue(models[0])
+            cfg.set(model_control.config_item, models[0])
 
-    def __onCacheEnabledChanged(self, is_enabled: bool):
-        """处理缓存开关变化"""
-        if is_enabled:
-            enable_cache()
-            InfoBar.success(
-                self.tr("缓存已启用"),
-                self.tr("ASR、翻译等操作将优先使用缓存"),
-                duration=INFOBAR_DURATION_SUCCESS,
-                parent=self,
-            )
-        else:
-            disable_cache()
-            InfoBar.warning(
-                self.tr("缓存已禁用"),
-                self.tr("所有操作将重新生成，不使用缓存（建议开启缓存）"),
-                duration=INFOBAR_DURATION_WARNING,
-                parent=self,
-            )
-
-    def checkLLMConnection(self):
-        """检查 LLM 连接"""
-        # 保存当前滚动位置
-        scroll_position = self.verticalScrollBar().value()
-
-        # 获取当前选中的服务
-        current_service = LLMServiceEnum(self.llmServiceCard.comboBox.currentText())
-
-        # 获取服务配置
-        service_config = self.llm_service_configs.get(current_service)
-        if not service_config:
+    def _save_llm_model_options(self, service: LLMServiceEnum, models: list[str]) -> None:
+        provider = self.llmProviderSpecs.get(service)
+        if provider is None:
             return
-
-        api_base = (
-            service_config["api_base"].lineEdit.text()
-            if service_config["api_base"]
-            else ""
-        )
-        api_key = (
-            service_config["api_key"].lineEdit.text()
-            if service_config["api_key"]
-            else ""
-        )
-        model = (
-            service_config["model"].comboBox.currentText()
-            if service_config["model"]
-            else ""
-        )
-
-        # 禁用检查按钮，显示加载状态
-        self.checkLLMConnectionCard.button.setEnabled(False)
-        self.checkLLMConnectionCard.button.setText(self.tr("正在检查..."))
-
-        # 立即恢复滚动位置（防止按钮状态改变导致的自动滚动）
-        self.verticalScrollBar().setValue(scroll_position)
-
-        # 创建并启动线程
-        self.connection_thread = LLMConnectionThread(api_base, api_key, model)
-        self.connection_thread.finished.connect(self.onConnectionCheckFinished)
-        self.connection_thread.error.connect(self.onConnectionCheckError)
-        self.connection_thread.start()
-
-    def onConnectionCheckError(self, message):
-        """处理连接检查错误事件"""
-        self.checkLLMConnectionCard.button.setEnabled(True)
-        self.checkLLMConnectionCard.button.setText(self.tr("检查连接"))
-        InfoBar.error(
-            self.tr("LLM 连接测试错误"),
-            message,
-            duration=INFOBAR_DURATION_ERROR,
-            parent=self,
-        )
-
-    def onConnectionCheckFinished(self, is_success, message, models):
-        """处理连接检查完成事件"""
-        self.checkLLMConnectionCard.button.setEnabled(True)
-        self.checkLLMConnectionCard.button.setText(self.tr("检查连接"))
-
-        # 获取当前服务
-        current_service = LLMServiceEnum(self.llmServiceCard.comboBox.currentText())
-
-        if models:
-            # 更新当前服务的模型列表
-            service_config = self.llm_service_configs.get(current_service)
-            if service_config and service_config["model"]:
-                temp = service_config["model"].comboBox.currentText()
-                service_config["model"].setItems(models)
-                service_config["model"].comboBox.setCurrentText(temp)
-
-            InfoBar.success(
-                self.tr("获取模型列表成功:"),
-                self.tr("一共") + str(len(models)) + self.tr("个模型"),
-                duration=INFOBAR_DURATION_SUCCESS,
-                parent=self,
-            )
-        if not is_success:
-            InfoBar.error(
-                self.tr("LLM 连接测试错误"),
-                message,
-                duration=INFOBAR_DURATION_ERROR,
-                parent=self,
-            )
-        else:
-            InfoBar.success(
-                self.tr("LLM 连接测试成功"),
-                message,
-                duration=INFOBAR_DURATION_SUCCESS,
-                parent=self,
-            )
-
-    def checkUpdate(self):
-        webbrowser.open(RELEASE_URL)
-
-    def __onLLMServiceChanged(self, service):
-        """处理LLM服务切换事件"""
-        current_service = LLMServiceEnum(service)
-
-        # 隐藏所有卡片
-        for config in self.llm_service_configs.values():
-            for card in config["cards"]:
-                card.setVisible(False)
-
-        # 隐藏OPENAI官方API链接卡片
-        self.openaiOfficialApiCard.setVisible(False)
-
-        # 显示选中服务的卡片
-        if current_service in self.llm_service_configs:
-            for card in self.llm_service_configs[current_service]["cards"]:
-                card.setVisible(True)
-
-            # 为OLLAMA和LM_STUDIO设置默认API Key
-            service_config = self.llm_service_configs[current_service]
-            if current_service == LLMServiceEnum.OLLAMA and service_config["api_key"]:
-                # 如果API Key为空，设置默认值"ollama"
-                if not service_config["api_key"].lineEdit.text():
-                    service_config["api_key"].lineEdit.setText("ollama")
-            if (
-                current_service == LLMServiceEnum.LM_STUDIO
-                and service_config["api_key"]
-            ):
-                # 如果API Key为空，设置默认值 "lm-studio"
-                if not service_config["api_key"].lineEdit.text():
-                    service_config["api_key"].lineEdit.setText("lm-studio")
-
-            # 如果是OPENAI服务，显示官方API链接卡片
-            if current_service == LLMServiceEnum.OPENAI:
-                self.openaiOfficialApiCard.setVisible(True)
-
-        # 更新布局
-        self.llmGroup.adjustSize()
-        self.expandLayout.update()
-
-    def __onTranslatorServiceChanged(self, service):
-        openai_cards = [
-            self.needReflectTranslateCard,
-            self.batchSizeCard,
-        ]
-        deeplx_cards = [self.deeplxEndpointCard]
-
-        all_cards = openai_cards + deeplx_cards
-        for card in all_cards:
-            card.setVisible(False)
-
-        # 根据选择的服务显示相应的配置卡片
-        if service in [TranslatorServiceEnum.DEEPLX.value]:
-            for card in deeplx_cards:
-                card.setVisible(True)
-        elif service in [TranslatorServiceEnum.OPENAI.value]:
-            for card in openai_cards:
-                card.setVisible(True)
-
-        # 更新布局
-        self.translate_serviceGroup.adjustSize()
-        self.expandLayout.update()
-
-    def __onTranscribeModelChanged(self, model_name):
-        """处理转录模型切换事件"""
-        # Whisper API 配置卡片
-        whisper_api_cards = [
-            self.whisperApiBaseCard,
-            self.whisperApiKeyCard,
-            self.whisperApiModelCard,
-            self.checkWhisperConnectionCard,
-        ]
-
-        # 根据选择的模型显示/隐藏 Whisper API 配置
-        is_whisper_api = model_name == TranscribeModelEnum.WHISPER_API.value
-        for card in whisper_api_cards:
-            card.setVisible(is_whisper_api)
-
-        # 更新布局
-        self.transcribeGroup.adjustSize()
-        self.expandLayout.update()
+        cfg.set(provider["model_options"], self._clean_model_options(models))
 
     @staticmethod
-    def _dubbing_preset_label(preset_name: str) -> str:
-        return f"{get_voice_title(preset_name)}  ·  {preset_name}"
+    def _clean_model_options(models: Any) -> list[str]:
+        if not isinstance(models, list):
+            return []
+        options: list[str] = []
+        seen: set[str] = set()
+        for item in models:
+            model = str(item or "").strip()
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            options.append(model)
+        return options
 
     @staticmethod
-    def _dubbing_preset_from_label(label: str) -> str:
-        return label.split("·", 1)[-1].strip() if "·" in label else label
+    def _dubbing_provider_options():
+        from videocaptioner.ui.common.dubbing_options import DUBBING_PROVIDERS
 
-    def __onDubbingProviderChanged(self, provider: str):
-        """处理配音提供商切换事件"""
-        provider = get_provider_key_by_title(provider)
-        option = get_provider_option(provider)
-        presets = [voice.preset for voice in get_provider_voices(provider)]
-        labels = [self._dubbing_preset_label(preset) for preset in presets]
-        self.dubbingPresetCard.comboBox.blockSignals(True)
-        self.dubbingPresetCard.comboBox.clear()
-        self.dubbingPresetCard.comboBox.addItems(labels)
-        self.dubbingModelCard.setItems(list(option.models))
-        current = cfg.dubbing_preset.value
-        self.dubbingPresetCard.comboBox.setCurrentText(
-            self._dubbing_preset_label(current if current in presets else presets[0])
-        )
-        self.dubbingPresetCard.comboBox.blockSignals(False)
-        cfg.set(cfg.dubbing_provider, provider)
-        self.__onDubbingPresetChanged(self.dubbingPresetCard.comboBox.currentText())
+        return DUBBING_PROVIDERS
 
-    def __onDubbingPresetChanged(self, preset_name: str):
-        """处理配音预设切换事件"""
-        preset_name = self._dubbing_preset_from_label(preset_name)
-        try:
-            preset = get_dubbing_preset(preset_name)
-        except ValueError:
-            return
-
-        cfg.set(cfg.dubbing_provider, preset.provider)
-        cfg.set(cfg.dubbing_voice, preset.voice)
-        cfg.set(cfg.dubbing_model, preset.model)
-        self.dubbingModelCard.comboBox.setCurrentText(preset.model)
-
-        provider = preset.provider
-        option = get_provider_option(provider)
-        needs_api = option.needs_api_key
-        if needs_api:
-            if is_provider_default_base(self.dubbingApiBaseCard.lineEdit.text().strip()):
-                self.dubbingApiBaseCard.lineEdit.setText(preset.api_base or option.default_base)
-                self.dubbingApiBaseCard.lineEdit.setCursorPosition(0)
-            self.dubbingPresetCard.setContent(
-                self.tr("当前使用 {provider}，需要填写配音 API Key。").format(provider=option.title)
-            )
-            self.checkDubbingConnectionCard.setContent(
-                self.tr("合成一句试听音频，验证音色、API Key、Base URL 和模型是否可用")
-            )
-        else:
-            self.dubbingPresetCard.setContent(
-                self.tr("当前使用 Edge 免费在线音色，无需 API Key。")
-            )
-            self.checkDubbingConnectionCard.setContent(
-                self.tr("合成一句试听音频，验证 Edge 在线音色是否可用")
-            )
-
-        for card in [
-            self.dubbingApiKeyCard,
-            self.dubbingApiBaseCard,
-            self.dubbingModelCard,
-        ]:
-            card.setVisible(needs_api)
-
-        self.dubbingGroup.adjustSize()
-        self.expandLayout.update()
-
-    def checkDubbingConnection(self):
-        """检查配音 TTS 连接"""
-        scroll_position = self.verticalScrollBar().value()
-        preset_name = self._dubbing_preset_from_label(
-            self.dubbingPresetCard.comboBox.currentText().strip()
-        )
-        try:
-            preset = get_dubbing_preset(preset_name)
-        except ValueError as exc:
-            InfoBar.error(
-                self.tr("配音配置错误"),
-                str(exc),
-                duration=INFOBAR_DURATION_ERROR,
-                parent=self,
-            )
-            return
-
-        api_key = self.dubbingApiKeyCard.lineEdit.text().strip()
-        api_base = self.dubbingApiBaseCard.lineEdit.text().strip() or preset.api_base
-        model = self.dubbingModelCard.comboBox.currentText().strip() or preset.model
-        if preset.provider != "edge" and not api_key:
-            InfoBar.warning(
-                self.tr("配置不完整"),
-                self.tr("{provider} 配音需要先填写 API Key").format(
-                    provider=preset.provider
-                ),
-                duration=INFOBAR_DURATION_WARNING,
-                parent=self,
-            )
-            return
-        if preset.provider != "edge" and not model:
-            InfoBar.warning(
-                self.tr("配置不完整"),
-                self.tr("请输入配音模型"),
-                duration=INFOBAR_DURATION_WARNING,
-                parent=self,
-            )
-            return
-
-        self.checkDubbingConnectionCard.button.setEnabled(False)
-        self.checkDubbingConnectionCard.button.setText(self.tr("正在测试..."))
-        self.verticalScrollBar().setValue(scroll_position)
-
-        output_dir = Path(cfg.work_dir.value) / "dubbing-test"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{preset_name}.wav"
-        self.dubbing_connection_thread = DubbingConnectionThread(
-            provider=preset.provider,
-            api_key=api_key if preset.provider != "edge" else "",
-            api_base=api_base if preset.provider != "edge" else "",
-            model=model if preset.provider != "edge" else preset.model,
-            voice=preset.voice,
-            output_path=str(output_path),
-            style_prompt=preset.style_prompt,
-        )
-        self.dubbing_connection_thread.finished.connect(
-            self.onDubbingConnectionCheckFinished
-        )
-        self.dubbing_connection_thread.error.connect(self.onDubbingConnectionCheckError)
-        self.dubbing_connection_thread.start()
-
-    def onDubbingConnectionCheckFinished(self, audio_path: str, provider: str):
-        """处理配音测试完成事件"""
-        self.checkDubbingConnectionCard.button.setEnabled(True)
-        self.checkDubbingConnectionCard.button.setText(self.tr("测试配音"))
-        InfoBar.success(
-            self.tr("配音测试成功"),
-            self.tr("{provider} 已生成试听音频：{path}").format(
-                provider=provider,
-                path=audio_path,
-            ),
-            duration=INFOBAR_DURATION_SUCCESS,
-            parent=self,
-        )
-
-    def onDubbingConnectionCheckError(self, message: str):
-        """处理配音测试错误事件"""
-        self.checkDubbingConnectionCard.button.setEnabled(True)
-        self.checkDubbingConnectionCard.button.setText(self.tr("测试配音"))
-        InfoBar.error(
-            self.tr("配音测试失败"),
-            message,
-            duration=INFOBAR_DURATION_ERROR,
-            parent=self,
-        )
-
-    def checkWhisperConnection(self):
-        """检查 Whisper API 连接"""
-        # 保存当前滚动位置
-        scroll_position = self.verticalScrollBar().value()
-
-        # 获取配置
-        base_url = self.whisperApiBaseCard.lineEdit.text().strip()
-        api_key = self.whisperApiKeyCard.lineEdit.text().strip()
-        model = self.whisperApiModelCard.comboBox.currentText().strip()
-
-        # 验证必填字段
-        if not base_url:
-            InfoBar.warning(
-                self.tr("配置不完整"),
-                self.tr("请输入 Whisper API Base URL"),
-                duration=INFOBAR_DURATION_ERROR,
-                parent=self,
-            )
-            return
-
-        if not api_key:
-            InfoBar.warning(
-                self.tr("配置不完整"),
-                self.tr("请输入 Whisper API Key"),
-                duration=INFOBAR_DURATION_ERROR,
-                parent=self,
-            )
-            return
-
-        if not model:
-            InfoBar.warning(
-                self.tr("配置不完整"),
-                self.tr("请输入 Whisper 模型名称"),
-                duration=INFOBAR_DURATION_ERROR,
-                parent=self,
-            )
-            return
-
-        # 禁用按钮，显示加载状态
-        self.checkWhisperConnectionCard.button.setEnabled(False)
-        self.checkWhisperConnectionCard.button.setText(self.tr("正在测试..."))
-
-        # 立即恢复滚动位置（防止按钮状态改变导致的自动滚动）
-        self.verticalScrollBar().setValue(scroll_position)
-
-        # 创建并启动测试线程
-        self.whisper_connection_thread = WhisperConnectionThread(
-            base_url, api_key, model
-        )
-        self.whisper_connection_thread.finished.connect(
-            self.onWhisperConnectionCheckFinished
-        )
-        self.whisper_connection_thread.error.connect(self.onWhisperConnectionCheckError)
-        self.whisper_connection_thread.start()
-
-    def onWhisperConnectionCheckFinished(self, success, result):
-        """处理 Whisper 连接检查完成事件"""
-        # 恢复按钮状态
-        self.checkWhisperConnectionCard.button.setEnabled(True)
-        self.checkWhisperConnectionCard.button.setText(self.tr("测试 Whisper 连接"))
-
-        if success:
-            InfoBar.success(
-                self.tr("连接成功"),
-                self.tr("Whisper API 连接成功！\n转录结果:") + result,
-                duration=INFOBAR_DURATION_SUCCESS,
-                parent=self,
-            )
-        else:
-            InfoBar.error(
-                self.tr("连接失败"),
-                self.tr(f"Whisper API 连接失败！\n{result}"),
-                duration=INFOBAR_DURATION_ERROR,
-                parent=self,
-            )
-
-    def onWhisperConnectionCheckError(self, message):
-        """处理 Whisper 连接检查错误事件"""
-        # 恢复按钮状态
-        self.checkWhisperConnectionCard.button.setEnabled(True)
-        self.checkWhisperConnectionCard.button.setText(self.tr("测试 Whisper 连接"))
-
-        InfoBar.error(
-            self.tr("测试错误"),
-            message,
-            duration=INFOBAR_DURATION_ERROR,
-            parent=self,
-        )
+    @staticmethod
+    def _two_controls(left, right, parent):
+        container = QWidget(parent)
+        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        if left.objectName() == "settingsValueLabel" and left.maximumWidth() > 10000:
+            left.setFixedWidth(CONTROL_WIDTH)
+        left.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        right.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(left)
+        layout.addWidget(right)
+        return container
 
 
 class DubbingConnectionThread(QThread):
-    """配音 TTS 连接测试线程"""
-
     finished = pyqtSignal(str, str)
     error = pyqtSignal(str)
 
@@ -1278,8 +1508,7 @@ class DubbingConnectionThread(QThread):
         self.output_path = output_path
         self.style_prompt = style_prompt
 
-    def run(self):
-        """执行配音连接测试"""
+    def run(self) -> None:
         try:
             core_config = build_dubbing_config(
                 provider=self.provider,
@@ -1318,50 +1547,77 @@ class DubbingConnectionThread(QThread):
                 )
             )
             self.finished.emit(result.output_path, core_config.provider)
-        except Exception as e:
-            self.error.emit(str(e))
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class WhisperConnectionThread(QThread):
-    """Whisper API 连接测试线程"""
-
     finished = pyqtSignal(bool, str)
     error = pyqtSignal(str)
 
-    def __init__(self, base_url, api_key, model):
+    def __init__(self, base_url: str, api_key: str, model: str):
         super().__init__()
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
 
-    def run(self):
-        """执行连接测试"""
+    def run(self) -> None:
         try:
-            success, result = check_whisper_connection(
-                self.base_url, self.api_key, self.model
-            )
+            success, result = check_whisper_connection(self.base_url, self.api_key, self.model)
             self.finished.emit(success, result)
-        except Exception as e:
-            self.error.emit(str(e))
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
-class LLMConnectionThread(QThread):
-    finished = pyqtSignal(bool, str, list)
+class FunAsrConnectionThread(QThread):
+    finished = pyqtSignal(bool, str)
     error = pyqtSignal(str)
 
-    def __init__(self, api_base, api_key, model):
+    def __init__(self, api_base: str, api_key: str, model: str):
         super().__init__()
         self.api_base = api_base
         self.api_key = api_key
         self.model = model
 
-    def run(self):
-        """检查 LLM 连接并获取模型列表"""
+    def run(self) -> None:
         try:
-            is_success, message = check_llm_connection(
-                self.api_base, self.api_key, self.model
-            )
+            success, result = check_fun_asr_connection(self.api_base, self.api_key, self.model)
+            self.finished.emit(success, result)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class LLMConnectionThread(QThread):
+    finished = pyqtSignal(bool, str)
+    error = pyqtSignal(str)
+
+    def __init__(self, api_base: str, api_key: str, model: str):
+        super().__init__()
+        self.api_base = api_base
+        self.api_key = api_key
+        self.model = model
+
+    def run(self) -> None:
+        try:
+            success, message = check_llm_connection(self.api_base, self.api_key, self.model)
+            self.finished.emit(success, message)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class LLMModelLoadThread(QThread):
+    finished = pyqtSignal(object, list)
+    error = pyqtSignal(str)
+
+    def __init__(self, service: LLMServiceEnum, api_base: str, api_key: str):
+        super().__init__()
+        self.service = service
+        self.api_base = api_base
+        self.api_key = api_key
+
+    def run(self) -> None:
+        try:
             models = get_available_models(self.api_base, self.api_key)
-            self.finished.emit(is_success, message, models)
-        except Exception as e:
-            self.error.emit(str(e))
+            self.finished.emit(self.service, models)
+        except Exception as exc:
+            self.error.emit(str(exc))

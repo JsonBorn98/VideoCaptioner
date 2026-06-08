@@ -2,30 +2,6 @@ from PyQt5.QtCore import QObject, QUrl, pyqtSignal
 
 
 class SignalBus(QObject):
-    # 字幕排布信号
-    subtitle_layout_changed = pyqtSignal(str)
-    # 字幕优化信号
-    subtitle_optimization_changed = pyqtSignal(bool)
-    # 字幕翻译信号
-    subtitle_translation_changed = pyqtSignal(bool)
-    # 翻译语言
-    target_language_changed = pyqtSignal(str)
-    # 转录模型
-    transcription_model_changed = pyqtSignal(str)
-    # 软字幕信号
-    soft_subtitle_changed = pyqtSignal(bool)
-    # 视频合成信号
-    need_video_changed = pyqtSignal(bool)
-    # 视频质量信号
-    video_quality_changed = pyqtSignal(str)
-    # 使用样式信号
-    use_subtitle_style_changed = pyqtSignal(bool)
-    # 渲染模式变更信号
-    subtitle_render_mode_changed = pyqtSignal(str)
-    # 配音开关信号
-    dubbing_enabled_changed = pyqtSignal(bool)
-
-    # 新增视频控制相关信号
     video_play = pyqtSignal()  # 播放信号
     video_pause = pyqtSignal()  # 暂停信号
     video_stop = pyqtSignal()  # 停止信号
@@ -33,7 +9,6 @@ class SignalBus(QObject):
     video_segment_play = pyqtSignal(int, int)  # 播放片段信号，参数为开始和结束时间(ms)
     video_subtitle_added = pyqtSignal(str)  # 添加字幕文件信号
 
-    # 新增视频控制相关方法
     def play_video(self):
         """触发视频播放"""
         self.video_play.emit()

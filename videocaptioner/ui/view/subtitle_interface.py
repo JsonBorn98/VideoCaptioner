@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, QTime, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDropEvent, QKeyEvent
@@ -53,7 +53,7 @@ from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.core.utils.platform_utils import open_folder, reveal_in_explorer
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
-from videocaptioner.ui.components.SubtitleSettingDialog import SubtitleSettingDialog
+from videocaptioner.ui.common.theme_tokens import app_palette, rgba
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.subtitle_thread import RetranslateThread, SubtitleThread
 
@@ -198,19 +198,24 @@ class SubtitleInterface(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setObjectName("SubtitleInterface")
+        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
         self.setAcceptDrops(True)
         self.task: Optional[SubtitleTask] = None
         self.subtitle_path: Optional[str] = None
         self.custom_prompt_text: str = cfg.custom_prompt_text.value
+        self._config_signal_connections: list[tuple[Any, Callable]] = []
         self.setAttribute(Qt.WA_DeleteOnClose)  # type: ignore
         self._init_ui()
         self._setup_signals()
         self._update_prompt_button_style()
         self.set_values()
+        self._sync_page_style()
 
     def _init_ui(self):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setObjectName("main_layout")
+        self.main_layout.setContentsMargins(36, 28, 36, 28)
         self.main_layout.setSpacing(20)
 
         self._setup_top_layout()
@@ -263,9 +268,7 @@ class SubtitleInterface(QWidget):
         for layout in ["译文在上", "原文在上", "仅译文", "仅原文"]:
             action = Action(text=layout)
             action.triggered.connect(
-                lambda checked, layout_value=layout: signalBus.subtitle_layout_changed.emit(
-                    layout_value
-                )
+                lambda checked, layout_value=layout: self.on_subtitle_layout_changed(layout_value)
             )
             self.layout_menu.addAction(action)
         self.layout_button.setMenu(self.layout_menu)
@@ -302,9 +305,7 @@ class SubtitleInterface(QWidget):
         for lang in TargetLanguage:
             action = Action(text=lang.value)
             action.triggered.connect(
-                lambda checked, lang_value=lang.value: signalBus.target_language_changed.emit(
-                    lang_value
-                )
+                lambda checked, lang_value=lang.value: self.on_target_language_changed(lang_value)
             )
             self.target_language_menu.addAction(action)
         self.target_language_button.setMenu(self.target_language_menu)
@@ -400,17 +401,77 @@ class SubtitleInterface(QWidget):
         self.bottom_layout.addWidget(self.cancel_button)
         self.main_layout.addLayout(self.bottom_layout)
 
+    def _sync_page_style(self) -> None:
+        palette = app_palette()
+        self.setStyleSheet(
+            f"""
+            QWidget#SubtitleInterface {{
+                background: {palette.bg};
+            }}
+            CommandBar {{
+                background: transparent;
+                border: none;
+            }}
+            TableView, QTableView {{
+                background: {palette.panel};
+                color: {palette.text};
+                gridline-color: {palette.line_soft};
+                border: 1px solid {palette.line};
+                border-radius: 8px;
+                selection-background-color: {rgba(palette.accent, 0.20)};
+                selection-color: {palette.text};
+            }}
+            QHeaderView::section {{
+                background: {palette.field};
+                color: {palette.muted};
+                border: none;
+                border-right: 1px solid {palette.line_soft};
+                border-bottom: 1px solid {palette.line_soft};
+                padding: 6px;
+                font-weight: 700;
+            }}
+            QTableCornerButton::section {{
+                background: {palette.field};
+                border: none;
+                border-right: 1px solid {palette.line_soft};
+                border-bottom: 1px solid {palette.line_soft};
+            }}
+            QLabel {{
+                color: {palette.text};
+                background: transparent;
+            }}
+            """
+        )
+
     def _setup_signals(self) -> None:
-        signalBus.subtitle_layout_changed.connect(self.on_subtitle_layout_changed)
-        signalBus.target_language_changed.connect(self.on_target_language_changed)
-        signalBus.subtitle_optimization_changed.connect(
-            self.on_subtitle_optimization_changed
+        self._connect_config_signal(
+            cfg.subtitle_layout, self._sync_subtitle_layout_from_config
         )
-        signalBus.subtitle_translation_changed.connect(
-            self.on_subtitle_translation_changed
+        self._connect_config_signal(
+            cfg.target_language, self._sync_target_language_from_config
         )
+        self._connect_config_signal(cfg.need_optimize, self.on_subtitle_optimization_changed)
+        self._connect_config_signal(cfg.need_translate, self.on_subtitle_translation_changed)
         # self.subtitle_setting_button.clicked.connect(self.show_subtitle_settings)
         # self.video_player_button.clicked.connect(self.show_video_player)
+
+    def _connect_config_signal(self, option, handler: Callable) -> None:
+        option.valueChanged.connect(handler)
+        self._config_signal_connections.append((option.valueChanged, handler))
+
+    def _disconnect_config_signals(self) -> None:
+        for signal, handler in self._config_signal_connections:
+            try:
+                signal.disconnect(handler)
+            except (RuntimeError, TypeError):
+                pass
+        self._config_signal_connections.clear()
+
+    def _sync_subtitle_layout_from_config(self, value) -> None:
+        self.on_subtitle_layout_changed(value.value)
+
+    def _sync_target_language_from_config(self, value) -> None:
+        self.on_target_language_changed(value.value)
 
     def show_prompt_dialog(self) -> None:
         dialog = PromptDialog(self)
@@ -672,21 +733,29 @@ class SubtitleInterface(QWidget):
         event.accept()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._disconnect_config_signals()
         if hasattr(self, "subtitle_optimization_thread"):
             self.subtitle_optimization_thread.stop()  # type: ignore
         super().closeEvent(event)
 
     def show_subtitle_settings(self) -> None:
-        """显示字幕设置对话框"""
-        dialog = SubtitleSettingDialog(self.window())
-        dialog.exec_()
+        """跳转到全局字幕处理配置页"""
+        window = self.window()
+        if hasattr(window, "openSettingsPage"):
+            opened = window.openSettingsPage("translate")  # type: ignore[attr-defined]
+            if opened is not False:
+                return
+        setting_interface = getattr(window, "settingInterface", None)
+        if setting_interface is not None and hasattr(window, "switchTo"):
+            if setting_interface.setCurrentPage("translate"):
+                window.switchTo(setting_interface)  # type: ignore[attr-defined]
 
     def show_video_player(self) -> None:
         """显示视频播放器窗口"""
         # 创建视频播放器窗口（延迟导入，因为vlc是可选依赖）
-        from videocaptioner.ui.components.MyVideoWidget import MyVideoWidget
+        from videocaptioner.ui.components.video_widget import VideoWidget
 
-        self.video_player = MyVideoWidget()
+        self.video_player = VideoWidget()
         self.video_player.resize(800, 600)
 
         def signal_update() -> None:
@@ -710,7 +779,7 @@ class SubtitleInterface(QWidget):
         # 如果有字幕文件,则添加字幕
         signal_update()
 
-        signalBus.subtitle_layout_changed.connect(signal_update)
+        cfg.subtitle_layout.valueChanged.connect(lambda _value: signal_update())
         self.model.dataChanged.connect(signal_update)
         self.model.layoutChanged.connect(signal_update)
 
@@ -958,7 +1027,8 @@ class SubtitleInterface(QWidget):
         for lang in TargetLanguage:
             if lang.value == language:
                 self.target_language_button.setText(lang.value)
-                cfg.set(cfg.target_language, lang)
+                if cfg.target_language.value != lang:
+                    cfg.set(cfg.target_language, lang)
                 break
 
     def on_subtitle_optimization_changed(self, checked: bool) -> None:
@@ -976,7 +1046,8 @@ class SubtitleInterface(QWidget):
     def on_subtitle_layout_changed(self, layout: str) -> None:
         """处理字幕排布变更"""
         layout_enum = SubtitleLayoutEnum(layout)  # Convert string to enum
-        cfg.set(cfg.subtitle_layout, layout_enum)
+        if cfg.subtitle_layout.value != layout_enum:
+            cfg.set(cfg.subtitle_layout, layout_enum)
         self.layout_button.setText(layout)
 
 

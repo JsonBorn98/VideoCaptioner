@@ -7,8 +7,8 @@ from typing import Literal, Optional
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
 from videocaptioner.cli.validators import validate_synthesize
+from videocaptioner.core.application.config_store import get
 from videocaptioner.core.subtitle.style_manager import (
     StyleMode,
     SubtitleStyle,

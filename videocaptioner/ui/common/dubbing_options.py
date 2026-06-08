@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from PyQt5.QtCore import QT_TRANSLATE_NOOP
+
 
 @dataclass(frozen=True)
 class DubbingProviderOption:
@@ -148,3 +150,77 @@ def get_voice_title(preset: str) -> str:
             if voice.preset == preset:
                 return voice.title
     return preset
+
+
+def _translation_catalog() -> tuple[str, ...]:
+    return (
+        QT_TRANSLATE_NOOP("DubbingInterface", "Edge 免费配音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "免 API Key，适合默认快速生成中文或英文配音。"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "Gemini TTS"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "Google Gemini 语音模型，适合英文自然表达。"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "SiliconFlow CosyVoice"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "CosyVoice 中文表现稳定，并支持参考音频克隆。"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "晓晓"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "清晰自然的普通话女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "云希"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "年轻自然的普通话男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "晓伊"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "温和明亮的普通话女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "云健"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "更适合演讲和旁白的男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "云扬"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "播报感更强的普通话男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "曉佳"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "粤语女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "雲龍"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "粤语男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "曉臾"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "台湾国语女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "雲哲"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "台湾国语男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "美式英语女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "美式英语男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "清爽自然的美式英语女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "清晰稳重的美式英语男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "柔和自然的美式英语女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "自然稳健的美式英语男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "英式英语女声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "英式英语男声"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "友好自然的英文表达"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "清晰稳定的自然英文"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "更有能量的英文表达"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "明亮清爽的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "明亮自然的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "均衡清晰的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "轻松自然的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "更沉稳的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "平滑自然的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "气声感更明显的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "清晰直给的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "低沉有力的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "成熟稳重的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "清澈稳定的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "轻快活泼的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "轻快明亮的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "旁白感更强的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "前置感更强的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "信息感更强的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "生动轻快的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "知识型表达的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "平稳均衡的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "温暖自然的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "温和柔顺的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "休闲自然的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "柔和的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "颗粒感更强的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "平滑的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "坚定清晰的英文声音"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "自然中文女声，可配合参考音频克隆"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "自然中文男声，可配合参考音频克隆"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "沉稳低沉的中文男声，可克隆"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "磁性中文男声，可克隆"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "欢快中文男声，可克隆"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "热情中文女声，可克隆"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "温柔中文女声，可克隆"),
+        QT_TRANSLATE_NOOP("DubbingInterface", "欢快中文女声，可克隆"),
+    )

@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -40,13 +41,13 @@ class VoicePreviewThread(QThread):
             use_bundled = not self.text and not self.clone_audio_path and not self.clone_audio_text
             bundled = bundled_voice_preview(self.preset_name) if use_bundled else None
             if bundled:
-                self.finished.emit(str(bundled))
+                self.finished.emit(str(playable_voice_preview(bundled)))
                 return
 
             preset = get_dubbing_preset(self.preset_name)
-            api_key = cfg.dubbing_api_key.value
-            api_base = cfg.dubbing_api_base.value
-            model = cfg.dubbing_model.value or preset.model
+            api_key = cfg.dubbing_api_key.value.strip()
+            api_base = cfg.dubbing_api_base.value.strip()
+            model = cfg.dubbing_model.value.strip() or preset.model
             if preset.provider == "edge":
                 api_key = ""
                 api_base = ""
@@ -97,7 +98,7 @@ class VoicePreviewThread(QThread):
                     clone_audio_text=self.clone_audio_text or None,
                 )
             )
-            self.finished.emit(str(result.output_path))
+            self.finished.emit(str(playable_voice_preview(Path(result.output_path))))
         except Exception as exc:
             if isinstance(exc, ValueError):
                 logger.warning("音色试听失败: %s", exc)
@@ -119,3 +120,57 @@ def bundled_voice_preview(preset_name: str) -> Path | None:
             if path.exists() and path.stat().st_size > 0:
                 return path
     return None
+
+
+def playable_voice_preview(path: Path) -> Path:
+    """Return a preview file that QMediaPlayer can play reliably.
+
+    The bundled Edge/SiliconFlow samples are mp3, while Gemini samples are wav.
+    Some Qt Multimedia backends silently fail to play mp3 in the desktop app,
+    so normalize bundled non-wav samples to wav once and reuse the cached file.
+    """
+    if path.suffix.lower() == ".wav":
+        return path
+
+    target = _playable_preview_target(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.stat().st_size > 0 and target.stat().st_mtime >= path.stat().st_mtime:
+        return target
+
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
+                str(target),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        logger.warning("内置音色试听转码失败，回退原文件: %s", exc)
+        return path
+
+    return target if target.exists() and target.stat().st_size > 0 else path
+
+
+def _playable_preview_target(path: Path) -> Path:
+    preview_dir = path.parent.resolve()
+    bundled_dirs = {
+        (ASSETS_PATH / "voice-previews").resolve(),
+        (RESOURCE_PATH / "assets" / "voice-previews").resolve(),
+        (Path(__file__).resolve().parents[2] / "resources" / "assets" / "voice-previews").resolve(),
+    }
+    if preview_dir in bundled_dirs:
+        return CACHE_PATH / "voice-previews" / f"{path.stem}.wav"
+    return path.with_suffix(".wav")

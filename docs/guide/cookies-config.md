@@ -75,9 +75,11 @@ VideoCaptioner/
 │  ├─ logs/
 │  ├─ models/
 │  ├─ cookies.txt    # ← 将文件放在这里
-│  └─ settings.json
 └─ work-dir/
 ```
+
+应用设置保存在系统用户配置目录下的 `videocaptioner/config.toml`，不再写入
+AppData 里的旧 JSON 设置文件。
 
 :::tip 快速定位
 在 VideoCaptioner 中点击 **设置 → 打开日志文件夹**，然后返回上一级目录即可看到 `AppData` 文件夹。

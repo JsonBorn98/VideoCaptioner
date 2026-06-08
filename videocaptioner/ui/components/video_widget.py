@@ -472,7 +472,7 @@ class StandardMediaPlayBar(MediaPlayBarBase):
         super().closeEvent(event)
 
 
-class MyVideoWidget(QWidget):
+class VideoWidget(QWidget):
     """Video widget"""
 
     def __init__(self, parent=None):
@@ -662,7 +662,7 @@ class MyVideoWidget(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MyVideoWidget()
+    window = VideoWidget()
     # 设置视频源 - 请替换为您的测试视频路径
     # video_path = r"path/to/your/test/video.mp4"
     # window.setVideo(QUrl.fromLocalFile(video_path))

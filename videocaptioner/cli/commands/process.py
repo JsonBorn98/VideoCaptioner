@@ -5,7 +5,7 @@ from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
+from videocaptioner.core.application.config_store import get
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -88,6 +88,9 @@ def run(args: Namespace, config: dict) -> int:
         whisper_api_key=getattr(args, "whisper_api_key", None),
         whisper_api_base=getattr(args, "whisper_api_base", None),
         whisper_model=None, whisper_prompt=None,
+        fun_asr_api_key=getattr(args, "fun_asr_api_key", None),
+        fun_asr_api_base=getattr(args, "fun_asr_api_base", None),
+        fun_asr_model=getattr(args, "fun_asr_model", None),
     )
     from videocaptioner.cli.commands.transcribe import run as transcribe_run
     ret = transcribe_run(tr_args, config)

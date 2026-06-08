@@ -6,7 +6,7 @@ from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
+from videocaptioner.core.application.config_store import get
 
 # BCP 47 → TargetLanguage.value (Chinese label) mapping for internal use
 _LANG_MAP = {

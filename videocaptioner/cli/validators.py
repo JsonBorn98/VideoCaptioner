@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
+from videocaptioner.core.application.config_store import get
 
 # Shared file format constants
 AUDIO_EXTENSIONS = frozenset({"flac", "m4a", "mp3", "wav", "ogg", "opus", "aac", "wma"})
@@ -163,6 +163,14 @@ def validate_transcribe(config: dict) -> bool:
 
     if asr == "whisper-api":
         return validate_whisper_api(config)
+    if asr == "fun-asr":
+        api_key = get(config, "fun_asr.api_key", "")
+        if not api_key:
+            output.error("Bailian Fun-ASR API key is required for --asr fun-asr")
+            output.hint("Use --fun-asr-api-key, set DASHSCOPE_API_KEY, or run:")
+            output.hint("  videocaptioner config set fun_asr.api_key <key>")
+            return False
+        return True
     if asr == "faster-whisper":
         return validate_faster_whisper()
     if asr == "whisper-cpp":

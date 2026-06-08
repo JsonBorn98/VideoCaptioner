@@ -118,6 +118,7 @@ class TranscribeModelEnum(Enum):
 
     BIJIAN = "B 接口"
     JIANYING = "J 接口"
+    BAILIAN_FUN_ASR = "百炼 Fun-ASR"
     WHISPER_API = "Whisper [API] ✨"
     FASTER_WHISPER = "FasterWhisper ✨"
     WHISPER_CPP = "WhisperCpp"
@@ -505,6 +506,40 @@ ASR_LANGUAGE_CAPABILITIES: dict[TranscribeModelEnum, ASRLanguageCapability] = {
         supported_languages=_get_all_languages_except_auto(),
         supports_auto=True,
     ),
+    TranscribeModelEnum.BAILIAN_FUN_ASR: ASRLanguageCapability(
+        supported_languages=[
+            TranscribeLanguageEnum.CHINESE,
+            TranscribeLanguageEnum.ENGLISH,
+            TranscribeLanguageEnum.JAPANESE,
+            TranscribeLanguageEnum.KOREAN,
+            TranscribeLanguageEnum.VIETNAMESE,
+            TranscribeLanguageEnum.THAI,
+            TranscribeLanguageEnum.INDONESIAN,
+            TranscribeLanguageEnum.MALAY,
+            TranscribeLanguageEnum.HINDI,
+            TranscribeLanguageEnum.ARABIC,
+            TranscribeLanguageEnum.FRENCH,
+            TranscribeLanguageEnum.GERMAN,
+            TranscribeLanguageEnum.SPANISH,
+            TranscribeLanguageEnum.PORTUGUESE,
+            TranscribeLanguageEnum.RUSSIAN,
+            TranscribeLanguageEnum.ITALIAN,
+            TranscribeLanguageEnum.DUTCH,
+            TranscribeLanguageEnum.SWEDISH,
+            TranscribeLanguageEnum.DANISH,
+            TranscribeLanguageEnum.FINNISH,
+            TranscribeLanguageEnum.NORWEGIAN,
+            TranscribeLanguageEnum.GREEK,
+            TranscribeLanguageEnum.POLISH,
+            TranscribeLanguageEnum.CZECH,
+            TranscribeLanguageEnum.HUNGARIAN,
+            TranscribeLanguageEnum.ROMANIAN,
+            TranscribeLanguageEnum.BULGARIAN,
+            TranscribeLanguageEnum.CROATIAN,
+            TranscribeLanguageEnum.SLOVAK,
+        ],
+        supports_auto=True,
+    ),
 }
 
 
@@ -562,6 +597,10 @@ class TranscribeConfig:
     whisper_api_base: Optional[str] = None
     whisper_api_model: Optional[str] = None
     whisper_api_prompt: Optional[str] = None
+    # 百炼 Fun-ASR 配置
+    fun_asr_api_key: Optional[str] = None
+    fun_asr_api_base: Optional[str] = None
+    fun_asr_model: Optional[str] = None
     # Faster Whisper 配置
     faster_whisper_program: Optional[str] = None
     faster_whisper_model: Optional[FasterWhisperModelEnum] = None
@@ -598,6 +637,11 @@ class TranscribeConfig:
             lines.append(f"API Model: {self.whisper_api_model}")
             if self.whisper_api_prompt:
                 lines.append(f"Prompt: {self.whisper_api_prompt[:30]}...")
+
+        elif self.transcribe_model == TranscribeModelEnum.BAILIAN_FUN_ASR:
+            lines.append(f"API Base: {self.fun_asr_api_base}")
+            lines.append(f"API Key: {self._mask_key(self.fun_asr_api_key)}")
+            lines.append(f"API Model: {self.fun_asr_model}")
 
         elif self.transcribe_model == TranscribeModelEnum.FASTER_WHISPER:
             lines.append(
@@ -741,6 +785,19 @@ class DubbingUIConfig:
     speaker_voices: dict[str, str] = field(default_factory=dict)
     clone_audio_path: str = ""
     clone_audio_text: str = ""
+
+    def __post_init__(self):
+        self.preset = self.preset.strip()
+        self.provider = self.provider.strip()
+        self.api_key = self.api_key.strip()
+        self.api_base = self.api_base.strip()
+        self.model = self.model.strip()
+        self.voice = self.voice.strip()
+        self.text_track = self.text_track.strip()
+        self.timing = self.timing.strip()
+        self.audio_mode = self.audio_mode.strip()
+        self.clone_audio_path = self.clone_audio_path.strip()
+        self.clone_audio_text = self.clone_audio_text.strip()
 
     def print_config(self) -> str:
         lines = ["=========== Dubbing Task ==========="]

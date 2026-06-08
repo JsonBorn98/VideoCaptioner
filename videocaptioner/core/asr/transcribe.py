@@ -2,6 +2,7 @@ from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.asr.bcut import BcutASR
 from videocaptioner.core.asr.chunked_asr import ChunkedASR
 from videocaptioner.core.asr.faster_whisper import FasterWhisperASR
+from videocaptioner.core.asr.fun_asr import BailianFunASR
 from videocaptioner.core.asr.jianying import JianYingASR
 from videocaptioner.core.asr.whisper_api import WhisperAPI
 from videocaptioner.core.asr.whisper_cpp import WhisperCppASR
@@ -66,6 +67,9 @@ def _create_asr_instance(audio_path: str, config: TranscribeConfig) -> ChunkedAS
     elif model_type == TranscribeModelEnum.WHISPER_API:
         return _create_whisper_api_asr(audio_path, config)
 
+    elif model_type == TranscribeModelEnum.BAILIAN_FUN_ASR:
+        return _create_fun_asr(audio_path, config)
+
     elif model_type == TranscribeModelEnum.FASTER_WHISPER:
         return _create_faster_whisper_asr(audio_path, config)
 
@@ -123,6 +127,26 @@ def _create_whisper_api_asr(audio_path: str, config: TranscribeConfig) -> Chunke
     }
     return ChunkedASR(
         asr_class=WhisperAPI, audio_path=audio_path, asr_kwargs=asr_kwargs
+    )
+
+
+def _create_fun_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
+    """Create Bailian Fun-ASR instance with long-audio chunking support."""
+    asr_kwargs = {
+        "use_cache": True,
+        "need_word_time_stamp": config.need_word_time_stamp,
+        "language": config.transcribe_language,
+        "api_key": config.fun_asr_api_key or "",
+        "api_base": config.fun_asr_api_base or "",
+        "model": config.fun_asr_model or "fun-asr",
+    }
+    return ChunkedASR(
+        asr_class=BailianFunASR,
+        audio_path=audio_path,
+        asr_kwargs=asr_kwargs,
+        chunk_concurrency=1,
+        chunk_length=60 * 20,
+        chunk_overlap=0,
     )
 
 

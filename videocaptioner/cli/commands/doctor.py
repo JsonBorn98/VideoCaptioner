@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
-from videocaptioner.cli.config import CONFIG_FILE, DEFAULTS, get
+from videocaptioner.core.application.config_store import CONFIG_FILE, DEFAULTS, get
 from videocaptioner.core.dubbing import build_dubbing_config
 from videocaptioner.core.dubbing.presets import (
     get_dubbing_preset,
@@ -23,6 +23,7 @@ from videocaptioner.core.speech import (
     SynthesisRequest,
     create_speech_synthesizer,
 )
+from videocaptioner.core.subtitle.ass_renderer import ffmpeg_supports_ass_filter
 
 
 @dataclass
@@ -131,6 +132,8 @@ def _check_transcribe(config: dict) -> list[Check]:
     checks = [Check("transcribe.asr", "ok", f"default ASR: {asr}")]
     if asr == "whisper-api" and not get(config, "whisper_api.api_key", ""):
         checks.append(Check("whisper_api.api_key", "error", "Whisper API key is missing", "Run 'videocaptioner config set whisper_api.api_key <key>'"))
+    if asr == "fun-asr" and not get(config, "fun_asr.api_key", ""):
+        checks.append(Check("fun_asr.api_key", "error", "Bailian Fun-ASR API key is missing", "Run 'videocaptioner config set fun_asr.api_key <key>'"))
     if asr == "whisper-cpp" and not any(shutil.which(n) for n in ["whisper-cpp", "whisper", "whisper-cpp-main"]):
         checks.append(Check("whisper-cpp", "error", "whisper.cpp binary not found", "Install whisper.cpp or choose --asr bijian/whisper-api"))
     return checks
@@ -140,14 +143,32 @@ def _check_subtitle(config: dict) -> list[Check]:
     checks: list[Check] = []
     optimize = bool(get(config, "subtitle.optimize", True))
     split = bool(get(config, "subtitle.split", True))
+    render_mode = str(get(config, "subtitle.render_mode", "ass"))
     translator = get(config, "translate.service", "bing")
     needs_llm = optimize or split or translator == "llm"
     checks.append(Check("subtitle.processing", "ok", f"ai_polish={optimize}, split={split}, translator={translator}"))
+    if _is_ass_render_mode(render_mode) and shutil.which("ffmpeg"):
+        if ffmpeg_supports_ass_filter():
+            checks.append(Check("ffmpeg.ass_filter", "ok", "FFmpeg supports ASS hard-subtitle rendering"))
+        else:
+            checks.append(
+                Check(
+                    "ffmpeg.ass_filter",
+                    "error",
+                    "当前 FFmpeg 不支持 ASS 硬字幕渲染",
+                    "安装带 libass 的完整 FFmpeg，或在字幕样式里切换为圆角背景",
+                )
+            )
     if needs_llm and not get(config, "llm.api_key", ""):
         checks.append(Check("llm.api_key", "warn", "LLM API key is missing; AI polish/split/LLM translation will fail", "Run 'videocaptioner config set llm.api_key <key>' or disable AI polish/split"))
     if needs_llm and not get(config, "llm.model", ""):
         checks.append(Check("llm.model", "error", "LLM model is missing", "Run 'videocaptioner config set llm.model <model>'"))
     return checks
+
+
+def _is_ass_render_mode(render_mode: str) -> bool:
+    normalized = render_mode.strip().lower()
+    return normalized in {"ass", "ass_style", "ass-style", "ass 样式", "ass样式"}
 
 
 def _check_dubbing(config: dict) -> list[Check]:

@@ -1,111 +1,261 @@
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from dataclasses import dataclass
+from enum import Enum
+from typing import Callable
+
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPen
+from PyQt5.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
-    BodyLabel,
     CaptionLabel,
-    InfoBadge,
     InfoBar,
-    InfoLevel,
     PrimaryPushButton,
     PushButton,
     ScrollArea,
-    SimpleCardWidget,
     SubtitleLabel,
     TitleLabel,
-    isDarkTheme,
 )
 from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.cli.commands.doctor import Check, run_diagnostics
 from videocaptioner.core.constant import INFOBAR_DURATION_ERROR, INFOBAR_DURATION_SUCCESS
+from videocaptioner.core.entities import TranscribeModelEnum, TranslatorServiceEnum
 from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.common.dubbing_options import get_provider_option
+from videocaptioner.ui.common.theme_tokens import AppPalette, app_palette, rgba
+from videocaptioner.ui.components.workflow_widgets import StatusBadge
+
+Translator = Callable[[str], str]
+
+
+class ItemStatus(Enum):
+    PENDING = "pending"
+    CHECKING = "checking"
+    OK = "ok"
+    ERROR = "error"
+
+
+class ItemAction(Enum):
+    TOOL_HELP = "tool_help"
+    TRANSCRIBE_SETTINGS = "transcribe_settings"
+    LLM_SETTINGS = "llm_settings"
+    TRANSLATE_SETTINGS = "translate_settings"
+    DUBBING_SETTINGS = "dubbing_settings"
+
+
+@dataclass(frozen=True)
+class DiagnosticItem:
+    key: str
+    title: str
+    description: str
+    action: ItemAction
+    button_text: str
+    status: ItemStatus = ItemStatus.PENDING
+
+
+@dataclass(frozen=True)
+class TaskChipData:
+    category: str
+    title: str
 
 
 class DoctorThread(QThread):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, check_api: bool = False):
-        super().__init__()
-        self.check_api = check_api
-
     def run(self):
         try:
-            self.finished.emit(run_diagnostics(_build_doctor_config(), check_api=self.check_api))
+            self.finished.emit(run_diagnostics(_build_doctor_config(), check_api=False))
         except Exception as exc:
             self.error.emit(str(exc))
 
 
-class StatusPill(InfoBadge):
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent=parent)
-        self.setFixedHeight(24)
-        if text in {"ok", "warn", "error", "pending", "checking"}:
-            self.setStatus(text)
-        else:
-            self.setText(text)
-
-    def setStatus(self, status: str):
-        self.setText(_status_label(status))
-        self.setLevel(
-            {
-                "ok": InfoLevel.SUCCESS,
-                "warn": InfoLevel.WARNING,
-                "error": InfoLevel.ERROR,
-                "checking": InfoLevel.INFOAMTION,
-                "pending": InfoLevel.ATTENTION,
-            }.get(status, InfoLevel.ATTENTION)
-        )
-
-
-class HealthCard(SimpleCardWidget):
-    def __init__(self, title: str, parent=None):
+class TaskChip(QFrame):
+    def __init__(self, data: TaskChipData, parent=None):
         super().__init__(parent)
-        self.setObjectName("healthCard")
-        self.setBorderRadius(8)
-        self.setMinimumHeight(86)
+        self.setObjectName("taskChip")
+        self.setFixedHeight(58)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(6)
-        top = QHBoxLayout()
-        self.badge = StatusPill("pending", self)
-        self.titleLabel = BodyLabel(title, self)
-        top.addWidget(self.titleLabel)
-        top.addStretch(1)
-        top.addWidget(self.badge)
-        self.messageLabel = CaptionLabel("等待自动检查", self)
-        self.messageLabel.setWordWrap(True)
-        layout.addLayout(top)
-        layout.addWidget(self.messageLabel)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(3)
 
-    def updateState(self, status: str, message: str):
-        self.badge.setStatus(status)
-        self.messageLabel.setText(message)
-        self.setProperty("status", status)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        category = QLabel(data.category, self)
+        category.setObjectName("taskChipCategory")
+        title = QLabel(data.title, self)
+        title.setObjectName("taskChipTitle")
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        layout.addWidget(category)
+        layout.addWidget(title)
 
 
-class CheckRow(QWidget):
-    def __init__(self, check: Check, parent=None):
+class StatusDot(QWidget):
+    def __init__(self, status: ItemStatus, parent=None):
         super().__init__(parent)
-        self.setObjectName("checkRow")
-        self.setMinimumHeight(48)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 7, 12, 7)
-        layout.setSpacing(12)
-        self.badge = StatusPill(check.status, self)
-        textBox = QVBoxLayout()
-        textBox.setSpacing(2)
-        primary_text = _primary_check_text(check)
-        secondary_text = _secondary_check_text(check)
-        self.nameLabel = BodyLabel(primary_text, self)
-        self.messageLabel = CaptionLabel(secondary_text, self)
-        self.messageLabel.setWordWrap(True)
-        textBox.addWidget(self.nameLabel)
-        textBox.addWidget(self.messageLabel)
-        layout.addWidget(self.badge)
-        layout.addLayout(textBox, 1)
+        self.setFixedSize(24, 24)
+        self._status = status
+        self.setStatus(status)
+
+    def setStatus(self, status: ItemStatus):
+        self._status = status
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        palette = app_palette()
+
+        if self._status == ItemStatus.OK:
+            fill = QColor(palette.accent)
+            border, mark = palette.accent, palette.accent_fg
+        elif self._status == ItemStatus.ERROR:
+            fill = QColor(palette.danger)
+            fill.setAlphaF(0.16)
+            border, mark = palette.danger, palette.danger_fg
+        else:
+            fill = QColor(palette.field)
+            border, mark = palette.line, palette.muted
+
+        painter.setPen(QPen(QColor(border), 1.4))
+        painter.setBrush(fill)
+        painter.drawEllipse(1, 1, 22, 22)
+
+        pen = QPen(QColor(mark), 1.7)
+        pen.setCapStyle(Qt.RoundCap)  # type: ignore
+        pen.setJoinStyle(Qt.RoundJoin)  # type: ignore
+        painter.setPen(pen)
+        if self._status == ItemStatus.OK:
+            painter.drawLine(7, 12, 10, 15)
+            painter.drawLine(10, 15, 17, 8)
+        elif self._status == ItemStatus.ERROR:
+            painter.drawLine(12, 7, 12, 13)
+            painter.drawPoint(12, 17)
+        else:
+            painter.drawLine(8, 12, 16, 12)
+
+
+class StatusPill(StatusBadge):
+    def __init__(self, status: ItemStatus, parent=None):
+        super().__init__("", parent, level=_status_level(status))
+        self.setMinimumWidth(82)
+        self.setStatus(status)
+
+    def setStatus(self, status: ItemStatus):
+        self.setText(self.tr(_status_text(status)))
+        self.setLevel(_status_level(status))
+
+
+class DiagnosticRow(QFrame):
+    actionRequested = pyqtSignal(object)
+
+    def __init__(self, item: DiagnosticItem, actions_enabled: bool = True, parent=None):
+        super().__init__(parent)
+        self.item = item
+        self.setObjectName("diagnosticRow")
+        if item.status == ItemStatus.ERROR:
+            self.setProperty("status", "error")
+        self.setFixedHeight(82)
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(16, 11, 16, 11)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(0)
+        layout.setColumnStretch(1, 1)
+
+        dot = StatusDot(item.status, self)
+        layout.addWidget(dot, 0, 0, 2, 1, Qt.AlignCenter)
+
+        title = QLabel(item.title, self)
+        title.setObjectName("rowTitle")
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        description = QLabel(item.description, self)
+        description.setObjectName("rowDescription")
+        description.setWordWrap(True)
+        description.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(5)
+        text_layout.addWidget(title)
+        text_layout.addWidget(description)
+        layout.addLayout(text_layout, 0, 1, 2, 1)
+
+        pill = StatusPill(item.status, self)
+        layout.addWidget(pill, 0, 2, 2, 1, Qt.AlignVCenter)
+
+        button_cls = PrimaryPushButton if item.status == ItemStatus.ERROR else PushButton
+        button = button_cls(item.button_text, self)
+        button.setFixedSize(112, 36)
+        button.setEnabled(actions_enabled and item.status != ItemStatus.CHECKING)
+        button.clicked.connect(lambda: self.actionRequested.emit(item.action))
+        layout.addWidget(button, 0, 3, 2, 1, Qt.AlignVCenter)
+
+
+class DiagnosticPanel(QFrame):
+    actionRequested = pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("diagnosticPanel")
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(18, 18, 18, 18)
+        self.layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(12)
+        title_group = QVBoxLayout()
+        title_group.setSpacing(5)
+        title = SubtitleLabel(self.tr("检查清单"), self)
+        title_group.addWidget(title)
+        header.addLayout(title_group, 1)
+        self.summaryPill = StatusPill(ItemStatus.PENDING, self)
+        self.summaryPill.setFixedWidth(104)
+        header.addWidget(self.summaryPill, 0, Qt.AlignTop)
+        self.layout.addLayout(header)
+
+        self.rowsFrame = QFrame(self)
+        self.rowsFrame.setObjectName("rowsFrame")
+        self.rowsLayout = QVBoxLayout(self.rowsFrame)
+        self.rowsLayout.setContentsMargins(0, 0, 0, 0)
+        self.rowsLayout.setSpacing(0)
+        self.layout.addWidget(self.rowsFrame)
+
+    def setItems(
+        self,
+        items: list[DiagnosticItem],
+        finished: bool = False,
+        actions_enabled: bool = True,
+    ):
+        _clear_layout(self.rowsLayout)
+        errors = sum(item.status == ItemStatus.ERROR for item in items)
+        checking = any(item.status == ItemStatus.CHECKING for item in items)
+        pending = sum(item.status == ItemStatus.PENDING for item in items)
+        if errors:
+            self.summaryPill.setText(self.tr("{count} 项未通过").format(count=errors))
+            self.summaryPill.setLevel("danger")
+        elif checking:
+            self.summaryPill.setText(self.tr("检查中"))
+            self.summaryPill.setLevel("neutral")
+        elif finished:
+            self.summaryPill.setText(self.tr("全部通过"))
+            self.summaryPill.setLevel("success")
+        else:
+            self.summaryPill.setText(self.tr("{count} 项待检查").format(count=pending))
+            self.summaryPill.setLevel("neutral")
+
+        for item in sorted(items, key=lambda i: 0 if i.status == ItemStatus.ERROR else 1):
+            row = DiagnosticRow(item, actions_enabled=actions_enabled, parent=self.rowsFrame)
+            row.actionRequested.connect(self.actionRequested)
+            self.rowsLayout.addWidget(row)
 
 
 class DoctorInterface(ScrollArea):
@@ -115,284 +265,549 @@ class DoctorInterface(ScrollArea):
         super().__init__(parent=parent)
         self.setWindowTitle(self.tr("诊断"))
         self.thread: DoctorThread | None = None
-        self._auto_started = False
+        self.has_results = False
+        self.is_running = False
         self.scrollWidget = QWidget()
         self.pageLayout = QVBoxLayout(self.scrollWidget)
-        self.titleLabel = TitleLabel(self.tr("诊断"), self)
-        self.resultContainer = SimpleCardWidget(self.scrollWidget)
-        self.resultContainer.setBorderRadius(8)
-        self.resultLayout = QVBoxLayout(self.resultContainer)
-        self.resultLayout.setContentsMargins(0, 6, 0, 6)
-        self.resultLayout.setSpacing(0)
+        self.taskStrip = QFrame(self.scrollWidget)
+        self.taskGrid = QGridLayout(self.taskStrip)
+        self.panel = DiagnosticPanel(self.scrollWidget)
+        self.runButton = PrimaryPushButton(self.tr("运行诊断"), self.scrollWidget, icon=FIF.SYNC)
         self._init_ui()
 
     def _init_ui(self):
         self.resize(1000, 800)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
-        self.setViewportMargins(0, 80, 0, 20)
         self.setWidget(self.scrollWidget)
         self.setWidgetResizable(True)
         self.setObjectName("doctorInterface")
         self.scrollWidget.setObjectName("scrollWidget")
-        self.titleLabel.setObjectName("settingLabel")
-        self.titleLabel.move(36, 30)
         self.enableTransparentBackground()
+
+        self.pageLayout.setSpacing(18)
+        self.pageLayout.setContentsMargins(42, 38, 42, 42)
 
         toolbar = QWidget(self.scrollWidget)
         toolbarLayout = QHBoxLayout(toolbar)
         toolbarLayout.setContentsMargins(0, 0, 0, 0)
-        toolbarLayout.setSpacing(10)
+        toolbarLayout.setSpacing(16)
         heading = QVBoxLayout()
-        heading.setSpacing(4)
-        heading.addWidget(SubtitleLabel(self.tr("环境健康检查"), toolbar))
-        heading.addWidget(CaptionLabel(self.tr("自动检查本机依赖和配置；深度诊断会额外请求当前 API。"), toolbar))
+        heading.setSpacing(0)
+        self.titleLabel = TitleLabel(self.tr("诊断"), toolbar)
+        self.subTitleLabel = CaptionLabel(self.tr("检查当前任务会用到的服务和工具。未启用的功能不会出现在清单里。"), toolbar)
+        heading.addWidget(self.titleLabel)
+        self.subTitleLabel.hide()
         toolbarLayout.addLayout(heading, 1)
-        self.runButton = PushButton(self.tr("重新检查"), toolbar, icon=FIF.SEARCH)
-        self.deepRunButton = PrimaryPushButton(self.tr("深度诊断"), toolbar)
-        self.deepRunButton.setIcon(FIF.SYNC)
-        self.runButton.setFixedHeight(36)
-        self.deepRunButton.setFixedHeight(36)
-        self.deepRunButton.setToolTip(self.tr("包含少量真实 API 请求，可能产生费用"))
-        toolbarLayout.addWidget(self.runButton)
-        toolbarLayout.addWidget(self.deepRunButton)
+        self.runButton.setFixedHeight(40)
+        toolbarLayout.addWidget(self.runButton, 0, Qt.AlignTop)
 
-        self.summaryGrid = QGridLayout()
-        self.summaryGrid.setHorizontalSpacing(12)
-        self.summaryGrid.setVerticalSpacing(12)
-        self.healthCards = {
-            "env": HealthCard(self.tr("基础环境"), self.scrollWidget),
-            "download": HealthCard(self.tr("下载能力"), self.scrollWidget),
-            "ai": HealthCard(self.tr("AI 配置"), self.scrollWidget),
-            "dubbing": HealthCard(self.tr("配音服务"), self.scrollWidget),
-        }
-        for index, card in enumerate(self.healthCards.values()):
-            self.summaryGrid.addWidget(card, index // 2, index % 2)
+        self.taskStrip.setObjectName("taskStrip")
+        self.taskGrid.setContentsMargins(12, 12, 12, 12)
+        self.taskGrid.setHorizontalSpacing(10)
+        self.taskGrid.setVerticalSpacing(10)
 
-        self.pageLayout.setSpacing(16)
-        self.pageLayout.setContentsMargins(36, 10, 36, 0)
         self.pageLayout.addWidget(toolbar)
-        self.pageLayout.addLayout(self.summaryGrid)
-        self.pageLayout.addWidget(BodyLabel(self.tr("检查结果"), self.scrollWidget))
-        self.pageLayout.addWidget(self.resultContainer)
+        self.pageLayout.addWidget(self.taskStrip)
+        self.pageLayout.addWidget(self.panel)
         self.pageLayout.addStretch(1)
-        self.runButton.clicked.connect(lambda: self._run(False))
-        self.deepRunButton.clicked.connect(lambda: self._run(True))
-        self._show_pending_rows()
+
+        self.runButton.clicked.connect(self._run)
+        self.panel.actionRequested.connect(self._handle_action)
+        self._sync_page_background()
+        self._refresh_pending()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_page_background()
-        if not self._auto_started:
-            self._auto_started = True
-            QTimer.singleShot(80, lambda: self._run(False))
+        if not self.has_results and not self.is_running:
+            self._refresh_pending()
 
     def _sync_page_background(self):
-        color = "#202020" if isDarkTheme() else "#f5f5f5"
-        self.setStyleSheet(f"QScrollArea {{ border: none; background: {color}; }}")
-        self.scrollWidget.setStyleSheet(f"QWidget#scrollWidget {{ background: {color}; }}")
+        palette = app_palette()
+        self.setStyleSheet(f"QScrollArea {{ border: none; background: {palette.bg}; }}")
+        self.scrollWidget.setStyleSheet(_page_styles(palette))
 
-    def _show_pending_rows(self):
-        self._clear_results()
-        pending = [
-            Check("python / ffmpeg / ffprobe", "pending", self.tr("准备检查音视频处理工具")),
-            Check("yt-dlp", "pending", self.tr("准备检查在线视频下载能力")),
-            Check("transcribe / subtitle / LLM", "pending", self.tr("准备检查转录、翻译和大模型配置")),
-            Check("dubbing", "pending", self.tr("准备检查配音音色和服务配置")),
-        ]
-        for check in pending:
-            self.resultLayout.addWidget(CheckRow(check, self.resultContainer))
+    def _refresh_task_strip(self, checks: list[Check] | None = None):
+        _clear_layout(self.taskGrid)
+        chips = _task_chips(self.tr, checks)
+        columns = max(1, min(5, len(chips)))
+        for index, chip in enumerate(chips):
+            widget = TaskChip(chip, self.taskStrip)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.taskGrid.addWidget(widget, index // columns, index % columns)
 
-    def _run(self, check_api: bool):
-        if self.thread and self.thread.isRunning():
+    def _refresh_pending(self):
+        self.has_results = False
+        self.is_running = False
+        self.runButton.setEnabled(True)
+        self.runButton.setText(self.tr("运行诊断"))
+        self._refresh_task_strip()
+        self.panel.setItems(_pending_items(self.tr))
+
+    def _run(self):
+        if self.is_running or (self.thread and self.thread.isRunning()):
             return
-        self._set_running(True)
-        self._clear_results()
-        running_text = self.tr("正在真实请求当前服务，请稍候") if check_api else self.tr("正在检查本机依赖和基础配置")
-        self.resultLayout.addWidget(CheckRow(Check("running", "checking", running_text), self.resultContainer))
-        self.thread = DoctorThread(check_api=check_api)
+        self.has_results = False
+        self.is_running = True
+        self.runButton.setEnabled(False)
+        self.runButton.setText(self.tr("诊断中"))
+        self.panel.setItems(
+            _with_status(_base_items(self.tr), ItemStatus.CHECKING),
+            actions_enabled=False,
+        )
+        self.thread = DoctorThread()
         self.thread.finished.connect(self._on_finished)
         self.thread.error.connect(self._on_error)
         self.thread.start()
 
     def _on_finished(self, checks: list[Check]):
-        self._set_running(False)
-        self._clear_results()
-        for check in checks:
-            self.resultLayout.addWidget(CheckRow(check, self.resultContainer))
-        self._update_summary(checks)
-        errors = sum(1 for c in checks if c.status == "error")
-        warnings = sum(1 for c in checks if c.status == "warn")
+        self.has_results = True
+        self.is_running = False
+        self.runButton.setEnabled(True)
+        self.runButton.setText(self.tr("重新诊断"))
+        self._refresh_task_strip(checks)
+        items = _items_from_checks(checks, self.tr)
+        self.panel.setItems(items, finished=True)
+        errors = sum(item.status == ItemStatus.ERROR for item in items)
         if errors:
             InfoBar.error(
                 self.tr("诊断完成"),
-                self.tr("发现 {errors} 个错误，{warnings} 个警告").format(errors=errors, warnings=warnings),
+                self.tr("发现 {count} 项需要处理").format(count=errors),
                 duration=INFOBAR_DURATION_ERROR,
                 parent=self,
             )
         else:
             InfoBar.success(
                 self.tr("诊断完成"),
-                self.tr("发现 {warnings} 个警告").format(warnings=warnings),
+                self.tr("当前检查项全部通过"),
                 duration=INFOBAR_DURATION_SUCCESS,
                 parent=self,
             )
 
-    def _update_summary(self, checks: list[Check]):
-        groups = {
-            "env": ("python", "ffmpeg", "ffprobe", "config.file"),
-            "download": ("yt-dlp",),
-            "ai": ("transcribe", "subtitle", "llm", "whisper", "translate"),
-            "dubbing": ("dubbing", "api.dubbing"),
-        }
-        for key, prefixes in groups.items():
-            matched = [c for c in checks if c.name.startswith(prefixes)]
-            status = _group_status(matched)
-            if not matched:
-                self.healthCards[key].updateState("warn", self.tr("未发现相关检查项"))
-                continue
-            errors = sum(c.status == "error" for c in matched)
-            warnings = sum(c.status == "warn" for c in matched)
-            ok = sum(c.status == "ok" for c in matched)
-            message = self.tr("{ok} 正常 / {warnings} 警告 / {errors} 错误").format(
-                ok=ok,
-                warnings=warnings,
-                errors=errors,
-            )
-            self.healthCards[key].updateState(status, message)
-
-    def _set_running(self, running: bool):
-        self.runButton.setEnabled(not running)
-        self.deepRunButton.setEnabled(not running)
-        for card in self.healthCards.values():
-            card.updateState("checking" if running else "pending", self.tr("检查中...") if running else self.tr("等待检查"))
-
     def _on_error(self, message: str):
-        self._set_running(False)
+        self.is_running = False
+        self.runButton.setEnabled(True)
+        self.runButton.setText(self.tr("重新诊断"))
+        self.panel.setItems(_pending_items(self.tr))
         InfoBar.error(self.tr("诊断失败"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
 
-    def _clear_results(self):
-        while self.resultLayout.count():
-            item = self.resultLayout.takeAt(0)
-            if widget := item.widget():
-                widget.deleteLater()
+    def _handle_action(self, action: ItemAction):
+        if action == ItemAction.TOOL_HELP:
+            InfoBar.info(
+                self.tr("FFmpeg"),
+                self.tr("ASS 硬字幕需要带 libass 的完整 FFmpeg。macOS 可安装 ffmpeg-full；也可以先切换为圆角背景。"),
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+            return
+        page_key = _settings_page_for_action(action)
+        if page_key:
+            self._open_settings_page(page_key, _action_hint(action, self.tr))
+
+    def _open_settings_page(self, page_key: str, message: str):
+        window = self.window()
+        if hasattr(window, "openSettingsPage"):
+            opened = window.openSettingsPage(page_key)  # type: ignore[attr-defined]
+            if opened is False:
+                InfoBar.error(
+                    self.tr("跳转失败"),
+                    self.tr("没有找到对应的设置页。"),
+                    duration=INFOBAR_DURATION_ERROR,
+                    parent=self,
+                )
+                return
+        else:
+            target = getattr(window, "settingInterface", None)
+            if target is not None and hasattr(window, "switchTo"):
+                if target.setCurrentPage(page_key):
+                    window.switchTo(target)  # type: ignore[attr-defined]
+                else:
+                    return
+        InfoBar.info(self.tr("跳转"), message, duration=INFOBAR_DURATION_SUCCESS, parent=self)
 
 
-def _group_status(checks: list[Check]) -> str:
-    if any(c.status == "error" for c in checks):
-        return "error"
-    if any(c.status == "warn" for c in checks):
-        return "warn"
-    return "ok"
+def _clear_layout(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        if widget := item.widget():
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
 
 
-def _primary_check_text(check: Check) -> str:
-    if check.status in {"error", "warn"} and check.fix:
-        return _friendly_fix_text(check.fix)
+def _status_text(status: ItemStatus) -> str:
+    return {
+        ItemStatus.OK: "正常",
+        ItemStatus.ERROR: "未通过",
+        ItemStatus.CHECKING: "检查中",
+        ItemStatus.PENDING: "待检查",
+    }[status]
+
+
+def _status_level(status: ItemStatus) -> str:
+    return {
+        ItemStatus.OK: "success",
+        ItemStatus.ERROR: "danger",
+        ItemStatus.CHECKING: "neutral",
+        ItemStatus.PENDING: "neutral",
+    }[status]
+
+
+def _with_status(items: list[DiagnosticItem], status: ItemStatus) -> list[DiagnosticItem]:
+    return [
+        DiagnosticItem(
+            key=item.key,
+            title=item.title,
+            description=item.description,
+            action=item.action,
+            button_text=item.button_text,
+            status=status,
+        )
+        for item in items
+    ]
+
+
+def _pending_items(tr: Translator) -> list[DiagnosticItem]:
+    return _base_items(tr)
+
+
+def _base_items(tr: Translator) -> list[DiagnosticItem]:
+    items = [
+        DiagnosticItem(
+            key="ffmpeg",
+            title="FFmpeg / FFprobe",
+            description=tr("生成视频、压入字幕、合入配音都需要它。"),
+            action=ItemAction.TOOL_HELP,
+            button_text=tr("安装工具"),
+        ),
+        DiagnosticItem(
+            key="transcribe",
+            title=tr("转录服务"),
+            description=_transcribe_description(tr),
+            action=ItemAction.TRANSCRIBE_SETTINGS,
+            button_text=tr("转录配置"),
+        ),
+    ]
+    if _needs_llm():
+        items.append(
+            DiagnosticItem(
+                key="llm",
+                title=_llm_item_title(tr),
+                description=_llm_description(tr),
+                action=ItemAction.LLM_SETTINGS,
+                button_text=tr("大模型配置"),
+            )
+        )
+    if cfg.need_translate.value:
+        items.append(
+            DiagnosticItem(
+                key="translate",
+                title=tr("翻译服务"),
+                description=_translate_description(tr),
+                action=ItemAction.TRANSLATE_SETTINGS,
+                button_text=tr("翻译配置"),
+            )
+        )
+    items.append(
+        DiagnosticItem(
+            key="dubbing",
+            title=tr("配音服务"),
+            description=_dubbing_description(tr),
+            action=ItemAction.DUBBING_SETTINGS,
+            button_text=tr("配音配置"),
+        )
+    )
+    return items
+
+
+def _items_from_checks(checks: list[Check], tr: Translator) -> list[DiagnosticItem]:
+    checks_by_name = {check.name: check for check in checks}
+    items: list[DiagnosticItem] = []
+
+    ffmpeg_ass_check = checks_by_name.get("ffmpeg.ass_filter")
+    ffmpeg_status = _combined_status([checks_by_name.get("ffmpeg"), checks_by_name.get("ffprobe"), ffmpeg_ass_check])
+    ffmpeg_ass_failed = _check_status(ffmpeg_ass_check) == ItemStatus.ERROR
+    items.append(
+        DiagnosticItem(
+            key="ffmpeg",
+            title=(
+                tr("FFmpeg 不支持 ASS 硬字幕")
+                if ffmpeg_ass_failed
+                else tr("缺少 FFmpeg / FFprobe")
+                if ffmpeg_status == ItemStatus.ERROR
+                else "FFmpeg / FFprobe"
+            ),
+            description=(
+                tr("当前 FFmpeg 缺少 ASS 字幕滤镜。请安装完整版本，或把字幕渲染模式切换为圆角背景。")
+                if ffmpeg_ass_failed
+                else tr("缺少后无法生成视频、压入字幕或合入配音。")
+                if ffmpeg_status == ItemStatus.ERROR
+                else tr("工具完整，可生成视频和配音视频。")
+            ),
+            action=ItemAction.TOOL_HELP,
+            button_text=tr("处理方式") if ffmpeg_ass_failed else tr("安装工具"),
+            status=ffmpeg_status,
+        )
+    )
+
+    transcribe_checks = _checks_with_prefix(checks, ("transcribe", "whisper", "whisper-cpp"))
+    transcribe_status = _combined_status(transcribe_checks)
+    items.append(
+        DiagnosticItem(
+            key="transcribe",
+            title=tr("转录服务"),
+            description=(
+                tr("当前转录方式不可用，请检查网络、Key 或本地模型。")
+                if transcribe_status == ItemStatus.ERROR
+                else tr("当前转录方式可用，可生成原文字幕。")
+            ),
+            action=ItemAction.TRANSCRIBE_SETTINGS,
+            button_text=tr("转录配置"),
+            status=transcribe_status,
+        )
+    )
+
+    if _needs_llm():
+        llm_checks = _checks_with_prefix(checks, ("llm",))
+        llm_status = _combined_status(llm_checks)
+        items.append(
+            DiagnosticItem(
+                key="llm",
+                title=tr("大模型配置不可用") if llm_status == ItemStatus.ERROR else _llm_item_title(tr),
+                description=(
+                    tr("字幕校正、术语修正和智能断句需要可用 Key。")
+                    if llm_status == ItemStatus.ERROR
+                    else tr("大模型配置可用，可用于字幕增强。")
+                ),
+                action=ItemAction.LLM_SETTINGS,
+                button_text=tr("大模型配置"),
+                status=llm_status,
+            )
+        )
+
+    if cfg.need_translate.value:
+        items.append(
+            DiagnosticItem(
+                key="translate",
+                title=tr("翻译服务"),
+                description=(
+                    tr("大模型翻译会复用 LLM Key。")
+                    if _translate_uses_llm()
+                    else tr("翻译服务可用，可生成目标语言字幕。")
+                ),
+                action=ItemAction.TRANSLATE_SETTINGS,
+                button_text=tr("翻译配置"),
+                status=ItemStatus.OK,
+            )
+        )
+
+    dubbing_checks = _checks_with_prefix(checks, ("dubbing", "api.dubbing"))
+    dubbing_status = _combined_status(dubbing_checks)
+    items.append(
+        DiagnosticItem(
+            key="dubbing",
+            title=tr("配音服务"),
+            description=(
+                tr("Gemini / SiliconFlow 需要配音 Key；Edge 可免 Key。")
+                if dubbing_status == ItemStatus.ERROR
+                else tr("当前配音配置可用，可继续生成配音。")
+            ),
+            action=ItemAction.DUBBING_SETTINGS,
+            button_text=tr("配音配置"),
+            status=dubbing_status,
+        )
+    )
+    return items
+
+
+def _checks_with_prefix(checks: list[Check], prefixes: tuple[str, ...]) -> list[Check]:
+    return [check for check in checks if check.name.startswith(prefixes)]
+
+
+def _combined_status(checks: list[Check | None]) -> ItemStatus:
+    present = [check for check in checks if check is not None]
+    if not present:
+        return ItemStatus.OK
+    if any(check.status in {"error", "warn"} for check in present):
+        return ItemStatus.ERROR
+    if any(check.status == "checking" for check in present):
+        return ItemStatus.CHECKING
+    return ItemStatus.OK
+
+
+def _check_status(check: Check | None) -> ItemStatus:
+    if check is None:
+        return ItemStatus.OK
+    if check.status in {"error", "warn"}:
+        return ItemStatus.ERROR
     if check.status == "checking":
-        return "正在检查"
+        return ItemStatus.CHECKING
     if check.status == "pending":
-        return check.message
-    return _friendly_check_name(check.name)
+        return ItemStatus.PENDING
+    return ItemStatus.OK
 
 
-def _secondary_check_text(check: Check) -> str:
-    name = _friendly_check_name(check.name)
-    if check.status in {"error", "warn"} and check.fix:
-        return f"{name}：{_brief_check_message(check)}。影响：{_impact_text(check.name)}"
-    if check.status in {"checking", "pending"}:
-        return name
-    return _brief_check_message(check)
+def _task_chips(tr: Translator, checks: list[Check] | None = None) -> list[TaskChipData]:
+    chips = [
+        TaskChipData(tr("转录"), _transcribe_label()),
+    ]
+    if cfg.need_optimize.value or cfg.need_split.value:
+        chips.append(TaskChipData(tr("字幕处理"), _subtitle_processing_label(tr)))
+    if cfg.need_translate.value:
+        chips.append(TaskChipData(tr("翻译"), cfg.translator_service.value.value))
+    chips.append(TaskChipData(tr("配音"), _dubbing_label(tr)))
+    chips.append(TaskChipData(tr("导出"), _export_label(tr)))
+    return chips
 
 
-def _brief_check_message(check: Check) -> str:
-    message = check.message
-    if check.status == "ok":
-        if check.name in {"ffmpeg", "ffprobe", "yt-dlp"}:
-            executable = message.split(" (", 1)[0].strip()
-            executable_name = executable.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            return f"已检测到 {executable_name}"
-        if check.name == "config.file":
-            return "配置文件已保存"
-        if check.name == "api.dubbing":
-            return "真实配音请求成功"
-    if check.name == "config.file" and "Config file does not exist" in message:
-        return "还没有保存过配置文件"
-    if check.name == "yt-dlp" and "may be old" in message:
-        return "在线视频下载组件可能偏旧"
-    if check.name == "api.dubbing" and "Skipped real TTS request" in message:
-        return "未填写配音 API Key，已跳过真实请求"
-    return message
+def _transcribe_label() -> str:
+    return getattr(cfg.transcribe_model.value, "value", str(cfg.transcribe_model.value))
 
 
-def _impact_text(name: str) -> str:
-    if name in {"ffmpeg", "ffprobe"}:
-        return "视频合成、配音合入视频和媒体时长读取可能失败"
-    if name == "yt-dlp":
-        return "在线视频链接可能无法下载"
-    if name == "config.file":
-        return "部分设置可能无法持久保存"
-    if name.startswith("llm"):
-        return "字幕优化、断句或大模型翻译可能失败"
-    if name.startswith("whisper") or name == "transcribe.asr":
-        return "语音转字幕可能失败"
-    if name.startswith("dubbing") or name == "api.dubbing":
-        return "配音试听或正式生成配音可能失败"
-    return "相关功能可能无法正常使用"
+def _subtitle_processing_label(tr: Translator) -> str:
+    parts = []
+    if cfg.need_optimize.value:
+        parts.append(tr("校正"))
+    if cfg.need_split.value:
+        parts.append(tr("智能断句"))
+    return " + ".join(parts) or tr("未启用")
 
 
-def _friendly_check_name(name: str) -> str:
+def _dubbing_label(tr: Translator) -> str:
+    return tr(get_provider_option(cfg.dubbing_provider.value).title)
+
+
+def _export_label(tr: Translator) -> str:
+    pieces = [tr("字幕")]
+    if cfg.need_video.value:
+        pieces.insert(0, tr("视频"))
+    if cfg.dubbing_enabled.value:
+        pieces.append(tr("配音"))
+    if not cfg.need_video.value and not cfg.dubbing_enabled.value:
+        return tr("字幕文件")
+    return " + ".join(pieces)
+
+
+def _needs_llm() -> bool:
+    return bool(cfg.need_optimize.value or cfg.need_split.value or _translate_uses_llm())
+
+
+def _translate_uses_llm() -> bool:
+    return cfg.need_translate.value and cfg.translator_service.value == TranslatorServiceEnum.OPENAI
+
+
+def _llm_item_title(tr: Translator) -> str:
+    if cfg.need_optimize.value and cfg.need_split.value:
+        return tr("字幕校正与智能断句")
+    if cfg.need_optimize.value:
+        return tr("字幕校正")
+    if cfg.need_split.value:
+        return tr("智能断句")
+    return tr("大模型翻译")
+
+
+def _llm_description(tr: Translator) -> str:
+    if _translate_uses_llm() and not (cfg.need_optimize.value or cfg.need_split.value):
+        return tr("当前翻译会调用大模型，需要可用 Key。")
+    return tr("校正、术语修正、智能断句需要可用 Key。")
+
+
+def _transcribe_description(tr: Translator) -> str:
+    if cfg.transcribe_model.value.name in {"BIJIAN", "JIANYING"}:
+        return tr("把视频或音频转成原文字幕，免费接口需要网络。")
+    if cfg.transcribe_model.value.name == "WHISPER_API":
+        return tr("把视频或音频转成原文字幕，需要 Whisper Key。")
+    return tr("把视频或音频转成原文字幕，需要本地模型。")
+
+
+def _translate_description(tr: Translator) -> str:
+    if _translate_uses_llm():
+        return tr("生成目标语言字幕，大模型翻译会复用 LLM Key。")
+    return tr("生成目标语言字幕，失败只影响译文。")
+
+
+def _dubbing_description(tr: Translator) -> str:
+    return tr("按当前提供商和音色生成配音；部分服务需要 Key。")
+
+
+def _action_hint(action: ItemAction, tr: Translator) -> str:
     return {
-        "python": "Python 运行环境",
-        "ffmpeg": "FFmpeg 音视频处理",
-        "ffprobe": "FFprobe 媒体信息读取",
-        "yt-dlp": "在线视频下载",
-        "config.file": "配置文件",
-        "transcribe.asr": "转录方式",
-        "subtitle.processing": "字幕处理",
-        "llm.api_key": "大模型 API Key",
-        "llm.model": "大模型名称",
-        "whisper_api.api_key": "Whisper API Key",
-        "whisper-cpp": "本地 Whisper",
-        "dubbing.preset": "配音音色",
-        "dubbing.api_key": "配音 API Key",
-        "dubbing.provider": "配音服务",
-        "dubbing.voice": "配音声音",
-        "api.dubbing": "配音真实请求",
-        "running": "诊断任务",
-    }.get(name, name)
+        ItemAction.TRANSCRIBE_SETTINGS: tr("已打开转录配置。"),
+        ItemAction.LLM_SETTINGS: tr("已打开大模型配置。"),
+        ItemAction.TRANSLATE_SETTINGS: tr("已打开翻译服务配置。"),
+        ItemAction.DUBBING_SETTINGS: tr("已打开配音配置。"),
+        ItemAction.TOOL_HELP: tr("请安装 FFmpeg / FFprobe。"),
+    }[action]
 
 
-def _friendly_fix_text(fix: str) -> str:
-    replacements = {
-        "Install ffmpeg and make sure it is on PATH": "安装 FFmpeg，并确保命令行可以直接运行 ffmpeg",
-        "Install ffprobe and make sure it is on PATH": "安装 FFprobe，并确保命令行可以直接运行 ffprobe",
-        "Install yt-dlp and make sure it is on PATH": "安装或更新 yt-dlp，用于下载在线视频",
-        "Update yt-dlp if online downloads fail": "如果在线视频下载失败，请先更新 yt-dlp",
-        "Run 'videocaptioner config init' or set values with environment variables": "打开设置页保存一次配置，或运行 videocaptioner config init",
-        "Run 'videocaptioner config set llm.api_key <key>' or disable AI polish/split": "填写大模型 API Key，或关闭需要大模型的字幕优化功能",
-        "Run 'videocaptioner config set llm.model <model>'": "选择一个可用的大模型名称",
-        "Run 'videocaptioner config set dubbing.api_key <key>'": "在配音页或设置页填写当前配音服务的 API Key",
-        "Run 'videocaptioner config set dubbing.preset edge-cn-female'": "在配音页选择一个默认音色",
-        "Use siliconflow, gemini, or edge": "配音服务请选择 Edge、Gemini 或 SiliconFlow",
-        "Use a preset or a provider-supported voice": "选择当前服务支持的音色",
-        "Run a short 'videocaptioner dub sample.srt' to verify billing/provider access": "用一小段字幕测试配音服务是否能真实返回音频",
-        "Open Settings > Dubbing and verify provider, API Key, Base URL, model, and voice": "打开设置页的配音配置，检查服务、API Key、Base URL、模型和音色",
-    }
-    return replacements.get(fix, fix)
-
-
-def _status_label(status: str) -> str:
+def _settings_page_for_action(action: ItemAction) -> str | None:
     return {
-        "ok": "正常",
-        "warn": "注意",
-        "error": "错误",
-        "checking": "检查中",
-        "pending": "待检查",
-    }.get(status, status.upper())
+        ItemAction.TRANSCRIBE_SETTINGS: "transcribe",
+        ItemAction.LLM_SETTINGS: "llm",
+        ItemAction.TRANSLATE_SETTINGS: "translate-service",
+        ItemAction.DUBBING_SETTINGS: "dubbing",
+    }.get(action)
+
+
+def _page_styles(palette: AppPalette) -> str:
+    return f"""
+QWidget#scrollWidget {{
+    background: {palette.bg};
+}}
+QFrame#taskStrip {{
+    background: {palette.field};
+    border: 1px solid {palette.line_soft};
+    border-radius: 8px;
+}}
+QFrame#taskChip {{
+    background: {palette.field};
+    border: 1px solid {palette.line_soft};
+    border-radius: 7px;
+}}
+QLabel#taskChipCategory {{
+    color: {palette.subtle};
+    font-size: 12px;
+}}
+QLabel#taskChipTitle {{
+    color: {palette.text};
+    font-size: 14px;
+    font-weight: 700;
+}}
+QFrame#diagnosticPanel {{
+    background: {palette.panel};
+    border: 1px solid {palette.line};
+    border-radius: 8px;
+}}
+QFrame#rowsFrame {{
+    background: {palette.panel};
+    border: 1px solid {palette.line_soft};
+    border-radius: 8px;
+}}
+QFrame#diagnosticRow {{
+    background: {palette.panel};
+    border-bottom: 1px solid {palette.line_soft};
+}}
+QFrame#diagnosticRow[status="error"] {{
+    background: {rgba(palette.danger, 0.08)};
+    border-left: 3px solid {palette.danger};
+}}
+QLabel#rowTitle {{
+    color: {palette.text};
+    font-size: 15px;
+    font-weight: 700;
+}}
+QLabel#rowDescription {{
+    color: {palette.muted};
+    font-size: 12px;
+}}
+"""
 
 
 def _build_doctor_config() -> dict:
     provider = cfg.dubbing_provider.value
+    asr_name = cfg.transcribe_model.value.name.lower().replace("_", "-")
+    if cfg.transcribe_model.value == TranscribeModelEnum.BAILIAN_FUN_ASR:
+        asr_name = "fun-asr"
     return {
         "llm": {
             "api_key": _current_llm_api_key(),
@@ -400,27 +815,34 @@ def _build_doctor_config() -> dict:
             "model": _current_llm_model(),
         },
         "whisper_api": {
-            "api_key": cfg.whisper_api_key.value,
-            "api_base": cfg.whisper_api_base.value,
-            "model": cfg.whisper_api_model.value or "whisper-1",
+            "api_key": str(cfg.whisper_api_key.value or "").strip(),
+            "api_base": str(cfg.whisper_api_base.value or "").strip(),
+            "model": str(cfg.whisper_api_model.value or "whisper-1").strip(),
+        },
+        "fun_asr": {
+            "api_key": str(cfg.fun_asr_api_key.value or "").strip(),
+            "api_base": str(cfg.fun_asr_api_base.value or "").strip(),
+            "model": str(cfg.fun_asr_model.value or "fun-asr").strip(),
         },
         "transcribe": {
-            "asr": cfg.transcribe_model.value.name.lower().replace("_", "-"),
+            "asr": asr_name,
         },
         "subtitle": {
             "optimize": cfg.need_optimize.value,
             "split": cfg.need_split.value,
+            "translate": cfg.need_translate.value,
+            "render_mode": cfg.subtitle_render_mode.value.value,
         },
         "translate": {
-            "service": cfg.translator_service.value.name.lower(),
+            "service": "llm" if cfg.translator_service.value == TranslatorServiceEnum.OPENAI else cfg.translator_service.value.name.lower(),
         },
         "dubbing": {
             "provider": provider,
             "preset": cfg.dubbing_preset.value,
-            "api_key": cfg.dubbing_api_key.value,
-            "api_base": cfg.dubbing_api_base.value,
-            "model": cfg.dubbing_model.value,
-            "voice": cfg.dubbing_voice.value,
+            "api_key": str(cfg.dubbing_api_key.value or "").strip(),
+            "api_base": str(cfg.dubbing_api_base.value or "").strip(),
+            "model": str(cfg.dubbing_model.value or "").strip(),
+            "voice": str(cfg.dubbing_voice.value or "").strip(),
             "timing": "balanced",
             "audio_mode": "replace",
         },
@@ -429,7 +851,7 @@ def _build_doctor_config() -> dict:
 
 def _current_llm_api_key() -> str:
     service = cfg.llm_service.value
-    return {
+    value = {
         "OPENAI": cfg.openai_api_key.value,
         "SILICON_CLOUD": cfg.silicon_cloud_api_key.value,
         "DEEPSEEK": cfg.deepseek_api_key.value,
@@ -438,11 +860,12 @@ def _current_llm_api_key() -> str:
         "GEMINI": cfg.gemini_api_key.value,
         "CHATGLM": cfg.chatglm_api_key.value,
     }.get(service.name, "")
+    return str(value or "").strip()
 
 
 def _current_llm_api_base() -> str:
     service = cfg.llm_service.value
-    return {
+    value = {
         "OPENAI": cfg.openai_api_base.value,
         "SILICON_CLOUD": cfg.silicon_cloud_api_base.value,
         "DEEPSEEK": cfg.deepseek_api_base.value,
@@ -451,11 +874,12 @@ def _current_llm_api_base() -> str:
         "GEMINI": cfg.gemini_api_base.value,
         "CHATGLM": cfg.chatglm_api_base.value,
     }.get(service.name, "")
+    return str(value or "").strip()
 
 
 def _current_llm_model() -> str:
     service = cfg.llm_service.value
-    return {
+    value = {
         "OPENAI": cfg.openai_model.value,
         "SILICON_CLOUD": cfg.silicon_cloud_model.value,
         "DEEPSEEK": cfg.deepseek_model.value,
@@ -464,3 +888,4 @@ def _current_llm_model() -> str:
         "GEMINI": cfg.gemini_model.value,
         "CHATGLM": cfg.chatglm_model.value,
     }.get(service.name, "")
+    return str(value or "").strip()

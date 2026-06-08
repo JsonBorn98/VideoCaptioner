@@ -112,10 +112,11 @@ def _build_transcribe_parser(subparsers) -> None:
     asr = p.add_argument_group("ASR options")
     asr.add_argument(
         "--asr",
-        choices=["bijian", "jianying", "whisper-api", "whisper-cpp"],
+        choices=["bijian", "jianying", "fun-asr", "whisper-api", "whisper-cpp"],
         help="ASR engine (default: bijian). "
              "bijian/jianying: free, no setup, Chinese & English only. "
-             "For other languages use whisper-api or whisper-cpp",
+             "fun-asr: Bailian recorded-file ASR. "
+             "For other languages use fun-asr, whisper-api or whisper-cpp",
     )
     asr.add_argument("--language", metavar="CODE",
                      help="Source language as ISO 639-1 code, or 'auto' (default: auto)")
@@ -129,6 +130,12 @@ def _build_transcribe_parser(subparsers) -> None:
     asr.add_argument("--whisper-model", metavar="NAME",
                      help="Model name for whisper-api (default: whisper-1) "
                           "or whisper-cpp (default: large-v2)")
+    asr.add_argument("--fun-asr-api-key", metavar="KEY",
+                     help="Bailian/DashScope API key (for --asr fun-asr)")
+    asr.add_argument("--fun-asr-api-base", metavar="URL",
+                     help="Bailian/DashScope API base URL")
+    asr.add_argument("--fun-asr-model", metavar="NAME",
+                     help="Bailian Fun-ASR model name (default: fun-asr)")
 
     # Advanced options (configurable via 'config set', hidden from --help)
     for arg in ["--fw-model", "--fw-device", "--fw-vad-method", "--fw-prompt", "--whisper-prompt"]:
@@ -353,11 +360,14 @@ def _build_process_parser(subparsers) -> None:
     pipe.add_argument("--dub", action="store_true", help="Generate dubbed audio/video after subtitle processing")
     pipe.add_argument("--dub-only", action="store_true", help="Output only the dubbed result, skipping subtitle burn/embedding")
 
-    pipe.add_argument("--asr", choices=["bijian", "jianying", "whisper-api", "whisper-cpp"],
+    pipe.add_argument("--asr", choices=["bijian", "jianying", "fun-asr", "whisper-api", "whisper-cpp"],
                       help="ASR engine (default: bijian)")
     pipe.add_argument("--language", metavar="CODE",
                       help="Source language as ISO 639-1 code, or 'auto' (default: auto)")
     pipe.add_argument("--whisper-api-key", metavar="KEY", help="Whisper API key (for --asr whisper-api)")
+    pipe.add_argument("--fun-asr-api-key", metavar="KEY", help="Bailian/DashScope API key (for --asr fun-asr)")
+    pipe.add_argument("--fun-asr-api-base", metavar="URL", help="Bailian/DashScope API base URL")
+    pipe.add_argument("--fun-asr-model", metavar="NAME", help="Bailian Fun-ASR model name")
     pipe.add_argument("--translator", choices=["llm", "bing", "google"],
                       help="Translation service (default: bing). bing and google are free")
     pipe.add_argument("--to", dest="target_language", metavar="CODE", help="Target language BCP 47 code")
@@ -532,8 +542,8 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
 
     def _set(key: str, value) -> None:
         if value is not None:
-            from videocaptioner.cli.config import _set_nested
-            _set_nested(overrides, key, value)
+            from videocaptioner.core.application.config_store import set_nested
+            set_nested(overrides, key, value)
 
     # LLM
     _set("llm.api_key", getattr(args, "api_key", None))
@@ -544,6 +554,11 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
     _set("whisper_api.api_key", getattr(args, "whisper_api_key", None))
     _set("whisper_api.api_base", getattr(args, "whisper_api_base", None))
     _set("whisper_api.model", getattr(args, "whisper_model", None))
+
+    # Bailian Fun-ASR
+    _set("fun_asr.api_key", getattr(args, "fun_asr_api_key", None))
+    _set("fun_asr.api_base", getattr(args, "fun_asr_api_base", None))
+    _set("fun_asr.model", getattr(args, "fun_asr_model", None))
 
     # Transcribe
     _set("transcribe.asr", getattr(args, "asr", None))
@@ -630,7 +645,7 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
 
 def _load_config(args: argparse.Namespace) -> dict:
     """Load config with all layers merged."""
-    from videocaptioner.cli.config import build_config
+    from videocaptioner.core.application.config_store import build_config
     config_path = None
     if getattr(args, "config", None):
         config_path = Path(args.config)

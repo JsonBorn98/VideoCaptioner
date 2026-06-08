@@ -80,7 +80,7 @@ def build_dubbing_config(
 
     config = DubbingConfig(
         provider=resolved_provider,
-        api_key=api_key,
+        api_key=api_key.strip(),
         base_url=resolved["api_base"],
         model=resolved["model"],
         voice=resolved["voice"],

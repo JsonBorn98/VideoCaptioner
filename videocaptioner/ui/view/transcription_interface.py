@@ -4,7 +4,7 @@ import datetime
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from PyQt5.QtCore import QStandardPaths, Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap
@@ -48,9 +48,7 @@ from videocaptioner.core.entities import (
 )
 from videocaptioner.core.utils.platform_utils import get_available_transcribe_models, open_folder
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.common.signal_bus import signalBus
-from videocaptioner.ui.components.transcription_setting_card import TranscriptionSettingCard
-from videocaptioner.ui.components.TranscriptionSettingDialog import TranscriptionSettingDialog
+from videocaptioner.ui.common.theme_tokens import app_palette
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.transcript_thread import TranscriptThread
 from videocaptioner.ui.thread.video_info_thread import VideoInfoThread
@@ -71,6 +69,7 @@ class VideoInfoCard(CardWidget):
         self.selected_audio_track_index = 0  # 默认选择第一条音轨
 
     def setup_ui(self) -> None:
+        self.setObjectName("videoInfoCard")
         self.setFixedHeight(150)
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(20, 15, 20, 15)
@@ -84,8 +83,8 @@ class VideoInfoCard(CardWidget):
         default_thumbnail_path = os.path.join(DEFAULT_THUMBNAIL_PATH)
 
         self.video_thumbnail = QLabel(self)
+        self.video_thumbnail.setObjectName("videoThumbnail")
         self.video_thumbnail.setFixedSize(208, 117)
-        self.video_thumbnail.setStyleSheet("background-color: #1E1F22;")
         self.video_thumbnail.setAlignment(Qt.AlignCenter)  # type: ignore
         pixmap = QPixmap(default_thumbnail_path).scaled(
             self.video_thumbnail.size(),
@@ -350,30 +349,59 @@ class TranscriptionInterface(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setObjectName("TranscriptionInterface")
         self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
         self.setAcceptDrops(True)
         self.task: Optional[TranscribeTask] = None
         self.is_processing: bool = False
+        self._config_signal_connections: list[tuple[Any, Callable]] = []
 
         self._init_ui()
         self._setup_signals()
         self._set_value()
+        self._sync_page_style()
 
     def _init_ui(self) -> None:
         """初始化UI"""
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setObjectName("main_layout")
-        self.main_layout.setSpacing(20)
+        self.main_layout.setContentsMargins(64, 28, 64, 0)
+        self.main_layout.setSpacing(18)
 
         # 添加命令栏
         self._setup_command_bar()
 
         self.video_info_card = VideoInfoCard(self)
-        self.main_layout.addWidget(self.video_info_card)
+        self.main_layout.addWidget(self.video_info_card, 0, Qt.AlignTop)  # type: ignore[arg-type]
+        self.main_layout.addStretch(1)
 
-        # 添加转录设置卡片
-        self.transcription_setting_card = TranscriptionSettingCard(self)
-        self.main_layout.addWidget(self.transcription_setting_card)
+    def _sync_page_style(self) -> None:
+        palette = app_palette()
+        self.setStyleSheet(
+            f"""
+            QWidget#TranscriptionInterface {{
+                background: {palette.bg};
+            }}
+            CommandBar {{
+                background: transparent;
+                border: none;
+            }}
+            CardWidget#videoInfoCard {{
+                background: {palette.panel};
+                border: 1px solid {palette.line};
+                border-radius: 12px;
+            }}
+            QLabel#videoThumbnail {{
+                background: {palette.field};
+                border: 1px solid {palette.line_soft};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                color: {palette.text};
+                background: transparent;
+            }}
+            """
+        )
 
     def _setup_command_bar(self):
         """设置命令栏"""
@@ -401,6 +429,7 @@ class TranscriptionInterface(QWidget):
         for model in available_models:
             if (
                 model == TranscribeModelEnum.WHISPER_API
+                or model == TranscribeModelEnum.BAILIAN_FUN_ASR
                 or model == TranscribeModelEnum.BIJIAN
                 or model == TranscribeModelEnum.JIANYING
             ):
@@ -425,7 +454,7 @@ class TranscriptionInterface(QWidget):
             Action(FluentIcon.SETTING, "", triggered=self._show_output_settings)
         )
 
-        self.main_layout.addWidget(self.command_bar)
+        self.main_layout.addWidget(self.command_bar, 0, Qt.AlignTop)  # type: ignore[arg-type]
 
     def _setup_signals(self) -> None:
         """设置信号连接"""
@@ -439,15 +468,36 @@ class TranscriptionInterface(QWidget):
                 )
             )
 
-        # 全局信号连接
-        signalBus.transcription_model_changed.connect(
-            self.on_transcription_model_changed
+        self._connect_config_signal(
+            cfg.transcribe_model, self._sync_transcription_model_from_config
         )
 
+    def _connect_config_signal(self, option, handler: Callable) -> None:
+        option.valueChanged.connect(handler)
+        self._config_signal_connections.append((option.valueChanged, handler))
+
+    def _disconnect_config_signals(self) -> None:
+        for signal, handler in self._config_signal_connections:
+            try:
+                signal.disconnect(handler)
+            except (RuntimeError, TypeError):
+                pass
+        self._config_signal_connections.clear()
+
+    def _sync_transcription_model_from_config(self, value) -> None:
+        self.on_transcription_model_changed(value.value)
+
     def _show_output_settings(self):
-        """显示转录设置对话框"""
-        dialog = TranscriptionSettingDialog(self.window())
-        dialog.exec_()
+        """跳转到全局转录配置页"""
+        window = self.window()
+        if hasattr(window, "openSettingsPage"):
+            opened = window.openSettingsPage("transcribe")  # type: ignore[attr-defined]
+            if opened is not False:
+                return
+        setting_interface = getattr(window, "settingInterface", None)
+        if setting_interface is not None and hasattr(window, "switchTo"):
+            if setting_interface.setCurrentPage("transcribe"):
+                window.switchTo(setting_interface)  # type: ignore[attr-defined]
 
     def _set_value(self) -> None:
         """设置转录模型"""
@@ -458,10 +508,10 @@ class TranscriptionInterface(QWidget):
     def on_transcription_model_changed(self, model_name: str):
         """处理转录模型改变"""
         self.model_button.setText(self.tr(model_name))
-        self.transcription_setting_card.on_model_changed(model_name)
         for model in TranscribeModelEnum:
             if model.value == model_name:
-                cfg.set(cfg.transcribe_model, model)
+                if cfg.transcribe_model.value != model:
+                    cfg.set(cfg.transcribe_model, model)
                 break
 
     def _on_transcript_finished(self, task: TranscribeTask):
@@ -567,6 +617,7 @@ class TranscriptionInterface(QWidget):
                 )
 
     def closeEvent(self, event):
+        self._disconnect_config_signals()
         self.video_info_card.stop()
         super().closeEvent(event)
 

@@ -23,7 +23,7 @@ fi
 # Extract all tr() calls from Python files to .ts files
 echo "📝 Scanning tr() calls in Python code..."
 pylupdate5 -verbose \
-    $(find app -name "*.py") \
+    $(find videocaptioner -name "*.py") \
     -ts "$TRANS_DIR/VideoCaptioner_zh_CN.ts" \
     -ts "$TRANS_DIR/VideoCaptioner_zh_HK.ts" \
     -ts "$TRANS_DIR/VideoCaptioner_en_US.ts"
@@ -40,9 +40,8 @@ for ts_file in "$TRANS_DIR"/*.ts; do
         obsolete_count=$(grep -c 'type="obsolete"' "$ts_file" 2>/dev/null || echo "0")
         obsolete_count=$(echo "$obsolete_count" | head -1)  # Ensure single value
 
-        if [ "$obsolete_count" -gt 0 ] 2>/dev/null; then
-            # Create temp file and remove obsolete messages
-            python3 << EOF
+        # Create temp file, remove obsolete messages and empty contexts.
+        python3 << EOF
 import re
 from pathlib import Path
 
@@ -54,9 +53,14 @@ content = ts_path.read_text(encoding='utf-8')
 pattern = r'    <message>.*?type="obsolete".*?</message>\n'
 cleaned_content = re.sub(pattern, '', content, flags=re.DOTALL)
 
+# Remove contexts left empty after obsolete messages are removed.
+empty_context = r'<context>\s*<name>[^<]+</name>\s*</context>\n?'
+cleaned_content = re.sub(empty_context, '', cleaned_content, flags=re.DOTALL)
+
 ts_path.write_text(cleaned_content, encoding='utf-8')
 EOF
 
+        if [ "$obsolete_count" -gt 0 ] 2>/dev/null; then
             echo "   ✓ $filename: Removed $obsolete_count obsolete entries"
         else
             echo "   ✓ $filename: No obsolete entries"

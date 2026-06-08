@@ -6,12 +6,12 @@ from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
 from videocaptioner.cli.validators import (
     validate_dubbing,
     validate_subtitle_input,
     validate_video_input,
 )
+from videocaptioner.core.application.config_store import get
 from videocaptioner.core.dubbing import DubbingConfig, DubbingPipeline, SpeakerProfile
 from videocaptioner.core.dubbing.config_builder import build_dubbing_config
 

@@ -5,8 +5,29 @@ import platform
 import sys
 
 
+def _patch_qfluent_font_fallback():
+    if platform.system() != "Darwin":
+        return
+
+    import qfluentwidgets
+    from PyQt5.QtGui import QFont
+    from qfluentwidgets.common import font as fluent_font
+
+    def get_font(fontSize=14, weight=QFont.Normal):
+        font = QFont()
+        font.setFamilies(["PingFang SC", "Helvetica Neue", "Arial"])
+        font.setPixelSize(fontSize)
+        font.setWeight(weight)
+        return font
+
+    fluent_font.getFont = get_font
+    qfluentwidgets.getFont = get_font
+
+
 def main():
     import traceback
+
+    _suppress_qt_font_alias_warning()
 
     from PyQt5.QtCore import Qt, QTranslator
     from PyQt5.QtWidgets import QApplication
@@ -18,11 +39,10 @@ def main():
     # Suppress qfluentwidgets ad
     with open(os.devnull, "w") as _devnull:
         sys.stdout, _stdout = _devnull, sys.stdout
-        from qfluentwidgets import FluentTranslator
+        from qfluentwidgets import FluentTranslator, setTheme, setThemeColor
         sys.stdout = _stdout
 
     from videocaptioner.ui.common.config import cfg
-    from videocaptioner.ui.view.main_window import MainWindow
 
     # Qt platform plugin path
     lib_folder = "Lib" if platform.system() == "Windows" else "lib"
@@ -57,8 +77,13 @@ def main():
         os.environ["QT_SCALE_FACTOR"] = str(cfg.get(cfg.dpiScale))
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)  # type: ignore
 
+    _patch_qfluent_font_fallback()
     app = QApplication(sys.argv)
     app.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings, True)  # type: ignore
+    setTheme(cfg.themeMode.value)
+    setThemeColor(cfg.themeColor.value)
+
+    from videocaptioner.ui.view.main_window import MainWindow
 
     # i18n
     locale = cfg.get(cfg.language).value
@@ -70,6 +95,16 @@ def main():
     w = MainWindow()
     w.show()
     sys.exit(app.exec_())
+
+
+def _suppress_qt_font_alias_warning():
+    rule = "qt.qpa.fonts=false;qt.qpa.fonts.warning=false"
+    current = os.environ.get("QT_LOGGING_RULES", "").strip()
+    if not current:
+        os.environ["QT_LOGGING_RULES"] = rule
+    elif rule not in current:
+        separator = "\n" if "\n" in current else ";"
+        os.environ["QT_LOGGING_RULES"] = f"{current}{separator}{rule}"
 
 
 if __name__ == "__main__":
