@@ -1,0 +1,956 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VideoCaptioner 诊断页设计 A</title>
+  <style>
+    :root {
+      --bg: #0b1110;
+      --app: #151b19;
+      --chrome: #101614;
+      --panel: #1d2522;
+      --panel-2: #202a26;
+      --field: #25302c;
+      --line: #34413d;
+      --line-2: #2b3632;
+      --text: #f4f7f5;
+      --muted: #aab7b2;
+      --subtle: #7f8d88;
+      --accent: #07f08a;
+      --accent-soft: rgba(7, 240, 138, .13);
+      --warn: #aab7b2;
+      --warn-soft: rgba(255, 255, 255, .045);
+      --danger: #f08a7c;
+      --danger-soft: rgba(240, 138, 124, .10);
+      --shadow: 0 28px 80px rgba(0, 0, 0, .28);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 1520px;
+      color: var(--text);
+      background: var(--bg);
+      font-family: var(--font);
+      letter-spacing: 0;
+    }
+
+    h1, h2, h3, h4, p { margin: 0; }
+
+    button {
+      border: 0;
+      color: inherit;
+      background: transparent;
+      font: inherit;
+    }
+
+    .board {
+      width: 1520px;
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+
+    .board-head,
+    .version-title {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 0 40px;
+      margin-bottom: 24px;
+    }
+
+    .version-title {
+      align-items: center;
+      margin: 34px 0 12px;
+    }
+
+    .board-head h1 {
+      font-size: 32px;
+      line-height: 1.15;
+      font-weight: 860;
+    }
+
+    .board-head p {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 720;
+    }
+
+    .client {
+      position: relative;
+      width: 1440px;
+      height: 900px;
+      margin: 0 40px;
+      overflow: hidden;
+      border: 1px solid rgba(210, 230, 220, .14);
+      border-radius: 14px;
+      background: var(--app);
+      box-shadow: var(--shadow);
+    }
+
+    .titlebar {
+      position: absolute;
+      inset: 0 0 auto;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-bottom: 1px solid var(--line-2);
+      color: var(--muted);
+      background: #141917;
+      font-size: 14px;
+      font-weight: 820;
+    }
+
+    .dots {
+      position: absolute;
+      left: 24px;
+      display: flex;
+      gap: 12px;
+    }
+
+    .dot { width: 14px; height: 14px; border-radius: 50%; }
+    .red { background: #ff5f57; }
+    .yellow { background: #febc2e; }
+    .green { background: #28c840; }
+
+    .sidebar {
+      position: absolute;
+      top: 48px;
+      left: 0;
+      bottom: 0;
+      width: 76px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      padding: 26px 0 20px;
+      border-right: 1px solid var(--line-2);
+      background: var(--chrome);
+    }
+
+    .spacer { flex: 1; }
+
+    .nav {
+      position: relative;
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+    }
+
+    .nav.active { background: rgba(7, 240, 138, .16); }
+
+    .nav.active::before {
+      content: "";
+      position: absolute;
+      left: -16px;
+      width: 4px;
+      height: 24px;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+
+    .ico,
+    .icon {
+      width: 21px;
+      height: 21px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+
+    .ico img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: contain;
+      filter: brightness(0) saturate(100%) invert(78%) sepia(11%) saturate(248%) hue-rotate(107deg) brightness(88%) contrast(85%);
+    }
+
+    .nav.active .ico img,
+    .button.primary .ico img,
+    .status-mark.ok .ico img {
+      filter: brightness(0) saturate(100%) invert(72%) sepia(88%) saturate(1944%) hue-rotate(96deg) brightness(104%) contrast(100%);
+    }
+
+    .app {
+      position: absolute;
+      inset: 48px 0 0 76px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      padding: 38px 42px 34px;
+      background:
+        radial-gradient(circle at 52% -10%, rgba(7, 240, 138, .08), transparent 32%),
+        var(--app);
+    }
+
+    .page-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      flex: 0 0 auto;
+    }
+
+    .title-group {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .page-icon {
+      width: 56px;
+      height: 56px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, .035);
+      color: var(--muted);
+    }
+
+    .page-icon svg {
+      width: 30px;
+      height: 30px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .page-head h2 {
+      font-size: 38px;
+      line-height: 1;
+      font-weight: 900;
+    }
+
+    .head-meta {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .pill,
+    .state-pill {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, .03);
+      font-size: 13px;
+      font-weight: 820;
+      white-space: nowrap;
+    }
+
+    .pill.ok,
+    .state-pill.ok {
+      color: var(--accent);
+      border-color: rgba(7, 240, 138, .72);
+      background: var(--accent-soft);
+    }
+
+    .pill.warn,
+    .state-pill.warn {
+      color: var(--muted);
+      border-color: var(--line);
+      background: var(--warn-soft);
+    }
+
+    .pill.fail,
+    .state-pill.fail {
+      color: #f2b7af;
+      border-color: rgba(240, 138, 124, .58);
+      background: var(--danger-soft);
+    }
+
+    .button {
+      height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 0 20px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--text);
+      background: rgba(255, 255, 255, .035);
+      font-size: 16px;
+      font-weight: 860;
+      white-space: nowrap;
+    }
+
+    .button.primary {
+      height: 54px;
+      min-width: 160px;
+      color: #06110d;
+      border-color: rgba(7, 240, 138, .9);
+      background: var(--accent);
+      box-shadow: 0 18px 46px rgba(7, 240, 138, .16);
+    }
+
+    .button:disabled {
+      color: var(--subtle);
+      border-color: var(--line-2);
+      background: rgba(255, 255, 255, .025);
+      box-shadow: none;
+    }
+
+    .top-summary {
+      display: grid;
+      grid-template-columns: 310px minmax(0, 1fr);
+      gap: 14px;
+      flex: 0 0 auto;
+    }
+
+    .result-card,
+    .config-strip,
+    .check-panel {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(29, 37, 34, .88);
+    }
+
+    .result-card {
+      min-height: 116px;
+      display: grid;
+      grid-template-columns: 56px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      padding: 18px;
+    }
+
+    .status-mark {
+      width: 52px;
+      height: 52px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      border: 1px solid rgba(7, 240, 138, .36);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .status-mark.fail {
+      color: #f2b7af;
+      border-color: rgba(240, 138, 124, .50);
+      background: var(--danger-soft);
+    }
+
+    .status-mark.warn {
+      color: var(--muted);
+      border-color: var(--line);
+      background: var(--warn-soft);
+    }
+
+    .status-mark svg {
+      width: 28px;
+      height: 28px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .checking .status-mark svg,
+    .checking .row-icon svg {
+      animation: spin 1.2s linear infinite;
+    }
+
+    .result-card h3 {
+      font-size: 22px;
+      line-height: 1.1;
+      font-weight: 900;
+    }
+
+    .result-card p {
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 720;
+      line-height: 1.35;
+    }
+
+    .config-strip {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      padding: 10px;
+    }
+
+    .summary-cell {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid rgba(255, 255, 255, .06);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .025);
+    }
+
+    .summary-icon {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .035);
+    }
+
+    .summary-cell span {
+      display: block;
+      color: var(--subtle);
+      font-size: 13px;
+      font-weight: 760;
+    }
+
+    .summary-cell strong {
+      display: block;
+      margin-top: 4px;
+      overflow: hidden;
+      color: var(--text);
+      font-size: 17px;
+      font-weight: 880;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .check-panel {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      overflow: hidden;
+    }
+
+    .panel-head {
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line-2);
+    }
+
+    .panel-head h3 {
+      font-size: 24px;
+      line-height: 1;
+      font-weight: 900;
+    }
+
+    .head-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .check-list {
+      min-height: 0;
+      padding: 6px 0;
+      overflow: hidden;
+    }
+
+    .check-row {
+      display: grid;
+      grid-template-columns: 50px minmax(0, 1fr) 108px 128px;
+      gap: 14px;
+      align-items: center;
+      min-height: 82px;
+      padding: 13px 22px;
+      border-bottom: 1px solid rgba(52, 65, 61, .70);
+    }
+
+    .issue-mode .check-row {
+      min-height: 72px;
+      padding-top: 10px;
+      padding-bottom: 10px;
+    }
+
+    .check-row:last-child { border-bottom: 0; }
+
+    .row-icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, .03);
+    }
+
+    .row-icon.fail {
+      color: #f2b7af;
+      border-color: rgba(240, 138, 124, .50);
+      background: var(--danger-soft);
+    }
+
+    .row-icon.warn {
+      color: var(--muted);
+      border-color: var(--line);
+      background: var(--warn-soft);
+    }
+
+    .row-icon svg {
+      width: 22px;
+      height: 22px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.1;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .row-copy h4 {
+      overflow: hidden;
+      color: var(--text);
+      font-size: 19px;
+      line-height: 1.1;
+      font-weight: 880;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .row-copy p {
+      margin-top: 7px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.35;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .row-status {
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(7, 240, 138, .76);
+      border-radius: 999px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-size: 14px;
+      font-weight: 880;
+      white-space: nowrap;
+    }
+
+    .row-status.fail {
+      color: #f2b7af;
+      border-color: rgba(240, 138, 124, .58);
+      background: var(--danger-soft);
+    }
+
+    .row-status.warn {
+      color: var(--muted);
+      border-color: var(--line);
+      background: var(--warn-soft);
+    }
+
+    .row-action {
+      height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: var(--text);
+      background: rgba(255, 255, 255, .035);
+      font-size: 14px;
+      font-weight: 820;
+      white-space: nowrap;
+    }
+
+    .row-action.primary {
+      color: #06110d;
+      border-color: rgba(7, 240, 138, .9);
+      background: var(--accent);
+    }
+
+    .row-action.fail {
+      color: #f2b7af;
+      border-color: rgba(240, 138, 124, .58);
+      background: var(--danger-soft);
+    }
+
+    .checking .row-action {
+      color: var(--subtle);
+      pointer-events: none;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="board">
+    <div class="board-head">
+      <div>
+        <h1>诊断页重新设计</h1>
+        <p>以诊断结果、当前配置和修复入口为核心。</p>
+      </div>
+      <span class="pill ok">Design A</span>
+    </div>
+
+    <div class="version-title">
+      <h2>状态 A：全部通过</h2>
+      <span class="pill ok">可开始任务</span>
+    </div>
+    <article class="client">
+      <div class="titlebar">
+        <span class="dots"><i class="dot red"></i><i class="dot yellow"></i><i class="dot green"></i></span>
+        卡卡字幕助手 -- VideoCaptioner
+      </div>
+      <aside class="sidebar">
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/menu.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/home.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/video.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/subtitle.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/volume.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/history.svg" alt=""></span></div>
+        <div class="nav active"><span class="ico"><img src="../../resource/assets/icons/search.svg" alt=""></span></div>
+        <div class="spacer"></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/github.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/setting.svg" alt=""></span></div>
+      </aside>
+      <section class="app">
+        <header class="page-head">
+          <div class="title-group">
+            <div class="page-icon">
+              <svg viewBox="0 0 24 24"><path d="M4 13.5l4.2 4.2L20 6"/><path d="M3 5h8M3 9h5M14 18h7"/></svg>
+            </div>
+            <div>
+              <h2>诊断</h2>
+              <div class="head-meta">
+                <span class="state-pill ok">全部通过</span>
+                <span class="state-pill">上次 11:28</span>
+              </div>
+            </div>
+          </div>
+          <button class="button primary"><span class="ico"><img src="../../resource/assets/icons/sync.svg" alt=""></span>重新诊断</button>
+        </header>
+
+        <section class="top-summary">
+          <div class="result-card">
+            <span class="status-mark ok">
+              <svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+            </span>
+            <div>
+              <h3>当前链路可用</h3>
+              <p>5 项检查通过，可以继续创建或处理任务。</p>
+            </div>
+          </div>
+          <div class="config-strip">
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/microphone.svg" alt=""></span>
+              <div><span>转录</span><strong>B 接口</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/language.svg" alt=""></span>
+              <div><span>翻译</span><strong>微软翻译</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/volume.svg" alt=""></span>
+              <div><span>配音</span><strong>Edge 免费配音</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/video.svg" alt=""></span>
+              <div><span>导出</span><strong>视频 + 字幕</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="check-panel">
+          <div class="panel-head">
+            <h3>检查清单</h3>
+            <div class="head-actions">
+              <span class="pill ok">5 / 5</span>
+            </div>
+          </div>
+          <div class="check-list">
+            <div class="check-row">
+              <span class="row-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M6 11h12M8 15h8M9 19h6"/></svg></span>
+              <div class="row-copy"><h4>FFmpeg / FFprobe</h4><p>工具完整，可生成视频和配音视频。</p></div>
+              <span class="row-status">正常</span>
+              <button class="row-action">工具说明</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon"><svg viewBox="0 0 24 24"><path d="M12 4v9M8 9v3a4 4 0 0 0 8 0V9M7 17h10M12 17v3"/></svg></span>
+              <div class="row-copy"><h4>转录服务</h4><p>当前转录方式可用，可生成原文字幕。</p></div>
+              <span class="row-status">正常</span>
+              <button class="row-action">转录配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon"><svg viewBox="0 0 24 24"><path d="M6 5h12v14H6zM9 9h6M9 13h4M16 17l3 3"/></svg></span>
+              <div class="row-copy"><h4>大模型配置</h4><p>可用于字幕校正、术语修正和智能断句。</p></div>
+              <span class="row-status">正常</span>
+              <button class="row-action">大模型配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon"><svg viewBox="0 0 24 24"><path d="M5 6h14M7 10h10M10 10c.7 4 2.4 6.7 6 8M15 10c-.7 4-2.4 6.7-6 8"/></svg></span>
+              <div class="row-copy"><h4>翻译服务</h4><p>翻译服务可用，可生成目标语言字幕。</p></div>
+              <span class="row-status">正常</span>
+              <button class="row-action">翻译配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon"><svg viewBox="0 0 24 24"><path d="M4 12h4l5-5v10l-5-5H4zM16 9c1.3 1.6 1.3 4.4 0 6M19 7c2.4 2.8 2.4 7.2 0 10"/></svg></span>
+              <div class="row-copy"><h4>配音服务</h4><p>当前配音配置可用，可继续生成配音。</p></div>
+              <span class="row-status">正常</span>
+              <button class="row-action">配音配置</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </article>
+
+    <div class="version-title">
+      <h2>状态 B：存在阻塞项</h2>
+      <span class="pill fail">需要处理</span>
+    </div>
+    <article class="client">
+      <div class="titlebar">
+        <span class="dots"><i class="dot red"></i><i class="dot yellow"></i><i class="dot green"></i></span>
+        卡卡字幕助手 -- VideoCaptioner
+      </div>
+      <aside class="sidebar">
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/menu.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/home.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/video.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/subtitle.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/volume.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/history.svg" alt=""></span></div>
+        <div class="nav active"><span class="ico"><img src="../../resource/assets/icons/search.svg" alt=""></span></div>
+        <div class="spacer"></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/github.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/setting.svg" alt=""></span></div>
+      </aside>
+      <section class="app">
+        <header class="page-head">
+          <div class="title-group">
+            <div class="page-icon">
+              <svg viewBox="0 0 24 24"><path d="M12 8v6"/><path d="M12 18h.01"/><path d="M4.5 20h15L12 4z"/></svg>
+            </div>
+            <div>
+              <h2>诊断</h2>
+              <div class="head-meta">
+                <span class="state-pill fail">2 项未通过</span>
+                <span class="state-pill">上次 11:31</span>
+              </div>
+            </div>
+          </div>
+          <button class="button primary"><span class="ico"><img src="../../resource/assets/icons/sync.svg" alt=""></span>重新诊断</button>
+        </header>
+
+        <section class="top-summary">
+          <div class="result-card">
+            <span class="status-mark fail">
+              <svg viewBox="0 0 24 24"><path d="M12 8v6"/><path d="M12 18h.01"/><path d="M4.5 20h15L12 4z"/></svg>
+            </span>
+            <div>
+              <h3>生成动作受阻</h3>
+              <p>先处理红色项，再回到任务流程。</p>
+            </div>
+          </div>
+          <div class="config-strip">
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/microphone.svg" alt=""></span>
+              <div><span>转录</span><strong>B 接口</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/language.svg" alt=""></span>
+              <div><span>翻译</span><strong>大模型翻译</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/volume.svg" alt=""></span>
+              <div><span>配音</span><strong>Gemini 音色</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/video.svg" alt=""></span>
+              <div><span>导出</span><strong>视频 + 配音</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="check-panel">
+          <div class="panel-head">
+            <h3>检查清单</h3>
+            <div class="head-actions">
+              <span class="pill fail">2 / 5 未通过</span>
+            </div>
+          </div>
+          <div class="check-list">
+            <div class="check-row">
+              <span class="row-icon fail"><svg viewBox="0 0 24 24"><path d="M12 8v6"/><path d="M12 18h.01"/><path d="M4.5 20h15L12 4z"/></svg></span>
+              <div class="row-copy"><h4>缺少 FFmpeg / FFprobe</h4><p>缺少后无法生成视频、压入字幕或合入配音。</p></div>
+              <span class="row-status fail">未通过</span>
+              <button class="row-action fail">安装工具</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon"><svg viewBox="0 0 24 24"><path d="M12 4v9M8 9v3a4 4 0 0 0 8 0V9M7 17h10M12 17v3"/></svg></span>
+              <div class="row-copy"><h4>转录服务</h4><p>当前转录方式可用，可生成原文字幕。</p></div>
+              <span class="row-status">正常</span>
+              <button class="row-action">转录配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon fail"><svg viewBox="0 0 24 24"><path d="M12 8v6"/><path d="M12 18h.01"/><path d="M4.5 20h15L12 4z"/></svg></span>
+              <div class="row-copy"><h4>大模型配置不可用</h4><p>字幕校正、术语修正和智能断句需要可用 Key。</p></div>
+              <span class="row-status fail">未通过</span>
+              <button class="row-action fail">大模型配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon warn"><svg viewBox="0 0 24 24"><path d="M5 6h14M7 10h10M10 10c.7 4 2.4 6.7 6 8M15 10c-.7 4-2.4 6.7-6 8"/></svg></span>
+              <div class="row-copy"><h4>翻译服务</h4><p>大模型翻译会复用 LLM Key。</p></div>
+              <span class="row-status warn">受影响</span>
+              <button class="row-action">翻译配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon"><svg viewBox="0 0 24 24"><path d="M4 12h4l5-5v10l-5-5H4zM16 9c1.3 1.6 1.3 4.4 0 6M19 7c2.4 2.8 2.4 7.2 0 10"/></svg></span>
+              <div class="row-copy"><h4>配音服务</h4><p>当前配音配置可用，可继续生成配音。</p></div>
+              <span class="row-status">正常</span>
+              <button class="row-action">配音配置</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </article>
+
+    <div class="version-title">
+      <h2>状态 C：诊断中</h2>
+      <span class="pill warn">运行中</span>
+    </div>
+    <article class="client">
+      <div class="titlebar">
+        <span class="dots"><i class="dot red"></i><i class="dot yellow"></i><i class="dot green"></i></span>
+        卡卡字幕助手 -- VideoCaptioner
+      </div>
+      <aside class="sidebar">
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/menu.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/home.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/video.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/subtitle.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/volume.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/history.svg" alt=""></span></div>
+        <div class="nav active"><span class="ico"><img src="../../resource/assets/icons/search.svg" alt=""></span></div>
+        <div class="spacer"></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/github.svg" alt=""></span></div>
+        <div class="nav"><span class="ico"><img src="../../resource/assets/icons/setting.svg" alt=""></span></div>
+      </aside>
+      <section class="app checking">
+        <header class="page-head">
+          <div class="title-group">
+            <div class="page-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></svg>
+            </div>
+            <div>
+              <h2>诊断</h2>
+              <div class="head-meta">
+                <span class="state-pill warn">诊断中</span>
+                <span class="state-pill">正在检查当前链路</span>
+              </div>
+            </div>
+          </div>
+          <button class="button primary" disabled><span class="ico"><img src="../../resource/assets/icons/sync.svg" alt=""></span>诊断中</button>
+        </header>
+
+        <section class="top-summary">
+          <div class="result-card">
+            <span class="status-mark warn">
+              <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></svg>
+            </span>
+            <div>
+              <h3>正在诊断</h3>
+              <p>完成后会显示需要处理的检查项。</p>
+            </div>
+          </div>
+          <div class="config-strip">
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/microphone.svg" alt=""></span>
+              <div><span>转录</span><strong>B 接口</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/language.svg" alt=""></span>
+              <div><span>翻译</span><strong>微软翻译</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/volume.svg" alt=""></span>
+              <div><span>配音</span><strong>Edge 免费配音</strong></div>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-icon ico"><img src="../../resource/assets/icons/video.svg" alt=""></span>
+              <div><span>导出</span><strong>视频 + 字幕</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="check-panel">
+          <div class="panel-head">
+            <h3>检查清单</h3>
+            <div class="head-actions">
+              <span class="pill warn">检查中</span>
+            </div>
+          </div>
+          <div class="check-list">
+            <div class="check-row">
+              <span class="row-icon warn"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></svg></span>
+              <div class="row-copy"><h4>FFmpeg / FFprobe</h4><p>正在检查音视频工具。</p></div>
+              <span class="row-status warn">检查中</span>
+              <button class="row-action">工具说明</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon warn"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></svg></span>
+              <div class="row-copy"><h4>转录服务</h4><p>正在读取当前转录配置。</p></div>
+              <span class="row-status warn">检查中</span>
+              <button class="row-action">转录配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon warn"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></svg></span>
+              <div class="row-copy"><h4>大模型配置</h4><p>正在校验字幕增强能力。</p></div>
+              <span class="row-status warn">检查中</span>
+              <button class="row-action">大模型配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon warn"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></svg></span>
+              <div class="row-copy"><h4>翻译服务</h4><p>正在确认翻译服务状态。</p></div>
+              <span class="row-status warn">检查中</span>
+              <button class="row-action">翻译配置</button>
+            </div>
+            <div class="check-row">
+              <span class="row-icon warn"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></svg></span>
+              <div class="row-copy"><h4>配音服务</h4><p>正在确认配音服务状态。</p></div>
+              <span class="row-status warn">检查中</span>
+              <button class="row-action">配音配置</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </article>
+  </div>
+</body>
+</html>

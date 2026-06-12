@@ -8,7 +8,7 @@ from typing import Any
 from PyQt5.QtCore import QByteArray, QSize, Qt
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWidgets import QAbstractButton
+from PyQt5.QtWidgets import QAbstractButton, QApplication
 
 from videocaptioner.config import ASSETS_PATH
 
@@ -18,7 +18,33 @@ CUSTOM_ICON_DIR = ASSETS_PATH / "icons"
 class AppIcon(StrEnum):
     """App-owned SVG icons in resource/assets/icons."""
 
+    ADD = "add"
     ARROW_LEFT = "arrow-left"
+    CANCEL = "cancel"
+    CHEVRON_DOWN = "chevron-down"
+    CLOSE = "close"
+    COPY = "copy"
+    DELETE = "delete"
+    DOCUMENT = "document"
+    DOWNLOAD = "download"
+    FILE = "file"
+    FOLDER = "folder"
+    FOLDER_ADD = "folder_add"
+    GITHUB = "github"
+    HEART = "heart"
+    LAYOUT = "layout"
+    LINK = "link"
+    MICROPHONE = "microphone"
+    MUSIC = "music"
+    PLAY = "play"
+    RIGHT_ARROW = "right_arrow"
+    SAVE = "save"
+    SETTING = "setting"
+    SUBTITLE = "subtitle"
+    SYNC = "sync"
+    TERMINAL = "terminal"
+    VIDEO = "video"
+    VOLUME = "volume"
 
 
 def custom_icon_path(name: str | Path) -> Path:
@@ -36,29 +62,50 @@ def _color_name(color: str | QColor) -> str:
     return qcolor.name() if qcolor.isValid() else str(color)
 
 
-@lru_cache(maxsize=256)
-def _render_svg_icon_cached(name: str, color: str, size: int) -> QIcon:
-    path = custom_icon_path(name)
-    if not path.exists():
-        return QIcon(str(path))
+def _device_pixel_ratio() -> float:
+    """Highest screen DPR; SVG icons must rasterize at physical resolution
+    or they come out blurry on Retina displays."""
+    app = QApplication.instance()
+    if app is None:
+        return 1.0
+    ratios = [screen.devicePixelRatio() for screen in app.screens()]
+    return max(ratios, default=1.0)
 
+
+@lru_cache(maxsize=256)
+def _render_svg_pixmap_cached(name: str, color: str, size: int, dpr: float) -> QPixmap:
+    path = custom_icon_path(name)
     svg = path.read_text(encoding="utf-8").replace("currentColor", color)
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
-    if not renderer.isValid():
-        return QIcon(str(path))
 
-    icon_size = max(1, int(size))
-    pixmap = QPixmap(icon_size, icon_size)
+    logical_size = max(1, int(size))
+    physical_size = max(1, round(logical_size * dpr))
+    pixmap = QPixmap(physical_size, physical_size)
     pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.end()
-    return QIcon(pixmap)
+    if renderer.isValid():
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        renderer.render(painter)
+        painter.end()
+    pixmap.setDevicePixelRatio(dpr)
+    return pixmap
+
+
+def render_svg_pixmap(
+    icon: AppIcon | str | Path, color: str | QColor, size: int = 24
+) -> QPixmap:
+    """Render an app-owned SVG icon to a DPR-aware pixmap (crisp on Retina)."""
+    return _render_svg_pixmap_cached(
+        str(icon), _color_name(color), int(size), _device_pixel_ratio()
+    )
 
 
 def render_svg_icon(icon: AppIcon | str | Path, color: str | QColor, size: int = 24) -> QIcon:
     """Render an app-owned SVG icon using the requested theme color."""
-    return _render_svg_icon_cached(str(icon), _color_name(color), int(size))
+    path = custom_icon_path(icon)
+    if not path.exists():
+        return QIcon(str(path))
+    return QIcon(render_svg_pixmap(icon, color, size))
 
 
 def to_qicon(icon: Any, color: str | QColor | None = None, size: int = 24) -> QIcon:

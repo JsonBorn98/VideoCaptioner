@@ -61,15 +61,24 @@ DEFAULTS: Dict[str, Any] = {
     "app": {
         "work_dir": "",
         "cache_enabled": True,
+        # 流水线成功后保留任务目录（中间产物）；默认跑完即清。
+        "keep_intermediates": False,
     },
     "ui": {
         "theme_mode": "Dark",
-        "theme_color": "#ff28f08b",
+        "theme_color": "#ff00e889",
         "dpi_scale": "Auto",
         "language": "Auto",
         "mica_enabled": False,
         "check_update_at_startup": True,
         "subtitle_preview_image": "",
+        # 工作台右栏折叠态 + 批量页模式/并发：UI 持久化键，过去漏在 DEFAULTS 外，
+        # 导致 `config set` 因 parse_value 查不到键而按字符串存（bool 反向、范围抛错）。
+        "transcribe_panel_collapsed": False,
+        "subtitle_panel_collapsed": False,
+        "synthesis_panel_collapsed": False,
+        "batch_mode": "full",
+        "batch_concurrency": 1,
     },
     "llm": {
         "service": "openai",
@@ -136,30 +145,31 @@ DEFAULTS: Dict[str, Any] = {
         "asr": "bijian",
         "language": "auto",
         "output_format": "srt",
+        "word_timestamp": False,
         "faster_whisper": {
             "program": "faster-whisper-xxl.exe",
-            "model": "large-v3",
+            "model": "tiny",
             "model_dir": "",
             "device": "auto",
             "vad_filter": True,
-            "vad_method": "silero_v4_fw",
-            "vad_threshold": 0.5,
+            "vad_method": "silero_v4",
+            "vad_threshold": 0.4,
             "voice_extraction": False,
             "one_word": True,
             "prompt": "",
         },
         "whisper_cpp": {
-            "model": "large-v2",
+            "model": "tiny",
         },
     },
     "subtitle": {
-        "optimize": True,
+        "optimize": False,
         "translate": False,
-        "split": True,
-        "max_word_count_cjk": 18,
-        "max_word_count_english": 12,
-        "thread_num": 4,
-        "batch_size": 20,
+        "split": False,
+        "max_word_count_cjk": 28,
+        "max_word_count_english": 20,
+        "thread_num": 10,
+        "batch_size": 10,
         "custom_prompt": "",
     },
     "translate": {
@@ -170,10 +180,13 @@ DEFAULTS: Dict[str, Any] = {
     },
     "synthesize": {
         "need_video": True,
-        "subtitle_mode": "soft",
+        # subtitle_mode 与 soft_subtitle 必须同义：硬字幕。过去 subtitle_mode="soft"
+        # 而 soft_subtitle=False，导致 CLI(读 subtitle_mode) 默认软、GUI(读 soft_subtitle)
+        # 默认硬，同一份全新配置出厂行为相反。
+        "subtitle_mode": "hard",
         "quality": "medium",
         "layout": "target-above",
-        "render_mode": "ass",
+        "render_mode": "rounded",
         "style": "default",
         "soft_subtitle": False,
         "use_subtitle_style": False,

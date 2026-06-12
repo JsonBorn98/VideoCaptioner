@@ -26,13 +26,13 @@ from qfluentwidgets import (
     PushButton,
     ScrollArea,
     SwitchButton,
-    setFont,
 )
 
 from videocaptioner.ui.common.app_icons import AppIcon, apply_button_icon
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.settings_state import SettingField
 from videocaptioner.ui.common.theme_tokens import app_palette, is_dark_theme, rgba
+from videocaptioner.ui.components.workbench import apply_font
 
 CONTROL_WIDTH = 246
 CONTROL_HEIGHT = 46
@@ -100,11 +100,11 @@ class SettingsShell(QWidget):
         self.backButton.installEventFilter(self)
         apply_button_icon(self.backButton, AppIcon.ARROW_LEFT, 17)
         self.backButton.clicked.connect(self.backRequested)
-        setFont(self.backButton, 14, 720)
+        apply_font(self.backButton, 14, 720)
 
         self.navTitle = QLabel(self.tr("设置"), self.sidebar)
         self.navTitle.setObjectName("settingsNavTitle")
-        setFont(self.navTitle, 12, 820)
+        apply_font(self.navTitle, 12, 820)
 
         self.navLayout = QVBoxLayout()
         self.navLayout.setContentsMargins(0, 0, 0, 0)
@@ -171,7 +171,8 @@ class SettingsShell(QWidget):
 
     def syncStyle(self) -> None:
         palette = app_palette()
-        sidebar_bg = "#202322" if is_dark_theme() else "#eef2f0"
+        # 侧栏与全局面板同色，不再用独立硬编码色
+        sidebar_bg = palette.panel
         sidebar_hover = rgba(palette.accent, 0.13 if is_dark_theme() else 0.10)
         sidebar_checked = rgba(palette.accent, 0.18 if is_dark_theme() else 0.14)
         self.setStyleSheet(
@@ -254,7 +255,7 @@ class SettingsPage(ScrollArea):
         self.titleLabel = QLabel(title, self.container)
         self.titleLabel.setObjectName("settingsPageTitle")
         self.titleLabel.setAlignment(Qt.AlignCenter)  # type: ignore[arg-type]
-        setFont(self.titleLabel, 30, 860)
+        apply_font(self.titleLabel, 30, 860)
         self.layout.addWidget(self.titleLabel, 0, Qt.AlignHCenter)  # type: ignore[arg-type]
         self.layout.addSpacing(28)
         self.layout.addStretch(1)
@@ -332,7 +333,7 @@ class SettingsGroup(QFrame):
         if title:
             self.titleLabel = QLabel(title, self)
             self.titleLabel.setObjectName("settingsSectionTitle")
-            setFont(self.titleLabel, 17, 840)
+            apply_font(self.titleLabel, 17, 840)
             self.rootLayout.addWidget(self.titleLabel)
             self.rootLayout.addSpacing(14)
         else:
@@ -377,7 +378,7 @@ class SettingsGroup(QFrame):
             QFrame#settingsBox {{
                 background: {palette.panel};
                 border: 1px solid {palette.line};
-                border-radius: 12px;
+                border-radius: 14px;
             }}
             """
         )
@@ -409,8 +410,8 @@ class SettingRow(QFrame):
         self.descLabel.setWordWrap(False)
         self.titleLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.descLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        setFont(self.titleLabel, 15, 820)
-        setFont(self.descLabel, 13, 500)
+        apply_font(self.titleLabel, 15, 820)
+        apply_font(self.descLabel, 13, 500)
         textLayout.addWidget(self.titleLabel)
         if description:
             textLayout.addWidget(self.descLabel)
@@ -543,6 +544,10 @@ class BoundComboBox(ComboBox):
 class BoundEditableComboBox(EditableComboBox):
     currentValueChanged = pyqtSignal(str)
 
+    def paintEvent(self, e):  # noqa: N802
+        # 跳过 qfluent 聚焦底部下划线：聚焦态已有边框，双重指示很乱
+        QLineEdit.paintEvent(self, e)
+
     def __init__(self, config_item: SettingField, items: Iterable[str] = (), parent=None):
         super().__init__(parent)
         self.config_item = config_item
@@ -589,6 +594,10 @@ class BoundEditableComboBox(EditableComboBox):
 
 
 class BoundLineEdit(LineEdit):
+    def paintEvent(self, e):  # noqa: N802
+        # 跳过 qfluent 聚焦底部下划线：聚焦态已有边框，双重指示很乱
+        QLineEdit.paintEvent(self, e)
+
     def __init__(self, config_item: SettingField, placeholder: str = "", parent=None, password: bool = False):
         super().__init__(parent)
         self.config_item = config_item
@@ -773,15 +782,85 @@ def make_button(text: str, primary: bool = False, parent=None) -> PushButton:
     return button
 
 
-def make_value_label(text: str = "", parent=None) -> QLabel:
-    label = QLabel(text, parent)
-    label.setObjectName("settingsValueLabel")
-    label.setProperty("settingsCustomStyle", False)
-    label.setFixedWidth(CONTROL_WIDTH)
-    label.setFixedHeight(CONTROL_HEIGHT)
-    label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)  # type: ignore[arg-type]
-    _apply_value_label_style(label)
-    return label
+class _ElidedPathLabel(QLabel):
+    """只读路径展示：家目录缩写成 ~，超宽时中段省略，完整路径走 tooltip。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("settingsValueLabel")
+        self.setProperty("settingsCustomStyle", False)
+        self.setFixedWidth(CONTROL_WIDTH)
+        self.setFixedHeight(CONTROL_HEIGHT)
+        self.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)  # type: ignore[arg-type]
+        _apply_value_label_style(self)
+        self._display = ""
+
+    def setPath(self, path: str, placeholder: str) -> None:
+        if path:
+            from pathlib import Path
+
+            home = str(Path.home())
+            self._display = "~" + path[len(home):] if path.startswith(home) else path
+            self.setToolTip(path)
+        else:
+            self._display = placeholder
+            self.setToolTip("")
+        self._refresh_elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_elide()
+
+    def _refresh_elide(self) -> None:
+        # 路径首尾都有信息量（盘符/盘点 + 末级目录名），中段省略最可读。
+        width = self.width() - 28  # 与 value label 的左右内边距对齐
+        self.setText(self.fontMetrics().elidedText(self._display, Qt.ElideMiddle, width))  # type: ignore[arg-type]
+
+
+class FolderPickerControl(QWidget):
+    """目录设置控件：只读路径 + 「打开」 + 「更改」。
+
+    目录路径是配置值，不该被当文本手敲——只读展示防误改；「打开」
+    满足最常见的"看看里面有什么"诉求；选目录统一走系统对话框
+    （changeRequested 由所属页面接管，便于定制对话框标题与落库）。
+    """
+
+    changeRequested = pyqtSignal()
+
+    def __init__(self, parent=None, *, placeholder: str = ""):
+        super().__init__(parent)
+        self._path = ""
+        self._placeholder = placeholder
+        self.setObjectName("settingsControlPair")
+        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
+        self.setStyleSheet("QWidget#settingsControlPair { background: transparent; }")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.pathLabel = _ElidedPathLabel(self)
+        self.openButton = make_button(self.tr("打开"), parent=self)
+        self.changeButton = make_button(self.tr("更改"), parent=self)
+        layout.addWidget(self.pathLabel)
+        layout.addWidget(self.openButton)
+        layout.addWidget(self.changeButton)
+
+        self.openButton.clicked.connect(self._open)
+        self.changeButton.clicked.connect(self.changeRequested)
+
+    def path(self) -> str:
+        return self._path
+
+    def setPath(self, path: str) -> None:
+        self._path = str(path or "")
+        self.pathLabel.setPath(self._path, self._placeholder)
+        self.openButton.setEnabled(bool(self._path))
+
+    def _open(self) -> None:
+        from videocaptioner.core.utils.platform_utils import open_folder
+
+        if self._path:
+            open_folder(self._path)
 
 
 class ColorSwatchButton(QPushButton):
@@ -791,7 +870,8 @@ class ColorSwatchButton(QPushButton):
         super().__init__(parent)
         self.setObjectName("settingsColorSwatch")
         self.setCursor(Qt.PointingHandCursor)  # type: ignore[arg-type]
-        self.setFixedSize(84, CONTROL_HEIGHT)
+        # 124 + 间距 10 + 按钮 112 = CONTROL_WIDTH，与其他行左缘对齐
+        self.setFixedSize(124, CONTROL_HEIGHT)
         self._color = QColor(color)
         self.syncStyle()
 
@@ -831,7 +911,7 @@ def _apply_value_label_style(label: QWidget) -> None:
                 color: {palette.text};
                 background: {palette.field};
                 border: 1px solid {palette.line_soft};
-                border-radius: 8px;
+                border-radius: 9px;
             padding: 0 12px;
             font-weight: 720;
         }}
@@ -854,7 +934,7 @@ def _apply_control_style(widget: QWidget) -> None:
             color: {palette.text};
             background: {palette.field};
             border: 1px solid {palette.line_soft};
-            border-radius: 8px;
+            border-radius: 9px;
             padding: 0 12px;
             font-weight: 720;
         }}
@@ -865,6 +945,10 @@ def _apply_control_style(widget: QWidget) -> None:
         QToolButton#settingsControl:hover,
         LineEdit#settingsControl:hover {{
             border-color: {palette.accent_border};
+        }}
+        EditableComboBox#settingsControl:focus,
+        LineEdit#settingsControl:focus {{
+            border: 1px solid {palette.accent};
         }}
         """
     )
@@ -886,7 +970,7 @@ def _apply_button_style(button: QWidget, primary: bool) -> None:
             color: {fg};
             background: {bg};
             border: 1px solid {border};
-            border-radius: 8px;
+            border-radius: 9px;
             padding: 0 14px;
             font-weight: 760;
         }}

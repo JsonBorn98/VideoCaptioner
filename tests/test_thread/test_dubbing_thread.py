@@ -58,6 +58,7 @@ def test_dubbing_thread_finishes_with_mock_pipeline(tmp_path, monkeypatch, qapp)
         subtitle_path=str(subtitle),
         output_audio_path=str(output_audio),
         output_video_path=str(output_video),
+        task_dir=str(tmp_path / "tasks" / "demo"),
         dubbing_config=DubbingUIConfig(enabled=True),
     )
     thread = DubbingThread(task)

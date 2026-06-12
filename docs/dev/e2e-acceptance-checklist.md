@@ -181,14 +181,33 @@ Test-suite changes made during this pass:
 - [x] qfluent native setting-card/config surfaces are not imported by runtime UI
   code.
 - [x] Provider-specific configuration is covered by adapters/config store tests.
-- [x] New reusable widgets exist in `ui/components/form_cards.py`,
-  `settings_controls.py`, `subtitle_style_controls.py`, and
-  `workflow_widgets.py`.
+- [x] New reusable widgets exist in `ui/components/workbench.py`,
+  `form_cards.py`, `settings_controls.py`, `subtitle_style_controls.py`, and
+  `model_manager_dialog.py`.
 - [~] Large page files remain high-risk and should be split further:
   `setting_interface.py`, `dubbing_interface.py`, `video_synthesis_interface.py`,
   `subtitle_style_interface.py`, `subtitle_interface.py`.
 - [~] Several negative-path tests intentionally log `ERROR` traces while
   passing; this is behaviorally correct but noisy.
+
+### 10. Dialogs, Diagnostics And Model Management (added 2026-06-12)
+
+- [x] All in-app dialogs use the first-party `AppDialog` shell
+  (`ui/components/app_dialog.py`); no runtime qfluent `MessageBox` /
+  `MessageBoxBase` remain. Centering is asserted against the whole program
+  window even when the dialog is opened from a tab page
+  (`tests/test_ui/test_app_dialog.py` + dual-theme dialog screenshots).
+- [x] The transcribe settings page has one unified 测试转录 row for all ASR
+  providers; a real short-audio transcription succeeded via B 接口 and local
+  whisper-cpp, and an invalid Whisper API key surfaced the real 401.
+- [x] `doctor --check-api` runs real requests: `api.transcribe`,
+  `api.dubbing`, `api.download.youtube`, `api.download.bilibili`.
+- [x] The doctor page resolves both download sources on each run; failures
+  show actionable hints (proxy for YouTube, risk-control wait /
+  cookies.txt for Bilibili) consistent with real download behavior.
+- [x] Model manager dialog supports download / resume / delete / cancel with
+  a real tiny-model download verified end-to-end (SHA1 match + real
+  transcription through the downloaded model).
 
 ## Re-run Commands
 

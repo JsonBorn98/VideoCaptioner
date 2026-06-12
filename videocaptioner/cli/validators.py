@@ -129,9 +129,11 @@ def validate_ffmpeg() -> bool:
 
 def validate_faster_whisper() -> bool:
     """Check that FasterWhisper executable is available."""
-    if not shutil.which("faster-whisper-xxl") and not shutil.which("faster-whisper") and not shutil.which("faster_whisper"):
-        output.error("FasterWhisper not found on PATH")
-        output.hint("Download from the GUI (Settings > FasterWhisper), or install manually.")
+    from videocaptioner.core.download import detect_program, program_install_plan
+
+    if not detect_program("faster-whisper").installed:
+        output.error("FasterWhisper not found")
+        output.hint(program_install_plan("faster-whisper").summary)
         output.hint("See: https://github.com/Purfview/whisper-standalone-win")
         return False
     return True
@@ -139,21 +141,14 @@ def validate_faster_whisper() -> bool:
 
 def validate_whisper_cpp() -> bool:
     """Check that WhisperCpp executable is available."""
-    # Check common names for whisper.cpp binary
-    names = ["whisper-cpp", "whisper", "whisper-cpp-main"]
-    if not any(shutil.which(n) for n in names):
-        # Also check project's bin directory
-        try:
-            from videocaptioner.config import BIN_PATH
-            if not any((BIN_PATH / n).exists() for n in names):
-                output.error("WhisperCpp not found")
-                output.hint("Download from the GUI (Settings > WhisperCpp), or install manually.")
-                output.hint("See: https://github.com/ggerganov/whisper.cpp")
-                return False
-        except ImportError:
-            output.error("WhisperCpp not found on PATH")
-            output.hint("See: https://github.com/ggerganov/whisper.cpp")
-            return False
+    from videocaptioner.core.download import detect_program, program_install_plan
+
+    if not detect_program("whisper-cpp").installed:
+        plan = program_install_plan("whisper-cpp")
+        output.error("WhisperCpp not found")
+        output.hint(plan.command or plan.summary)
+        output.hint("Then download a model with 'videocaptioner models download whisper-cpp tiny'.")
+        return False
     return True
 
 

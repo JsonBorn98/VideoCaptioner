@@ -107,3 +107,5 @@ class DubbingResult:
     segments: list[DubbingSegment]
     duration_ms: int
     warnings: list[str] = field(default_factory=list)
+    # 分段报告（report.json），随工作目录生灭
+    report_path: Optional[Path] = None

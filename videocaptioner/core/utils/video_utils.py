@@ -192,6 +192,10 @@ def add_subtitles(
 ) -> None:
     assert Path(input_file).is_file(), "输入文件不存在"
     assert Path(subtitle_file).is_file(), "字幕文件不存在"
+    # 与硬字幕渲染器一致的前置校验：空字幕直接给干净报错，
+    # 否则 ffmpeg 会以一长串命令行 dump 的形式失败
+    if not Path(subtitle_file).read_text(encoding="utf-8", errors="replace").strip("\ufeff \t\r\n"):
+        raise ValueError("Empty subtitle data, cannot render video")
 
     # 使用临时文件上下文管理器处理字幕（自动清理）
     with temporary_subtitle_file(subtitle_file) as temp_subtitle_path:

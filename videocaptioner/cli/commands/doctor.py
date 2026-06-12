@@ -43,7 +43,9 @@ def run(args: Namespace, config: dict) -> int:
     return EXIT.DEPENDENCY_MISSING if any(c.status == "error" for c in checks) else EXIT.SUCCESS
 
 
-def run_diagnostics(config: dict, *, check_api: bool = False) -> list[Check]:
+def run_diagnostics(
+    config: dict, *, check_api: bool = False, check_download: bool = False
+) -> list[Check]:
     checks: list[Check] = []
     checks.append(_check_python())
     checks.append(_check_command("ffmpeg", "Required for audio extraction, timing fit, muxing, and hard subtitles."))
@@ -53,8 +55,37 @@ def run_diagnostics(config: dict, *, check_api: bool = False) -> list[Check]:
     checks.extend(_check_transcribe(config))
     checks.extend(_check_subtitle(config))
     checks.extend(_check_dubbing(config))
+    if check_api or check_download:
+        checks.extend(_check_download_sources())
     if check_api:
         checks.extend(_check_api(config))
+    return checks
+
+
+def _check_download_sources() -> list[Check]:
+    """Resolve one stable public video per source (real network requests)."""
+    from videocaptioner.core.download import DOWNLOAD_SOURCES, check_download_sources
+
+    hints = {source.key: source.fix_hint for source in DOWNLOAD_SOURCES}
+    checks = []
+    for result in check_download_sources():
+        if result.success:
+            checks.append(Check(
+                f"api.download.{result.key}", "ok",
+                f"{result.title}: 解析成功（{result.detail[:48]}）",
+            ))
+        else:
+            # friendly 文案可能已带站点主语（如「哔哩哔哩风控…」），避免重复前缀
+            message = (
+                result.detail
+                if result.detail.startswith(result.title)
+                else f"{result.title}: {result.detail}"
+            )
+            checks.append(Check(
+                f"api.download.{result.key}", "error",
+                message,
+                hints.get(result.key, ""),
+            ))
     return checks
 
 
@@ -134,9 +165,43 @@ def _check_transcribe(config: dict) -> list[Check]:
         checks.append(Check("whisper_api.api_key", "error", "Whisper API key is missing", "Run 'videocaptioner config set whisper_api.api_key <key>'"))
     if asr == "fun-asr" and not get(config, "fun_asr.api_key", ""):
         checks.append(Check("fun_asr.api_key", "error", "Bailian Fun-ASR API key is missing", "Run 'videocaptioner config set fun_asr.api_key <key>'"))
-    if asr == "whisper-cpp" and not any(shutil.which(n) for n in ["whisper-cpp", "whisper", "whisper-cpp-main"]):
-        checks.append(Check("whisper-cpp", "error", "whisper.cpp binary not found", "Install whisper.cpp or choose --asr bijian/whisper-api"))
+    if asr == "whisper-cpp":
+        checks.extend(_check_local_program("whisper-cpp"))
+        checks.extend(_check_local_model("whisper-cpp", get(config, "transcribe.whisper_cpp.model", "tiny")))
+    if asr == "faster-whisper":
+        checks.extend(_check_local_program("faster-whisper"))
+        checks.extend(_check_local_model("faster-whisper", get(config, "transcribe.faster_whisper.model", "tiny")))
     return checks
+
+
+def _check_local_program(kind: str) -> list[Check]:
+    from videocaptioner.core.download import detect_program, program_install_plan
+
+    status = detect_program(kind)
+    if status.installed:
+        return [Check(f"{kind}.program", "ok", f"{status.name} ({status.path})")]
+    plan = program_install_plan(kind)
+    hint = plan.command or plan.summary
+    return [Check(f"{kind}.program", "error", f"{kind} program not found", hint)]
+
+
+def _check_local_model(kind: str, model_name: str) -> list[Check]:
+    from videocaptioner.config import MODEL_PATH
+    from videocaptioner.core.download import find_model, model_install_state
+
+    spec = find_model(kind, str(model_name))
+    if spec is None:
+        return [Check(f"{kind}.model", "warn", f"Unknown model name: {model_name}", "Run 'videocaptioner models list' to see available models")]
+    if model_install_state(spec, Path(MODEL_PATH)):
+        return [Check(f"{kind}.model", "ok", f"model '{spec.name}' installed in {MODEL_PATH}")]
+    return [
+        Check(
+            f"{kind}.model",
+            "error",
+            f"model '{spec.name}' is not downloaded",
+            f"Run 'videocaptioner models download {kind} {spec.name}'",
+        )
+    ]
 
 
 def _check_subtitle(config: dict) -> list[Check]:
@@ -209,6 +274,7 @@ def _check_dubbing(config: dict) -> list[Check]:
 
 def _check_api(config: dict) -> list[Check]:
     checks: list[Check] = []
+    checks.extend(_check_api_transcribe(config))
     provider = get(config, "dubbing.provider", "edge")
     if provider != "edge" and not get(config, "dubbing.api_key", ""):
         checks.append(Check("api.dubbing", "warn", "Skipped real TTS request because dubbing API key is missing", "Run 'videocaptioner config set dubbing.api_key <key>'"))
@@ -260,6 +326,32 @@ def _check_api(config: dict) -> list[Check]:
     except Exception as exc:
         checks.append(Check("api.dubbing", "error", f"Real TTS request failed: {exc}", "Open Settings > Dubbing and verify provider, API Key, Base URL, model, and voice"))
     return checks
+
+
+def _check_api_transcribe(config: dict) -> list[Check]:
+    """Run a real short-audio transcription with the configured ASR provider.
+
+    Shares core.asr.check.check_transcribe with the Settings page test button.
+    """
+    asr = get(config, "transcribe.asr", "bijian")
+    if asr == "whisper-api" and not get(config, "whisper_api.api_key", ""):
+        return [Check("api.transcribe", "warn", "Skipped real ASR request because Whisper API key is missing", "Run 'videocaptioner config set whisper_api.api_key <key>'")]
+    if asr == "fun-asr" and not get(config, "fun_asr.api_key", ""):
+        return [Check("api.transcribe", "warn", "Skipped real ASR request because Bailian Fun-ASR API key is missing", "Run 'videocaptioner config set fun_asr.api_key <key>'")]
+    try:
+        from videocaptioner.cli.config_adapter import app_config_from_cli
+        from videocaptioner.core.application import TaskBuilder
+        from videocaptioner.core.asr.check import check_transcribe
+
+        transcribe_config = TaskBuilder(
+            app_config_from_cli(config)
+        ).create_transcribe_config(need_word_timestamp=False)
+        result = check_transcribe(transcribe_config)
+    except Exception as exc:
+        return [Check("api.transcribe", "error", f"Real ASR request failed: {exc}", "Open Settings > Transcribe and verify the provider configuration")]
+    if result.success:
+        return [Check("api.transcribe", "ok", f"Real ASR request succeeded: {asr}, recognized: {result.detail[:60]}")]
+    return [Check("api.transcribe", "error", f"Real ASR request failed: {result.detail}", "Open Settings > Transcribe and verify the provider configuration")]
 
 
 def _print_checks(checks: list[Check]) -> None:

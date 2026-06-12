@@ -186,13 +186,15 @@ def run(args: Namespace, config: dict) -> int:
     if soft and any([style_arg, override_arg, render_arg]):
         output.warn("Style options are ignored in soft subtitle mode (player controls rendering)")
 
-    # Output path
+    # Output path：软/硬是参数不是产物角色，统一 {stem}.subtitled.{ext}
     if args.output:
         output_path = args.output
     else:
-        stem = video_path.stem
-        suffix = "_captioned" if not soft else "_subtitled"
-        output_path = str(video_path.with_stem(stem + suffix))
+        from videocaptioner.core.application import output_paths
+
+        output_path = str(
+            output_paths.product_path(video_path, output_paths.TAG_SUBTITLED)
+        )
 
     # Check input != output
     if Path(output_path).resolve() == video_path.resolve():

@@ -4,17 +4,37 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QColor, QDesktopServices
-from PyQt5.QtWidgets import QColorDialog, QFileDialog, QHBoxLayout, QSizePolicy, QWidget
+from PyQt5.QtWidgets import (
+    QColorDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QSizePolicy,
+    QWidget,
+)
 from qfluentwidgets import InfoBar, Theme, setTheme, setThemeColor
 
-from videocaptioner.config import AUTHOR, FEEDBACK_URL, HELP_URL, RELEASE_URL, VERSION, YEAR
-from videocaptioner.core.asr.fun_asr import check_fun_asr_connection
+from videocaptioner.config import (
+    AUTHOR,
+    FEEDBACK_URL,
+    HELP_URL,
+    MODEL_PATH,
+    RELEASE_URL,
+    VERSION,
+    YEAR,
+)
+from videocaptioner.core.application import TaskBuilder
+from videocaptioner.core.asr.check import check_transcribe
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
     INFOBAR_DURATION_SUCCESS,
     INFOBAR_DURATION_WARNING,
+)
+from videocaptioner.core.download import (
+    detect_program,
+    iter_models,
+    model_install_state,
 )
 from videocaptioner.core.dubbing import build_dubbing_config, get_dubbing_preset
 from videocaptioner.core.entities import (
@@ -22,7 +42,6 @@ from videocaptioner.core.entities import (
     TranscribeModelEnum,
     TranslatorServiceEnum,
 )
-from videocaptioner.core.llm import check_whisper_connection
 from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
 from videocaptioner.core.speech import (
     SpeechProviderConfig,
@@ -36,6 +55,11 @@ from videocaptioner.ui.common.dubbing_options import (
     get_provider_voices,
     is_provider_default_base,
 )
+from videocaptioner.ui.common.model_options import (
+    FUN_ASR_MODEL_OPTIONS,
+    WHISPER_API_MODEL_OPTIONS,
+)
+from videocaptioner.ui.components.model_manager_dialog import ModelManagerDialog
 from videocaptioner.ui.components.settings_controls import (
     CONTROL_WIDTH,
     BoundComboBox,
@@ -45,12 +69,12 @@ from videocaptioner.ui.components.settings_controls import (
     BoundSlider,
     BoundSwitch,
     ColorSwatchButton,
+    FolderPickerControl,
     Option,
     SettingRow,
     SettingsGroup,
     SettingsShell,
     make_button,
-    make_value_label,
     options_from,
 )
 
@@ -104,6 +128,7 @@ class SettingInterface(SettingsShell):
         self._build_pages()
         self._connect_signals()
         self._refresh_transcribe_rows(cfg.transcribe_model.value)
+        self._refresh_local_model_state()
         self._refresh_llm_rows(cfg.llm_service.value)
         self._refresh_translate_rows(cfg.translator_service.value)
         self._refresh_dubbing_rows(cfg.dubbing_provider.value)
@@ -193,7 +218,7 @@ class SettingInterface(SettingsShell):
         )
         self.whisperApiModelControl = BoundEditableComboBox(
             cfg.whisper_api_model,
-            ["whisper-1", "whisper-large-v3-turbo"],
+            WHISPER_API_MODEL_OPTIONS,
             group,
         )
         self.whisperApiModelRow = group.addRow(
@@ -212,48 +237,62 @@ class SettingInterface(SettingsShell):
                 group,
             )
         )
-        self.checkWhisperButton = make_button(self.tr("测试连接"), parent=group)
-        self.checkWhisperRow = group.addRow(
-            SettingRow(
-                self.tr("Whisper 连接"),
-                self.tr("用当前 Base URL、API Key 和模型发起一次短音频测试。"),
-                self.checkWhisperButton,
-                group,
-            )
+        # 只列已下载的模型（下载入口在「管理模型」弹窗）；选项由
+        # _refresh_model_choices 按本地文件动态过滤。
+        self.whisperCppModelControl = BoundComboBox(
+            cfg.whisper_model,
+            options_from(cfg.whisper_model.validator.options),
+            group,
         )
-
         self.whisperCppModelRow = group.addRow(
             SettingRow(
                 self.tr("WhisperCpp 模型"),
-                self.tr("选择本地 whisper.cpp 转录模型。"),
-                BoundComboBox(
-                    cfg.whisper_model,
-                    options_from(cfg.whisper_model.validator.options),
-                    group,
-                ),
+                self.tr("选择已下载的 whisper.cpp 转录模型。"),
+                self.whisperCppModelControl,
+                group,
+            )
+        )
+        # 程序安装与模型下载集中在「管理模型」弹窗；状态写进行描述，
+        # 不与上方模型选择重复（需要行动时按钮转主题色）。
+        self.whisperCppManageButton = make_button(self.tr("管理模型"), parent=group)
+        self.whisperCppModelEntryRow = group.addRow(
+            SettingRow(
+                self.tr("本地模型"),
+                self.tr("查看运行程序状态、下载和管理模型文件。"),
+                self.whisperCppManageButton,
                 group,
             )
         )
 
+        self.fasterWhisperModelControl = BoundComboBox(
+            cfg.faster_whisper_model,
+            options_from(cfg.faster_whisper_model.validator.options),
+            group,
+        )
         self.fasterWhisperModelRow = group.addRow(
             SettingRow(
                 self.tr("Faster Whisper 模型"),
                 self.tr("选择已下载的 Faster Whisper 模型。"),
-                BoundComboBox(
-                    cfg.faster_whisper_model,
-                    options_from(cfg.faster_whisper_model.validator.options),
-                    group,
-                ),
+                self.fasterWhisperModelControl,
                 group,
             )
         )
-        self.fasterWhisperDirLabel = make_value_label(cfg.faster_whisper_model_dir.value or self.tr("未选择"), group)
-        self.fasterWhisperDirButton = make_button(self.tr("选择目录"), parent=group)
+        self.fasterWhisperDirControl = FolderPickerControl(group, placeholder=self.tr("未选择"))
+        self.fasterWhisperDirControl.setPath(str(cfg.faster_whisper_model_dir.value or ""))
         self.fasterWhisperDirRow = group.addRow(
             SettingRow(
                 self.tr("模型目录"),
                 self.tr("Faster Whisper 模型所在文件夹。"),
-                self._two_controls(self.fasterWhisperDirLabel, self.fasterWhisperDirButton, group),
+                self.fasterWhisperDirControl,
+                group,
+            )
+        )
+        self.fasterWhisperManageButton = make_button(self.tr("管理模型"), parent=group)
+        self.fasterWhisperModelEntryRow = group.addRow(
+            SettingRow(
+                self.tr("本地模型"),
+                self.tr("查看运行程序状态、下载和管理模型文件。"),
+                self.fasterWhisperManageButton,
                 group,
             )
         )
@@ -332,13 +371,7 @@ class SettingInterface(SettingsShell):
         )
         self.funAsrModelControl = BoundEditableComboBox(
             cfg.fun_asr_model,
-            [
-                "fun-asr",
-                "fun-asr-2025-11-07",
-                "fun-asr-2025-08-25",
-                "fun-asr-mtl",
-                "fun-asr-mtl-2025-08-25",
-            ],
+            FUN_ASR_MODEL_OPTIONS,
             group,
         )
         self.funAsrModelRow = group.addRow(
@@ -349,12 +382,14 @@ class SettingInterface(SettingsShell):
                 group,
             )
         )
-        self.checkFunAsrButton = make_button(self.tr("测试连接"), parent=group)
-        self.checkFunAsrRow = group.addRow(
+        # 统一的真实转录测试：对所有服务（含 B/J 接口与本地模型）可用，
+        # 与 doctor --check-api 共用 core 的 check_transcribe 入口。
+        self.checkTranscribeButton = make_button(self.tr("测试转录"), parent=group)
+        self.checkTranscribeRow = group.addRow(
             SettingRow(
-                self.tr("百炼连接"),
-                self.tr("验证 API Key 和模型是否可访问。"),
-                self.checkFunAsrButton,
+                self.tr("测试转录"),
+                self.tr("用内置短音频真实转录一次，验证当前服务能跑通。"),
+                self.checkTranscribeButton,
                 group,
             )
         )
@@ -742,20 +777,28 @@ class SettingInterface(SettingsShell):
 
     def _build_save_page(self) -> None:
         save_group = SettingsGroup("", self.savePage.container)
-        self.workDirLabel = make_value_label(cfg.work_dir.value, save_group)
-        self.workDirButton = make_button(self.tr("选择文件夹"), parent=save_group)
+        self.workDirControl = FolderPickerControl(save_group)
+        self.workDirControl.setPath(str(cfg.work_dir.value or ""))
         save_group.addRow(
             SettingRow(
                 self.tr("工作目录"),
-                self.tr("缓存、临时文件和处理结果会写入这里。"),
-                self._two_controls(self.workDirLabel, self.workDirButton, save_group),
+                self.tr("下载视频与处理任务的中间文件会写入这里。"),
+                self.workDirControl,
+                save_group,
+            )
+        )
+        save_group.addRow(
+            SettingRow(
+                self.tr("保留中间文件"),
+                self.tr("处理成功后保留任务目录里的原始转录、样式字幕等中间产物；默认跑完即清。"),
+                BoundSwitch(cfg.keep_intermediates, save_group),
                 save_group,
             )
         )
         save_group.addRow(
             SettingRow(
                 self.tr("启用缓存"),
-                self.tr("相同配置下复用 ASR、翻译和模型调用结果。"),
+                self.tr("相同配置下复用 ASR、翻译和配音合成结果。"),
                 BoundSwitch(cfg.cache_enabled, save_group),
                 save_group,
             )
@@ -877,9 +920,8 @@ class SettingInterface(SettingsShell):
         cfg.themeColorChanged.connect(lambda _color: self._sync_visual_style())
         self.transcribeModelControl.currentValueChanged.connect(self._refresh_transcribe_rows)
         cfg.transcribe_model.valueChanged.connect(self._refresh_transcribe_rows)
-        self.checkWhisperButton.clicked.connect(self.check_whisper_connection)
-        self.checkFunAsrButton.clicked.connect(self.check_fun_asr_connection)
-        self.fasterWhisperDirButton.clicked.connect(self._choose_faster_whisper_dir)
+        self.checkTranscribeButton.clicked.connect(self.check_transcribe_connection)
+        self.fasterWhisperDirControl.changeRequested.connect(self._choose_faster_whisper_dir)
 
         self.llmServiceControl.currentValueChanged.connect(self._refresh_llm_rows)
         cfg.llm_service.valueChanged.connect(self._refresh_llm_rows)
@@ -896,9 +938,24 @@ class SettingInterface(SettingsShell):
         self.dubbingPresetControl.currentValueChanged.connect(self._on_dubbing_preset_changed)
         self.checkDubbingButton.clicked.connect(self.check_dubbing_connection)
 
-        self.workDirButton.clicked.connect(self._choose_work_dir)
-        cfg.work_dir.valueChanged.connect(self._sync_work_dir_label)
-        cfg.faster_whisper_model_dir.valueChanged.connect(self._sync_faster_whisper_dir_label)
+        self.workDirControl.changeRequested.connect(self._choose_work_dir)
+        cfg.work_dir.valueChanged.connect(
+            lambda value: self.workDirControl.setPath(str(value or ""))
+        )
+        cfg.faster_whisper_model_dir.valueChanged.connect(
+            lambda value: self.fasterWhisperDirControl.setPath(str(value or ""))
+        )
+        self.whisperCppManageButton.clicked.connect(
+            lambda: self._open_model_manager("whisper-cpp")
+        )
+        self.fasterWhisperManageButton.clicked.connect(
+            lambda: self._open_model_manager("faster-whisper")
+        )
+        cfg.whisper_model.valueChanged.connect(lambda _v: self._refresh_model_entries())
+        cfg.faster_whisper_model.valueChanged.connect(lambda _v: self._refresh_model_entries())
+        cfg.faster_whisper_model_dir.valueChanged.connect(
+            lambda _v: self._refresh_local_model_state()
+        )
         cfg.cache_enabled.valueChanged.connect(self._on_cache_enabled_changed)
         self.themeColorSwatch.clicked.connect(self._choose_theme_color)
         self.themeColorResetButton.clicked.connect(self._reset_theme_color)
@@ -917,13 +974,14 @@ class SettingInterface(SettingsShell):
             self.whisperApiKeyRow,
             self.whisperApiModelRow,
             self.whisperApiPromptRow,
-            self.checkWhisperRow,
         ]:
             row.setVisible(is_whisper_api)
         self.whisperCppModelRow.setVisible(is_whisper_cpp)
+        self.whisperCppModelEntryRow.setVisible(is_whisper_cpp)
         for row in [
             self.fasterWhisperModelRow,
             self.fasterWhisperDirRow,
+            self.fasterWhisperModelEntryRow,
             self.fasterWhisperDeviceRow,
             self.fasterWhisperVadFilterRow,
             self.fasterWhisperVadThresholdRow,
@@ -936,11 +994,86 @@ class SettingInterface(SettingsShell):
         for row in [
             self.funAsrKeyRow,
             self.funAsrModelRow,
-            self.checkFunAsrRow,
         ]:
             row.setVisible(is_fun_asr)
         if is_fun_asr and cfg.fun_asr_api_base.value.strip() != "https://dashscope.aliyuncs.com":
             cfg.set(cfg.fun_asr_api_base, "https://dashscope.aliyuncs.com")
+        # 模型行的最终可见性还取决于"有没有已下载的模型"
+        self._refresh_model_choices()
+
+    # ------------------------------------------------------------ 本地模型入口
+
+    def _open_model_manager(self, kind: str) -> None:
+        dialog = ModelManagerDialog(kind, self.window())
+        dialog.modelsChanged.connect(self._refresh_local_model_state)
+        dialog.exec()
+        self._refresh_local_model_state()
+
+    def _model_entry_target(self, kind: str) -> tuple[str, Path]:
+        """入口行对应的当前模型名与模型目录。"""
+        if kind == "whisper-cpp":
+            name = getattr(cfg.whisper_model.value, "value", str(cfg.whisper_model.value))
+            return str(name), Path(MODEL_PATH)
+        name = getattr(
+            cfg.faster_whisper_model.value, "value", str(cfg.faster_whisper_model.value)
+        )
+        return str(name), Path(cfg.faster_whisper_model_dir.value or MODEL_PATH)
+
+    def _installed_model_options(self, kind: str) -> list[Any]:
+        """已下载模型对应的枚举选项（按清单顺序）。"""
+        _name, models_dir = self._model_entry_target(kind)
+        installed = {
+            spec.name
+            for spec in iter_models(kind)
+            if model_install_state(spec, models_dir)
+        }
+        field = cfg.whisper_model if kind == "whisper-cpp" else cfg.faster_whisper_model
+        return [
+            option
+            for option in field.validator.options
+            if getattr(option, "value", str(option)) in installed
+        ]
+
+    def _refresh_local_model_state(self) -> None:
+        self._refresh_model_choices()
+        self._refresh_model_entries()
+
+    def _refresh_model_choices(self) -> None:
+        """模型下拉只列已下载的；一个都没有时隐藏整行，由入口引导下载。"""
+        is_cpp = cfg.transcribe_model.value == TranscribeModelEnum.WHISPER_CPP
+        is_fw = cfg.transcribe_model.value == TranscribeModelEnum.FASTER_WHISPER
+        for kind, control, row, provider_active in (
+            ("whisper-cpp", self.whisperCppModelControl, self.whisperCppModelRow, is_cpp),
+            ("faster-whisper", self.fasterWhisperModelControl, self.fasterWhisperModelRow, is_fw),
+        ):
+            options = self._installed_model_options(kind)
+            row.setVisible(provider_active and bool(options))
+            if not options:
+                continue
+            field = control.config_item
+            current = field.value if field.value in options else options[0]
+            control.setOptions(options_from(options), keep_value=current)
+
+    def _refresh_model_entries(self) -> None:
+        entries = {
+            "whisper-cpp": (self.whisperCppModelEntryRow, self.whisperCppManageButton),
+            "faster-whisper": (self.fasterWhisperModelEntryRow, self.fasterWhisperManageButton),
+        }
+        for kind, (row, button) in entries.items():
+            _name, models_dir = self._model_entry_target(kind)
+            if not detect_program(kind).installed:
+                desc = self.tr("运行程序未安装，先在「管理模型」里完成安装。")
+                needs_action = True
+            elif not self._installed_model_options(kind):
+                desc = self.tr("还没有下载模型，打开「管理模型」选择下载。")
+                needs_action = True
+            else:
+                desc = self.tr("查看运行程序状态、下载和管理模型文件。")
+                needs_action = False
+            row.descLabel.setText(desc)
+            button.setProperty("settingsPrimary", needs_action)
+            row.syncStyle()  # 重新应用按钮主次样式
+            button.setToolTip(str(models_dir))
 
     def _refresh_llm_rows(self, value: Any) -> None:
         current = value if isinstance(value, LLMServiceEnum) else LLMServiceEnum(str(value))
@@ -990,6 +1123,8 @@ class SettingInterface(SettingsShell):
             cfg.set(cfg.dubbing_api_base, option.default_base)
         for row in [self.dubbingApiKeyRow, self.dubbingModelRow]:
             row.setVisible(option.needs_api_key)
+        # Edge 免费，并发由程序内部固定（pipeline.EDGE_TTS_WORKERS），不暴露给用户
+        self.dubbingWorkersRow.setVisible(provider_key != "edge")
         self._on_dubbing_preset_changed(current)
 
     def _on_dubbing_preset_changed(self, preset_name: Any) -> None:
@@ -1009,7 +1144,6 @@ class SettingInterface(SettingsShell):
         if not folder:
             return
         cfg.set(cfg.work_dir, folder)
-        self._sync_work_dir_label(folder)
 
     def _choose_faster_whisper_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -1020,17 +1154,6 @@ class SettingInterface(SettingsShell):
         if not folder:
             return
         cfg.set(cfg.faster_whisper_model_dir, folder)
-        self._sync_faster_whisper_dir_label(folder)
-
-    def _sync_work_dir_label(self, value: Any) -> None:
-        text = str(value or "")
-        self.workDirLabel.setText(text)
-        self.workDirLabel.setToolTip(text)
-
-    def _sync_faster_whisper_dir_label(self, value: Any) -> None:
-        text = str(value or self.tr("未选择"))
-        self.fasterWhisperDirLabel.setText(text)
-        self.fasterWhisperDirLabel.setToolTip(str(value or ""))
 
     def _on_cache_enabled_changed(self, enabled: bool) -> None:
         if enabled:
@@ -1215,75 +1338,73 @@ class SettingInterface(SettingsShell):
             parent=self,
         )
 
-    def check_whisper_connection(self) -> None:
-        api_base = cfg.whisper_api_base.value.strip()
-        api_key = cfg.whisper_api_key.value.strip()
-        model = cfg.whisper_api_model.value.strip()
-        if not api_base or not api_key or not model:
+    def check_transcribe_connection(self) -> None:
+        """统一测试转录：先做提供商必填项快检，再真实跑短音频。"""
+        missing = self._transcribe_check_missing()
+        if missing:
             InfoBar.warning(
                 self.tr("配置不完整"),
-                self.tr("请先填写 Whisper Base URL、API Key 和模型。"),
+                missing,
                 duration=INFOBAR_DURATION_WARNING,
                 parent=self,
             )
             return
+        from videocaptioner.ui.config_adapter import app_config_from_ui
+
+        config = TaskBuilder(app_config_from_ui(cfg)).create_transcribe_config(
+            need_word_timestamp=False
+        )
         self._run_button_thread(
-            self.checkWhisperButton,
-            self.tr("测试连接"),
-            self.tr("正在测试..."),
-            WhisperConnectionThread(api_base, api_key, model),
-            self._on_whisper_check_finished,
-            self._on_whisper_check_error,
+            self.checkTranscribeButton,
+            self.tr("测试转录"),
+            self.tr("正在转录..."),
+            TranscribeCheckThread(config),
+            self._on_transcribe_check_finished,
+            self._on_transcribe_check_error,
         )
 
-    def _on_whisper_check_finished(self, success: bool, result: str) -> None:
+    def _transcribe_check_missing(self) -> str:
+        """当前转录服务缺少的必填配置；齐全返回空串。"""
+        model = cfg.transcribe_model.value
+        if model == TranscribeModelEnum.WHISPER_API:
+            if not (
+                cfg.whisper_api_base.value.strip()
+                and cfg.whisper_api_key.value.strip()
+                and cfg.whisper_api_model.value.strip()
+            ):
+                return self.tr("请先填写 Whisper Base URL、API Key 和模型。")
+        elif model == TranscribeModelEnum.BAILIAN_FUN_ASR:
+            if not cfg.fun_asr_api_key.value.strip():
+                return self.tr("请先填写百炼 API Key。")
+        elif model == TranscribeModelEnum.WHISPER_CPP:
+            if not self._installed_model_options("whisper-cpp"):
+                return self.tr("还没有可用的本地模型，请先在「管理模型」中下载。")
+        elif model == TranscribeModelEnum.FASTER_WHISPER:
+            if not self._installed_model_options("faster-whisper"):
+                return self.tr("还没有可用的本地模型，请先在「管理模型」中下载。")
+        return ""
+
+    def _on_transcribe_check_finished(self, success: bool, detail: str) -> None:
         if success:
+            text = detail if len(detail) <= 80 else detail[:79] + "…"
             InfoBar.success(
-                self.tr("Whisper 连接成功"),
-                result,
+                self.tr("转录测试成功"),
+                self.tr("识别结果：{}").format(text),
                 duration=INFOBAR_DURATION_SUCCESS,
                 parent=self,
             )
         else:
             InfoBar.error(
-                self.tr("Whisper 连接失败"),
-                result,
+                self.tr("转录测试失败"),
+                detail,
                 duration=INFOBAR_DURATION_ERROR,
                 parent=self,
             )
 
-    def _on_whisper_check_error(self, message: str) -> None:
-        InfoBar.error(self.tr("Whisper 测试错误"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
-
-    def check_fun_asr_connection(self) -> None:
-        api_base = cfg.fun_asr_api_base.value.strip() or "https://dashscope.aliyuncs.com"
-        api_key = cfg.fun_asr_api_key.value.strip()
-        model = cfg.fun_asr_model.value.strip()
-        if not api_base or not api_key or not model:
-            InfoBar.warning(
-                self.tr("配置不完整"),
-                self.tr("请先填写百炼 API Key 和模型。"),
-                duration=INFOBAR_DURATION_WARNING,
-                parent=self,
-            )
-            return
-        self._run_button_thread(
-            self.checkFunAsrButton,
-            self.tr("测试连接"),
-            self.tr("正在测试..."),
-            FunAsrConnectionThread(api_base, api_key, model),
-            self._on_fun_asr_check_finished,
-            self._on_fun_asr_check_error,
+    def _on_transcribe_check_error(self, message: str) -> None:
+        InfoBar.error(
+            self.tr("转录测试错误"), message, duration=INFOBAR_DURATION_ERROR, parent=self
         )
-
-    def _on_fun_asr_check_finished(self, success: bool, result: str) -> None:
-        if success:
-            InfoBar.success(self.tr("百炼连接成功"), result, duration=INFOBAR_DURATION_SUCCESS, parent=self)
-        else:
-            InfoBar.error(self.tr("百炼连接失败"), result, duration=INFOBAR_DURATION_ERROR, parent=self)
-
-    def _on_fun_asr_check_error(self, message: str) -> None:
-        InfoBar.error(self.tr("百炼测试错误"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
 
     def check_dubbing_connection(self) -> None:
         preset_name = str(cfg.dubbing_preset.value)
@@ -1360,6 +1481,16 @@ class SettingInterface(SettingsShell):
         thread.error.connect(error_slot)
         self._threads.append(thread)
         thread.start()
+
+    def closeEvent(self, event):
+        # 退出时停掉所有检查网络线程（LLM/转录/配音，分钟级）：main_window.closeEvent
+        # 会 close() 本页，running QThread 被销毁触发 qFatal。只读网络线程，terminate 安全。
+        for thread in list(self._threads):
+            if thread.isRunning():
+                thread.terminate()
+                thread.wait(1000)
+        self._threads.clear()
+        super().closeEvent(event)
 
     @staticmethod
     def _llm_provider_specs() -> dict[LLMServiceEnum, dict[str, Any]]:
@@ -1480,10 +1611,17 @@ class SettingInterface(SettingsShell):
     @staticmethod
     def _two_controls(left, right, parent):
         container = QWidget(parent)
+        # 容器必须显式透明，否则在 qfluent 暗色样式下被涂成黑块，
+        # 两个控件之间会露出一条黑色背景缝。
+        container.setObjectName("settingsControlPair")
+        container.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
+        container.setStyleSheet(
+            "QWidget#settingsControlPair { background: transparent; }"
+        )
         container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
         if left.objectName() == "settingsValueLabel" and left.maximumWidth() > 10000:
             left.setFixedWidth(CONTROL_WIDTH)
         left.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -1559,38 +1697,20 @@ class DubbingConnectionThread(QThread):
             self.error.emit(str(exc))
 
 
-class WhisperConnectionThread(QThread):
+class TranscribeCheckThread(QThread):
+    """跑一次真实短音频转录（core.asr.check.check_transcribe）。"""
+
     finished = pyqtSignal(bool, str)
     error = pyqtSignal(str)
 
-    def __init__(self, base_url: str, api_key: str, model: str):
+    def __init__(self, config):
         super().__init__()
-        self.base_url = base_url
-        self.api_key = api_key
-        self.model = model
+        self.config = config
 
     def run(self) -> None:
         try:
-            success, result = check_whisper_connection(self.base_url, self.api_key, self.model)
-            self.finished.emit(success, result)
-        except Exception as exc:
-            self.error.emit(str(exc))
-
-
-class FunAsrConnectionThread(QThread):
-    finished = pyqtSignal(bool, str)
-    error = pyqtSignal(str)
-
-    def __init__(self, api_base: str, api_key: str, model: str):
-        super().__init__()
-        self.api_base = api_base
-        self.api_key = api_key
-        self.model = model
-
-    def run(self) -> None:
-        try:
-            success, result = check_fun_asr_connection(self.api_base, self.api_key, self.model)
-            self.finished.emit(success, result)
+            result = check_transcribe(self.config)
+            self.finished.emit(result.success, result.detail)
         except Exception as exc:
             self.error.emit(str(exc))
 

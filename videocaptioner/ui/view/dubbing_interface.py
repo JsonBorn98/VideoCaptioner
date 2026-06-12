@@ -23,115 +23,63 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    ExpandLayout,
     InfoBar,
-    InfoLevel,
     ScrollArea,
-    SimpleCardWidget,
-    TitleLabel,
-    setFont,
 )
 
 from videocaptioner.config import CACHE_PATH
 from videocaptioner.core.constant import INFOBAR_DURATION_ERROR, INFOBAR_DURATION_SUCCESS
 from videocaptioner.core.dubbing import get_dubbing_preset
+from videocaptioner.ui.common.app_icons import AppIcon
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.dubbing_options import (
     DUBBING_PROVIDERS,
-    DubbingProviderOption,
     DubbingVoiceOption,
     get_provider_option,
     get_provider_voices,
 )
-from videocaptioner.ui.common.theme_tokens import app_palette, is_dark_theme
+from videocaptioner.ui.common.theme_tokens import app_palette
+from videocaptioner.ui.components.workbench import (
+    ClickableFrame,
+    CompactButton,
+    FilterTabs,
+    SelectableCard,
+    WorkbenchButton,
+    apply_font,
+)
 from videocaptioner.ui.thread.voice_preview_thread import (
     VoicePreviewThread,
     bundled_voice_preview,
     playable_voice_preview,
 )
 
-CONTROL_RADIUS = 7
-PANEL_RADIUS = 8
-PAGE_MARGIN_X = 34
+CONTROL_RADIUS = 9   # 与 workbench CompactButton 一致
+PANEL_RADIUS = 14  # 与 workbench .panel 一致
+PAGE_MARGIN_X = 26  # 与批量/诊断等独立 nav 页根边距统一为 (26,20,26,22)
 SECTION_GAP = 14
 BODY_GAP = 18
-PROVIDER_HEIGHT = 96
-FILTER_HEIGHT = 60
+PROVIDER_HEIGHT = 88
 TABLE_HEADER_HEIGHT = 44
 VOICE_ROW_HEIGHT = 68
 SQUARE_BUTTON_SIZE = 40
 AUDITION_BUTTON_WIDTH = 92
+
+# 提供商卡左侧图标（与批量处理页模式卡同款图标盒）：均为音频族图标，
+# edge=扬声器、gemini=音符、siliconflow=麦克风（克隆录音语义贴切）。
+_PROVIDER_ICONS = {
+    "edge": AppIcon.VOLUME,
+    "gemini": AppIcon.MUSIC,
+    "siliconflow": AppIcon.MICROPHONE,
+}
 PREVIEW_PANEL_WIDTH = 376
-PREVIEW_PANEL_HEIGHT = 486
-PREVIEW_PANEL_COMPACT_HEIGHT = 360
-PREVIEW_PANEL_NO_CLONE_HEIGHT = 268
 GENDER_FILTER_TAGS = {"女声", "男声"}
 
 
-class MiniTag(QFrame):
-    def __init__(self, text: str, parent=None, level: InfoLevel = InfoLevel.INFOAMTION):
-        super().__init__(parent)
-        self._level = level
-        self.setObjectName("miniTag")
-        self.setFixedHeight(24)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 10, 0)
-        layout.setSpacing(0)
-
-        self.label = QLabel(self)
-        self.label.setObjectName("miniTagLabel")
-        self.label.setAlignment(Qt.AlignCenter)  # type: ignore
-        setFont(self.label, 11, 750)
-        layout.addWidget(self.label)
-
-        self.setText(text)
-        self.setLevel(level)
-
-    def text(self) -> str:
-        return self.label.text()
-
-    def setText(self, text: str):
-        self.label.setText(text)
-        self.setMinimumWidth(max(46, len(text) * 13 + 20))
-
-    def setLevel(self, level: InfoLevel):
-        self._level = level
-        self._sync_style()
-
-    def _sync_style(self):
-        palette = app_palette()
-        if self._level == InfoLevel.SUCCESS:
-            bg, fg, border = palette.accent, palette.accent_fg, palette.accent
-        elif self._level == InfoLevel.WARNING:
-            bg, fg, border = palette.disabled, palette.muted, palette.disabled
-        elif is_dark_theme():
-            bg, fg, border = palette.disabled, palette.muted, palette.disabled
-        else:
-            bg, fg, border = palette.field, palette.muted, palette.line
-        self.setStyleSheet(
-            f"""
-            QFrame#miniTag {{
-                background: {bg};
-                border: 1px solid {border};
-                border-radius: 12px;
-            }}
-            QLabel#miniTagLabel {{
-                color: {fg};
-                background: transparent;
-                border: none;
-            }}
-            """
-        )
-
-
 def _blend_color(foreground: str, background: str, alpha: float) -> QColor:
+    # foreground/background 恒为 app_palette() 的有效色；旧的无效兜底写死了非主题绿，
+    # 自定义主题时反而错，且从不触发，去掉。
     fg = QColor(foreground)
     bg = QColor(background)
-    if not fg.isValid():
-        fg = QColor("#28f08b")
-    if not bg.isValid():
-        bg = QColor("#292b2b")
     alpha = max(0.0, min(1.0, alpha))
     return QColor(
         int(fg.red() * alpha + bg.red() * (1 - alpha)),
@@ -140,12 +88,17 @@ def _blend_color(foreground: str, background: str, alpha: float) -> QColor:
     )
 
 
-class ThemedSimpleCard(SimpleCardWidget):
-    """Simple card with project-owned colors instead of qfluent theme globals."""
+class ThemedSimpleCard(QFrame):
+    """项目自绘卡：palette 颜色 + 可选选中态描边，不依赖 qfluent SimpleCardWidget
+    （它本就完全覆盖 paintEvent，qfluent 基类的视觉从未被用到）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._selected_visual = False
+        self._radius = PANEL_RADIUS
+
+    def setBorderRadius(self, radius: int):
+        self._radius = radius
 
     def setSelectedVisual(self, selected: bool):
         self._selected_visual = selected
@@ -163,117 +116,7 @@ class ThemedSimpleCard(SimpleCardWidget):
         border = QColor(palette.accent if self._selected_visual else palette.line)
         painter.setPen(border)
         painter.setBrush(background)
-        radius = self.getBorderRadius()
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), radius, radius)
-
-
-class ProviderCard(ThemedSimpleCard):
-    def __init__(self, option: DubbingProviderOption, parent=None):
-        super().__init__(parent)
-        self.option = option
-        self.setObjectName("providerCard")
-        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
-        self.setBorderRadius(PANEL_RADIUS)
-        self.setClickEnabled(True)
-        self.setCursor(Qt.PointingHandCursor)  # type: ignore
-        self.setFixedHeight(PROVIDER_HEIGHT)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(7)
-
-        top = QHBoxLayout()
-        top.setSpacing(10)
-        self.titleLabel = BodyLabel(self.tr(option.title), self)
-        setFont(self.titleLabel, 13, 700)
-        self.badge = MiniTag("", self)
-        self.badge.hide()
-        top.addWidget(self.titleLabel)
-        top.addStretch(1)
-        top.addWidget(self.badge)
-
-        self.descLabel = CaptionLabel(self.tr(option.description), self)
-        self.descLabel.setWordWrap(True)
-        self.descLabel.setFixedHeight(34)
-
-        layout.addLayout(top)
-        layout.addWidget(self.descLabel)
-
-    def setSelected(self, selected: bool):
-        self.setSelectedVisual(selected)
-        if selected:
-            self.badge.setText(self.tr("已选"))
-            self.badge.setLevel(InfoLevel.SUCCESS)
-        else:
-            self.badge.setText("")
-        self.badge.setVisible(selected)
-        self.setProperty("selected", selected)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        palette = app_palette()
-        self.titleLabel.setStyleSheet(f"color: {palette.text}; background: transparent;")
-        self.descLabel.setStyleSheet(f"color: {palette.muted}; background: transparent;")
-
-class ClickableFrame(QFrame):
-    clicked = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setCursor(Qt.PointingHandCursor)  # type: ignore
-
-    def mousePressEvent(self, event):
-        if self.isEnabled() and event.button() == Qt.LeftButton:  # type: ignore
-            self.clicked.emit()
-        super().mousePressEvent(event)
-
-
-class FilterButton(ClickableFrame):
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent)
-        self._checked = False
-        self.setObjectName("filterButton")
-        self.setFixedHeight(34)
-        self.setMinimumWidth(58)
-
-        layout = QGridLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)
-        self.label = QLabel(text, self)
-        self.label.setObjectName("filterButtonLabel")
-        self.label.setAlignment(Qt.AlignCenter)  # type: ignore
-        setFont(self.label, 13, 750)
-        layout.addWidget(self.label, 0, 0, Qt.AlignCenter)  # type: ignore
-        self._sync_style()
-
-    def setChecked(self, checked: bool):
-        self._checked = checked
-        self._sync_style()
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def text(self) -> str:
-        return self.label.text()
-
-    def _sync_style(self):
-        palette = app_palette()
-        if self._checked:
-            bg, fg, border = palette.accent, palette.accent_fg, palette.accent
-        else:
-            bg, fg, border = palette.field, palette.muted, palette.line
-        self.setStyleSheet(
-            f"""
-            QFrame#filterButton {{
-                background: {bg};
-                border: 1px solid {border};
-                border-radius: {CONTROL_RADIUS}px;
-            }}
-            QLabel#filterButtonLabel {{
-                color: {fg};
-                background: transparent;
-                border: none;
-            }}
-            """
-        )
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), self._radius, self._radius)
 
 
 class AuditionButton(ClickableFrame):
@@ -287,7 +130,7 @@ class AuditionButton(ClickableFrame):
         self.label = QLabel(text, self)
         self.label.setObjectName("auditionButtonLabel")
         self.label.setAlignment(Qt.AlignCenter)  # type: ignore
-        setFont(self.label, 13, 750)
+        apply_font(self.label, 13, 750)
         layout.addWidget(self.label, 0, 0, Qt.AlignCenter)  # type: ignore
         self._sync_style()
 
@@ -330,104 +173,6 @@ class AuditionButton(ClickableFrame):
         )
 
 
-class PrimaryActionButton(ClickableFrame):
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent)
-        self.setObjectName("primaryActionButton")
-        self.setFixedHeight(SQUARE_BUTTON_SIZE)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addStretch(1)
-        self.label = QLabel(text, self)
-        self.label.setObjectName("primaryActionLabel")
-        setFont(self.label, 13, 850)
-        layout.addWidget(self.label)
-        layout.addStretch(1)
-        self._sync_style()
-
-    def setText(self, text: str):
-        self.label.setText(text)
-
-    def text(self) -> str:
-        return self.label.text()
-
-    def setEnabled(self, enabled: bool):
-        super().setEnabled(enabled)
-        self._sync_style()
-
-    def _sync_style(self):
-        palette = app_palette()
-        if self.isEnabled():
-            bg, fg, border = palette.accent, palette.accent_fg, palette.accent
-        else:
-            bg, fg, border = palette.disabled, palette.subtle, palette.line
-        self.setStyleSheet(
-            f"""
-            QFrame#primaryActionButton {{
-                background: {bg};
-                border: 1px solid {border};
-                border-radius: {CONTROL_RADIUS}px;
-            }}
-            QLabel#primaryActionLabel {{
-                color: {fg};
-                background: transparent;
-                border: none;
-            }}
-            """
-        )
-
-
-class SecondaryActionButton(ClickableFrame):
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent)
-        self.setObjectName("secondaryActionButton")
-        self.setFixedHeight(SQUARE_BUTTON_SIZE)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addStretch(1)
-        self.label = QLabel(text, self)
-        self.label.setObjectName("secondaryActionLabel")
-        setFont(self.label, 13, 800)
-        layout.addWidget(self.label)
-        layout.addStretch(1)
-        self._sync_style()
-
-    def setText(self, text: str):
-        self.label.setText(text)
-
-    def text(self) -> str:
-        return self.label.text()
-
-    def setEnabled(self, enabled: bool):
-        super().setEnabled(enabled)
-        self._sync_style()
-
-    def _sync_style(self):
-        palette = app_palette()
-        if not self.isEnabled():
-            bg, fg, border = palette.disabled, palette.subtle, palette.line
-        else:
-            bg, fg, border = palette.field, palette.text, palette.line
-        self.setStyleSheet(
-            f"""
-            QFrame#secondaryActionButton {{
-                background: {bg};
-                border: 1px solid {border};
-                border-radius: {CONTROL_RADIUS}px;
-            }}
-            QLabel#secondaryActionLabel {{
-                color: {fg};
-                background: transparent;
-                border: none;
-            }}
-            """
-        )
-
-
 class VoiceRow(QFrame):
     previewRequested = pyqtSignal(str, object)
     selectedRequested = pyqtSignal(str)
@@ -453,7 +198,7 @@ class VoiceRow(QFrame):
         titleBox.setSpacing(4)
         self.titleLabel = BodyLabel(self.tr(voice.title), self)
         self.titleLabel.setFixedHeight(18)
-        setFont(self.titleLabel, 13, 700)
+        apply_font(self.titleLabel, 13, 700)
         self.descLabel = CaptionLabel(self.tr(voice.description), self)
         self.descLabel.setFixedHeight(16)
         self.descLabel.setWordWrap(False)
@@ -492,20 +237,22 @@ class VoiceTable(QFrame):
         self._add_header()
 
     def _add_header(self):
-        header = QFrame(self)
-        header.setObjectName("voiceHeader")
-        header.setFixedHeight(TABLE_HEADER_HEIGHT)
-        layout = QGridLayout(header)
-        layout.setContentsMargins(16, 0, 16, 0)
-        layout.setHorizontalSpacing(18)
-        layout.setColumnStretch(0, 1)
-        layout.setColumnMinimumWidth(1, AUDITION_BUTTON_WIDTH)
-        for column, text in [(0, self.tr("音色")), (1, self.tr("试听"))]:
-            label = CaptionLabel(text, header)
-            setFont(label, 11, 700)
-            align = Qt.AlignRight | Qt.AlignVCenter if column == 1 else Qt.AlignVCenter
-            layout.addWidget(label, 0, column, align)  # type: ignore
-        self.layout.addWidget(header)
+        """表头即筛选行：与批量处理页队列头同款的分段筛选组件。"""
+        self.header = QFrame(self)
+        self.header.setObjectName("voiceHeader")
+        self.header.setFixedHeight(52)
+        layout = QHBoxLayout(self.header)
+        layout.setContentsMargins(10, 0, 16, 0)
+        layout.setSpacing(10)
+        self.filterTabs = FilterTabs(
+            [("全部", "全部"), ("女声", "女声"), ("男声", "男声")], self.header
+        )
+        layout.addWidget(self.filterTabs)
+        layout.addStretch(1)
+        self.layout.addWidget(self.header)
+
+    def setFilterVisible(self, visible: bool):
+        self.header.setVisible(visible)
 
     def setVoices(self, voices: list[DubbingVoiceOption], current: str):
         for row in self.rows:
@@ -540,7 +287,6 @@ class PreviewPanel(ThemedSimpleCard):
         self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
         self.setBorderRadius(PANEL_RADIUS)
         self.setFixedWidth(PREVIEW_PANEL_WIDTH)
-        self.setFixedHeight(PREVIEW_PANEL_HEIGHT)
         self._clone_available = True
         self._clone_audio_path = ""
 
@@ -550,10 +296,10 @@ class PreviewPanel(ThemedSimpleCard):
 
         header = QHBoxLayout()
         self.titleLabel = BodyLabel(self.tr("配音文案"), self)
-        setFont(self.titleLabel, 16, 700)
+        apply_font(self.titleLabel, 16, 700)
         self.hintLabel = CaptionLabel(self.tr("用户可自行输入"), self)
         self.hintLabel.setObjectName("sampleHintLabel")
-        setFont(self.hintLabel, 11)
+        apply_font(self.hintLabel, 11, 400)
         self.hintLabel.hide()
         header.addWidget(self.titleLabel)
         header.addStretch(1)
@@ -564,7 +310,7 @@ class PreviewPanel(ThemedSimpleCard):
         self.previewInput.setPlaceholderText(self.tr("输入一句话，试听选中的音色"))
         self.previewInput.setFixedHeight(104)
         self.previewInput.setText(self.tr("你好，这是我想用于测试的配音文案。请用自然清晰的语气朗读这一句话。"))
-        setFont(self.previewInput, 13, 700)
+        apply_font(self.previewInput, 13, 700)
 
         meta = QHBoxLayout()
         meta.setContentsMargins(0, 0, 0, 0)
@@ -575,13 +321,15 @@ class PreviewPanel(ThemedSimpleCard):
         self.countLabel.setObjectName("sampleMetaLabel")
         self.countLabel.setMinimumWidth(50)
         self.countLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
-        setFont(self.metaLabel, 11)
-        setFont(self.countLabel, 11)
+        apply_font(self.metaLabel, 11, 400)
+        apply_font(self.countLabel, 11, 400)
         meta.addStretch(1)
         meta.addWidget(self.countLabel)
         self.metaLabel.hide()
 
-        self.customPreviewButton = PrimaryActionButton(self.tr("试听这句话"), self)
+        self.customPreviewButton = WorkbenchButton(
+            self.tr("试听这句话"), AppIcon.PLAY, primary=True, height=40, parent=self
+        )
 
         self.cloneSection = QFrame(self)
         self.cloneSection.setObjectName("cloneSection")
@@ -591,7 +339,7 @@ class PreviewPanel(ThemedSimpleCard):
 
         cloneHeader = QHBoxLayout()
         cloneTitle = BodyLabel(self.tr("声音克隆"), self.cloneSection)
-        setFont(cloneTitle, 15, 700)
+        apply_font(cloneTitle, 15, 700)
         cloneHeader.addWidget(cloneTitle)
         cloneHeader.addStretch(1)
 
@@ -604,20 +352,19 @@ class PreviewPanel(ThemedSimpleCard):
         self.fileLabel.setWordWrap(False)
         fileLayout.addWidget(self.fileLabel, 1)
 
+        # 操作按钮统一 workbench 紧凑按钮，自适应宽度不挤压
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
-        self.chooseButton = SecondaryActionButton(self.tr("上传音频"), self.cloneSection)
-        self.playButton = AuditionButton(self.tr("试听"), self.cloneSection)
-        self.recordButton = AuditionButton(self.tr("录制"), self.cloneSection)
-        self.clearButton = AuditionButton(self.tr("清除"), self.cloneSection)
-        self.playButton.setFixedWidth(74)
-        self.recordButton.setFixedWidth(92)
-        self.clearButton.setFixedWidth(74)
-        actions.addWidget(self.chooseButton, 1)
+        self.chooseButton = CompactButton(self.tr("上传"), AppIcon.FOLDER_ADD, self.cloneSection)
+        self.playButton = CompactButton(self.tr("试听"), AppIcon.PLAY, self.cloneSection)
+        self.recordButton = CompactButton(self.tr("录制"), AppIcon.MICROPHONE, self.cloneSection)
+        self.clearButton = CompactButton(self.tr("清除"), AppIcon.DELETE, self.cloneSection)
+        actions.addWidget(self.chooseButton)
         actions.addWidget(self.playButton)
         actions.addWidget(self.recordButton)
         actions.addWidget(self.clearButton)
+        actions.addStretch(1)
 
         self.cloneTextLabel = CaptionLabel(self.tr("参考文本"), self.cloneSection)
         self.cloneTextLabel.setObjectName("sampleMetaLabel")
@@ -625,7 +372,7 @@ class PreviewPanel(ThemedSimpleCard):
         self.cloneTextInput.setObjectName("cloneTextInput")
         self.cloneTextInput.setPlaceholderText(self.tr("输入参考音频里实际朗读的文字"))
         self.cloneTextInput.setFixedHeight(48)
-        setFont(self.cloneTextInput, 12, 650)
+        apply_font(self.cloneTextInput, 12, 650)
 
         self.cloneHintLabel = CaptionLabel(self.tr("未上传参考音频时，会直接用上方文案试听当前音色。"), self.cloneSection)
         self.cloneHintLabel.setObjectName("sampleMetaLabel")
@@ -663,7 +410,6 @@ class PreviewPanel(ThemedSimpleCard):
         self._clone_available = available
         self.cloneSection.setVisible(available)
         if not available:
-            self.setFixedHeight(PREVIEW_PANEL_NO_CLONE_HEIGHT)
             self.layoutChanged.emit()
         else:
             self._sync_clone_state()
@@ -675,7 +421,6 @@ class PreviewPanel(ThemedSimpleCard):
         if not self._clone_available:
             self.playButton.setEnabled(False)
             self.clearButton.setEnabled(False)
-            self.setFixedHeight(PREVIEW_PANEL_NO_CLONE_HEIGHT)
             self.updateGeometry()
             self.layoutChanged.emit()
             return
@@ -695,11 +440,11 @@ class PreviewPanel(ThemedSimpleCard):
         self.clearButton.setEnabled(False if recording else bool(self._clone_audio_path))
 
     def syncStyle(self):
-        self.customPreviewButton._sync_style()
-        self.chooseButton._sync_style()
-        self.playButton._sync_style()
-        self.recordButton._sync_style()
-        self.clearButton._sync_style()
+        self.customPreviewButton.syncStyle()
+        self.chooseButton.syncStyle()
+        self.playButton.syncStyle()
+        self.recordButton.syncStyle()
+        self.clearButton.syncStyle()
 
     def _update_clone_hint(self, path: str):
         if path:
@@ -713,7 +458,6 @@ class PreviewPanel(ThemedSimpleCard):
     def _sync_clone_state(self):
         if not self._clone_available:
             self.cloneSection.hide()
-            self.setFixedHeight(PREVIEW_PANEL_NO_CLONE_HEIGHT)
             self.updateGeometry()
             return
         has_audio = bool(self._clone_audio_path)
@@ -723,7 +467,6 @@ class PreviewPanel(ThemedSimpleCard):
         self.cloneHintLabel.setVisible(bool(self.cloneHintLabel.text()))
         self.playButton.setEnabled(self._clone_audio_exists())
         self.clearButton.setEnabled(has_audio)
-        self.setFixedHeight(PREVIEW_PANEL_HEIGHT if has_audio else PREVIEW_PANEL_COMPACT_HEIGHT)
         self.cloneSection.updateGeometry()
         self.updateGeometry()
         self.layoutChanged.emit()
@@ -743,16 +486,15 @@ class DubbingInterface(ScrollArea):
         self.setWindowTitle(self.tr("配音"))
         self.preview_thread: VoicePreviewThread | None = None
         self.player = QMediaPlayer(self)
+        self.player.stateChanged.connect(self._on_player_state_changed)
         self.recorder = QAudioRecorder(self)
         self._recording_output_path: Path | None = None
         self.scrollWidget = QWidget()
-        self.expandLayout = ExpandLayout(self.scrollWidget)
-        self.titleLabel = TitleLabel(self.tr("配音"), self)
-        self.subtitleLabel = CaptionLabel(self.tr("选择提供商和音色，输入一句自己的试听文案。"), self)
-        self.providerCards: dict[str, ProviderCard] = {}
-        self.genderFilters: dict[str, FilterButton] = {}
+        self.contentLayout = QVBoxLayout(self.scrollWidget)
+        self.providerCards: dict[str, SelectableCard] = {}
         self.genderFilter = "全部"
-        self._active_preview_button: QWidget | None = None
+        self._active_preview_button: QWidget | None = None  # 合成中的按钮
+        self._playing_button: QWidget | None = None  # 播放中的按钮（可点停止）
         self._active_preview_cache_key: tuple[str, ...] | None = None
         self._preview_cache: dict[tuple[str, ...], str] = {}
 
@@ -764,15 +506,29 @@ class DubbingInterface(ScrollArea):
     def _init_ui(self):
         self.resize(1200, 820)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
-        self.setViewportMargins(0, 46, 0, 20)
+        self.setViewportMargins(0, 0, 0, 0)
         self.setWidget(self.scrollWidget)
         self.setWidgetResizable(True)
         self.setObjectName("dubbingInterface")
         self.scrollWidget.setObjectName("scrollWidget")
-        self.titleLabel.setObjectName("settingLabel")
-        self.titleLabel.move(36, 10)
-        self.subtitleLabel.hide()
         self.enableTransparentBackground()
+
+        # 页头：标题 + 描述，随内容滚动（与批量处理页 pageTitle/pageSubtitle
+        # 同款）；不再用浮动绝对定位 + viewport 顶边距的旧写法。
+        self.headerWidget = QWidget(self.scrollWidget)
+        headLayout = QVBoxLayout(self.headerWidget)
+        headLayout.setContentsMargins(0, 0, 0, 0)
+        headLayout.setSpacing(3)
+        self.titleLabel = QLabel(self.tr("配音"), self.headerWidget)
+        self.titleLabel.setObjectName("pageTitle")
+        apply_font(self.titleLabel, 26, 860)
+        self.subtitleLabel = QLabel(
+            self.tr("选择提供商和音色，输入一句自己的试听文案。"), self.headerWidget
+        )
+        self.subtitleLabel.setObjectName("pageSubtitle")
+        apply_font(self.subtitleLabel, 13, 720)
+        headLayout.addWidget(self.titleLabel)
+        headLayout.addWidget(self.subtitleLabel)
 
         self.providerPanel = QWidget(self.scrollWidget)
         self.providerPanel.setFixedHeight(PROVIDER_HEIGHT)
@@ -780,25 +536,16 @@ class DubbingInterface(ScrollArea):
         providerLayout.setContentsMargins(0, 0, 0, 0)
         providerLayout.setSpacing(12)
         for option in DUBBING_PROVIDERS:
-            card = ProviderCard(option, self.providerPanel)
-            card.clicked.connect(lambda key=option.key: self._on_provider_changed(key))
+            card = SelectableCard(
+                option.key,
+                self.tr(option.title),
+                self.tr(option.description),
+                _PROVIDER_ICONS.get(option.key),
+                self.providerPanel,
+            )
+            card.clicked.connect(self._on_provider_changed)
             providerLayout.addWidget(card, 1)
             self.providerCards[option.key] = card
-
-        self.filterPanel = QFrame(self.scrollWidget)
-        self.filterPanel.setObjectName("filterPanel")
-        self.filterPanel.setFixedHeight(FILTER_HEIGHT)
-        filterLayout = QHBoxLayout(self.filterPanel)
-        filterLayout.setContentsMargins(12, 12, 12, 12)
-        filterLayout.setSpacing(10)
-        self.genderFilterLabel = CaptionLabel(self.tr("声线"), self.filterPanel)
-        filterLayout.addWidget(self.genderFilterLabel)
-        for value in ("全部", "女声", "男声"):
-            button = self._create_filter_button(value, self.filterPanel)
-            button.clicked.connect(lambda _checked=False, v=value: self._on_gender_filter(v))
-            self.genderFilters[value] = button
-            filterLayout.addWidget(button)
-        filterLayout.addStretch(1)
 
         self.bodyPanel = QWidget(self.scrollWidget)
         bodyLayout = QHBoxLayout(self.bodyPanel)
@@ -815,17 +562,15 @@ class DubbingInterface(ScrollArea):
         bodyLayout.addWidget(self.voiceTable, 1, Qt.AlignTop)  # type: ignore
         bodyLayout.addWidget(self.sidePanel, 0, Qt.AlignTop)  # type: ignore
 
-        self.expandLayout.setSpacing(SECTION_GAP)
-        self.expandLayout.setContentsMargins(PAGE_MARGIN_X, 0, PAGE_MARGIN_X, 0)
-        self.expandLayout.addWidget(self.providerPanel)
-        self.expandLayout.addWidget(self.filterPanel)
-        self.expandLayout.addWidget(self.bodyPanel)
-
-    def _create_filter_button(self, text: str, parent: QWidget) -> FilterButton:
-        button = FilterButton(text, parent)
-        return button
+        self.contentLayout.setSpacing(SECTION_GAP)
+        self.contentLayout.setContentsMargins(PAGE_MARGIN_X, 20, PAGE_MARGIN_X, 22)
+        self.contentLayout.addWidget(self.headerWidget)
+        self.contentLayout.addWidget(self.providerPanel)
+        self.contentLayout.addWidget(self.bodyPanel)
+        self.contentLayout.addStretch(1)  # 内容不足一屏时顶部对齐，不被 QVBoxLayout 撑开
 
     def _connect_signals(self):
+        self.voiceTable.filterTabs.changed.connect(self._on_gender_filter)
         self.voiceTable.previewRequested.connect(self._preview)
         self.voiceTable.selectedRequested.connect(self._apply_preset)
         self.previewPanel.customPreviewRequested.connect(self._preview_custom_text)
@@ -847,6 +592,18 @@ class DubbingInterface(ScrollArea):
         self.recorder.setEncodingSettings(settings)
         self.recorder.stateChanged.connect(self._on_recording_state_changed)
 
+    def closeEvent(self, event):
+        # 退出/切走时停掉试听网络线程、播放器与录音：main_window.closeEvent 会 close()
+        # 本页，若 preview_thread 仍在跑，销毁 running QThread 会触发 qFatal。
+        # 这是只读网络线程，terminate 安全。
+        if self.preview_thread is not None and self.preview_thread.isRunning():
+            self.preview_thread.terminate()
+            self.preview_thread.wait(1000)
+        self.player.stop()
+        if self.recorder.state() == QMediaRecorder.RecordingState:
+            self.recorder.stop()
+        super().closeEvent(event)
+
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_page_background()
@@ -865,21 +622,21 @@ class DubbingInterface(ScrollArea):
             #providerCard, #previewPanel {{
                 background: {palette.panel};
                 border: 1px solid {palette.line};
-                border-radius: 8px;
+                border-radius: 14px;
             }}
             #providerCard[selected="true"] {{
                 background: {palette.selected};
                 border: 1px solid {palette.accent};
             }}
-            QFrame#filterPanel, QFrame#voiceTable {{
+            QFrame#voiceTable {{
                 background: {palette.panel};
                 border: 1px solid {palette.line_soft};
-                border-radius: 8px;
+                border-radius: 14px;
             }}
             QFrame#voiceHeader {{
-                background: {palette.header};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
+                background: transparent;
+                border: none;
+                border-bottom: 1px solid {palette.line_soft};
             }}
             QFrame#voiceRow {{
                 background: {palette.panel};
@@ -893,35 +650,37 @@ class DubbingInterface(ScrollArea):
                 color: {palette.text};
                 background: {palette.field};
                 border: 1px solid {palette.line};
-                border-radius: 8px;
+                border-radius: 12px;
                 padding: 14px;
             }}
             QTextEdit#cloneTextInput {{
                 color: {palette.text};
                 background: {palette.field};
                 border: 1px solid {palette.line};
-                border-radius: 8px;
+                border-radius: 12px;
                 padding: 10px;
             }}
             QFrame#cloneSection {{
                 background: {palette.field};
                 border: 1px solid {palette.line_soft};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
             QFrame#cloneFileBox {{
                 background: transparent;
                 border: 1px solid {palette.line_soft};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
             QFrame#playerBar {{
                 background: {palette.field};
                 border: 1px solid {palette.line_soft};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
             QLabel {{
                 color: {palette.text};
                 background: transparent;
             }}
+            QLabel#pageTitle {{ color: {palette.text}; background: transparent; }}
+            QLabel#pageSubtitle {{ color: {palette.muted}; background: transparent; }}
             CaptionLabel {{
                 color: {palette.muted};
             }}
@@ -951,26 +710,20 @@ class DubbingInterface(ScrollArea):
             cfg.set(cfg.dubbing_model, preset.model)
 
         for key, card in self.providerCards.items():
-            card.setSelected(key == provider)
+            card.setActive(key == provider)
         self._sync_filter_visibility(presets)
-        self._refresh_filters()
         self._render_voice_table()
-        self.expandLayout.update()
+        self.contentLayout.update()
 
     def _sync_filter_visibility(self, voices: tuple[DubbingVoiceOption, ...]):
         supports_gender = any(GENDER_FILTER_TAGS.intersection(voice.tags) for voice in voices)
         if not supports_gender:
             self.genderFilter = "全部"
-        self.filterPanel.setVisible(supports_gender)
-
-    def _refresh_filters(self):
-        for value, button in self.genderFilters.items():
-            selected = value == self.genderFilter
-            button.setChecked(selected)
+            self.voiceTable.filterTabs.setCurrent("全部")
+        self.voiceTable.setFilterVisible(supports_gender)
 
     def _on_gender_filter(self, value: str):
         self.genderFilter = value
-        self._refresh_filters()
         self._render_voice_table()
 
     def _filtered_voices(self) -> list[DubbingVoiceOption]:
@@ -980,6 +733,11 @@ class DubbingInterface(ScrollArea):
         return voices
 
     def _render_voice_table(self):
+        # 行控件即将重建：先释放对旧行试听按钮的引用，避免悬挂指针
+        if isinstance(self._playing_button, AuditionButton):
+            self._stop_playback()
+        if isinstance(self._active_preview_button, AuditionButton):
+            self._active_preview_button = None
         voices = self._filtered_voices()
         self.voiceTable.setVoices(voices, cfg.dubbing_preset.value)
         self._refresh_body_layout()
@@ -1065,7 +823,10 @@ class DubbingInterface(ScrollArea):
             cfg.set(cfg.dubbing_clone_audio, "", save=False)
             self._refresh_body_layout()
             return
-        self._play_audio_file(path)
+        if self.previewPanel.playButton is self._playing_button:
+            self._stop_playback()
+            return
+        self._play_audio_file(path, self.previewPanel.playButton)
 
     def _apply_preset(self, preset_name: str):
         preset = get_dubbing_preset(preset_name)
@@ -1106,6 +867,47 @@ class DubbingInterface(ScrollArea):
             clone_audio_text=clone_audio_text,
         )
 
+    # ------------------------------------------------- 试听按钮状态机
+    # idle（试听）→ loading（合成中…，禁用）→ playing（停止，可点）→ idle。
+    # 同一时刻只有一个按钮处于 loading 或 playing；点击播放中的按钮即停止。
+
+    def _preview_idle_text(self, button: QWidget) -> str:
+        if button is self.previewPanel.customPreviewButton:
+            return self.tr("试听这句话")
+        return self.tr("试听")
+
+    def _set_preview_button(self, button: QWidget | None, state: str):
+        if button is None:
+            return
+        if state == "loading":
+            button.setEnabled(False)
+            if hasattr(button, "setText"):
+                button.setText(self.tr("合成中…"))
+        elif state == "playing":
+            button.setEnabled(True)
+            if hasattr(button, "setText"):
+                button.setText(self.tr("停止"))
+            if hasattr(button, "setIcon"):
+                button.setIcon(AppIcon.CANCEL)
+        else:
+            button.setEnabled(True)
+            if hasattr(button, "setText"):
+                button.setText(self._preview_idle_text(button))
+            if hasattr(button, "setIcon"):
+                button.setIcon(AppIcon.PLAY)
+
+    def _stop_playback(self):
+        if self._playing_button is not None:
+            self._set_preview_button(self._playing_button, "idle")
+            self._playing_button = None
+        self.player.stop()
+
+    def _on_player_state_changed(self, state):
+        # 自然播完（或外部停止）：把"停止"复原成"试听"
+        if state == QMediaPlayer.StoppedState and self._playing_button is not None:
+            self._set_preview_button(self._playing_button, "idle")
+            self._playing_button = None
+
     def _preview(
         self,
         preset_name: str,
@@ -1115,7 +917,17 @@ class DubbingInterface(ScrollArea):
         clone_audio_path: str = "",
         clone_audio_text: str = "",
     ):
+        if button is not None and button is self._playing_button:
+            # 播放中点同一按钮 = 停止
+            self._stop_playback()
+            return
         if self.preview_thread and self.preview_thread.isRunning():
+            InfoBar.info(
+                self.tr("请稍候"),
+                self.tr("正在合成另一段试听。"),
+                duration=2000,
+                parent=self,
+            )
             return
         preset = get_dubbing_preset(preset_name)
         requires_api = text or clone_audio_path or clone_audio_text or not bundled_voice_preview(preset_name)
@@ -1135,14 +947,11 @@ class DubbingInterface(ScrollArea):
         )
         cached_path = self._preview_cache.get(cache_key, "")
         if cached_path and Path(cached_path).exists():
-            self._play_audio_file(cached_path)
+            self._play_audio_file(cached_path, button)
             return
         self._active_preview_button = button
         self._active_preview_cache_key = cache_key
-        if button:
-            button.setEnabled(False)
-            if hasattr(button, "setText"):
-                button.setText(self.tr("试听中..."))
+        self._set_preview_button(button, "loading")
         self.preview_thread = VoicePreviewThread(
             preset_name,
             text=text,
@@ -1153,31 +962,20 @@ class DubbingInterface(ScrollArea):
         self.preview_thread.error.connect(self._on_preview_error)
         self.preview_thread.start()
 
-    def _reset_preview_buttons(self):
-        self.previewPanel.customPreviewButton.setEnabled(True)
-        self.previewPanel.customPreviewButton.setText(self.tr("试听这句话"))
-        if self._active_preview_button and self._active_preview_button is not self.previewPanel.customPreviewButton:
-            self._active_preview_button.setEnabled(True)
-            if hasattr(self._active_preview_button, "setText"):
-                self._active_preview_button.setText(self.tr("试听"))
-        self._active_preview_button = None
-
     def _on_preview_finished(self, path: str):
         if self._active_preview_cache_key:
             self._preview_cache[self._active_preview_cache_key] = path
             self._active_preview_cache_key = None
-        self._reset_preview_buttons()
-        self._play_audio_file(path)
-        InfoBar.success(
-            self.tr("开始播放"),
-            self.tr("正在播放：{name}").format(name=Path(path).name),
-            duration=INFOBAR_DURATION_SUCCESS,
-            parent=self,
-        )
+        button = self._active_preview_button
+        self._active_preview_button = None
+        self._set_preview_button(button, "idle")
+        # 播放状态由 _play_audio_file 接管（按钮翻成"停止"），不再弹成功通知
+        self._play_audio_file(path, button)
 
     def _on_preview_error(self, message: str):
         self._active_preview_cache_key = None
-        self._reset_preview_buttons()
+        self._set_preview_button(self._active_preview_button, "idle")
+        self._active_preview_button = None
         InfoBar.error(
             self.tr("试听失败"),
             message,
@@ -1185,10 +983,12 @@ class DubbingInterface(ScrollArea):
             parent=self,
         )
 
-    def _play_audio_file(self, path: str):
+    def _play_audio_file(self, path: str, button: QWidget | None = None):
         playable_path = playable_voice_preview(Path(path))
-        self.player.stop()
+        self._stop_playback()
         self.player.setMedia(QMediaContent(QUrl.fromLocalFile(str(playable_path))))
+        self._playing_button = button
+        self._set_preview_button(button, "playing")
         self.player.play()
 
     def _preview_cache_key(

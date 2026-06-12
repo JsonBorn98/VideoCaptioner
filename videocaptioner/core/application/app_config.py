@@ -51,7 +51,7 @@ class TranscribeSettings:
     faster_whisper_program: str = "faster-whisper-xxl.exe"
     faster_whisper_model: FasterWhisperModelEnum = FasterWhisperModelEnum.TINY
     faster_whisper_model_dir: str = ""
-    faster_whisper_device: str = "cuda"
+    faster_whisper_device: str = "auto"
     faster_whisper_vad_filter: bool = True
     faster_whisper_vad_threshold: float = 0.4
     faster_whisper_vad_method: VadMethodEnum = VadMethodEnum.SILERO_V4
@@ -221,16 +221,21 @@ def target_language_from_code(value: Any) -> TargetLanguage:
     return TargetLanguage.SIMPLIFIED_CHINESE
 
 
+# CLI 的 --asr 取值与枚举的唯一映射：parser choices 必须从这里派生，
+# 不要再手写清单（曾因三处手写各自漂移漏掉 faster-whisper / fun-asr）。
+CLI_ASR_MAPPING: dict[str, TranscribeModelEnum] = {
+    "bijian": TranscribeModelEnum.BIJIAN,
+    "jianying": TranscribeModelEnum.JIANYING,
+    "fun-asr": TranscribeModelEnum.BAILIAN_FUN_ASR,
+    "whisper-api": TranscribeModelEnum.WHISPER_API,
+    "whisper-cpp": TranscribeModelEnum.WHISPER_CPP,
+    "faster-whisper": TranscribeModelEnum.FASTER_WHISPER,
+}
+CLI_ASR_CHOICES: list[str] = list(CLI_ASR_MAPPING)
+
+
 def transcribe_model_from_cli(value: str) -> TranscribeModelEnum:
-    mapping = {
-        "bijian": TranscribeModelEnum.BIJIAN,
-        "jianying": TranscribeModelEnum.JIANYING,
-        "fun-asr": TranscribeModelEnum.BAILIAN_FUN_ASR,
-        "whisper-api": TranscribeModelEnum.WHISPER_API,
-        "whisper-cpp": TranscribeModelEnum.WHISPER_CPP,
-        "faster-whisper": TranscribeModelEnum.FASTER_WHISPER,
-    }
-    return mapping.get(value, TranscribeModelEnum.BIJIAN)
+    return CLI_ASR_MAPPING.get(value, TranscribeModelEnum.BIJIAN)
 
 
 def transcribe_output_format_from_cli(value: str) -> TranscribeOutputFormatEnum:

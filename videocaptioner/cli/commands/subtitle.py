@@ -77,6 +77,10 @@ def run(args: Namespace, config: dict) -> int:
         if not validate_llm(config):
             return EXIT.USAGE_ERROR
     target_lang_code = get(config, "translate.target_language", "zh-Hans")
+    # 语言码尽早校验一次：默认输出名和翻译阶段共用解析结果
+    target_language = _resolve_target_language(target_lang_code) if need_translate else None
+    if need_translate and target_language is None:
+        return EXIT.USAGE_ERROR
     need_reflect = get(config, "translate.reflect", False)
     if need_reflect and translator_service in ("bing", "google"):
         output.warn("--reflect only works with LLM translator, ignored for " + translator_service)
@@ -110,13 +114,24 @@ def run(args: Namespace, config: dict) -> int:
     verbose = getattr(args, "verbose", False)
     quiet = getattr(args, "quiet", False)
 
-    # Build output path
+    # Build output path（命名语法统一走 output_paths：{stem}.{lang|optimized}.{ext}）
+    from videocaptioner.core.application import output_paths
+
+    def default_output(directory=None) -> str:
+        tag = (
+            output_paths.language_tag(target_language)
+            if target_language is not None
+            else output_paths.TAG_OPTIMIZED
+        )
+        return str(
+            output_paths.product_path(input_path, tag, ext=f".{out_fmt}", directory=directory)
+        )
+
     if args.output:
         out = Path(args.output)
         if out.is_dir() or str(args.output).endswith("/"):
             out.mkdir(parents=True, exist_ok=True)
-            suffix = f"_{target_lang_code}" if need_translate else "_optimized"
-            output_path = str(out / f"{input_path.stem}{suffix}.{out_fmt}")
+            output_path = default_output(directory=out)
         else:
             # If -o has no extension, auto-append from --format
             if not out.suffix:
@@ -127,8 +142,7 @@ def run(args: Namespace, config: dict) -> int:
                 if ext != out_fmt and out_fmt != "srt":
                     output.warn(f"--format {out_fmt} ignored; output format determined by -o extension (.{ext})")
     else:
-        suffix = f"_{target_lang_code}" if need_translate else "_optimized"
-        output_path = str(input_path.with_stem(input_path.stem + suffix).with_suffix(f".{out_fmt}"))
+        output_path = default_output()
 
     # Validate output format
     from videocaptioner.cli.validators import validate_output_format
@@ -214,12 +228,6 @@ def run(args: Namespace, config: dict) -> int:
         if need_translate:
             if progress:
                 progress.update(60, f"Translating to {target_lang_code}...")
-
-            target_language = _resolve_target_language(target_lang_code)
-            if not target_language:
-                if progress:
-                    progress.finish()  # Clean spinner without duplicate error
-                return EXIT.USAGE_ERROR
 
             from videocaptioner.core.translate.factory import TranslatorFactory
             from videocaptioner.core.translate.types import TranslatorType

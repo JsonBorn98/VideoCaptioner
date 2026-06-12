@@ -1,48 +1,46 @@
 # -*- coding: utf-8 -*-
+"""字幕视频合成页：组合开关工作台。
+
+布局与状态对应 docs/dev/design-synthesis.html（方案 A）：
+左侧是输入文件面板（拖放 / 文件清单 / 生成计划 / 结果文件），
+右侧是可折叠的「本次生成」栏（输出内容开关 + 参数 + 主按钮）。
+
+输出由两个开关组合驱动：
+
+    字幕视频（cfg.need_video）   需要 字幕 + 视频
+    配音音轨（cfg.dubbing_enabled） 仅需字幕，视频可选（选了则额外产出配音视频）
+
+生命周期状态（PageState）只有 IDLE / RUNNING / DONE；
+IDLE 下的具体呈现（空态 / 缺文件 / 配置缺失 / 可生成）由 _evaluate()
+根据开关与输入实时计算，避免组合爆炸。
+
+线程统一由 SynthesisController 持有（配音 -> 合成 链式编排在控制器内，
+进度按 0-55 / 55-100 映射）；对外接口与其它工作台页一致：
+    finished()  /  set_task(task) / process() / close()
+"""
+
+from __future__ import annotations
 
 import os
 import shutil
-import sys
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
+from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QDropEvent
-from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
+from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QApplication,
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QSizePolicy,
+    QLabel,
+    QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import (
-    Action,
-    BodyLabel,
-    CaptionLabel,
-    ComboBox,
-    CommandBar,
-    DropDownPushButton,
-    InfoBar,
-    InfoBarPosition,
-    PrimaryPushButton,
-    ProgressBar,
-    PushButton,
-    RoundMenu,
-    ScrollArea,
-    SwitchButton,
-    ToolTipFilter,
-    ToolTipPosition,
-    setFont,
-)
-from qfluentwidgets import FluentIcon as FIF
 
-from videocaptioner.core.constant import (
-    INFOBAR_DURATION_ERROR,
-    INFOBAR_DURATION_SUCCESS,
-    INFOBAR_DURATION_WARNING,
-)
+from videocaptioner.core.application import output_paths
 from videocaptioner.core.dubbing import get_dubbing_preset
 from videocaptioner.core.entities import (
     DubbingTask,
@@ -50,1347 +48,1487 @@ from videocaptioner.core.entities import (
     SupportedSubtitleFormats,
     SupportedVideoFormats,
     SynthesisTask,
+    VideoInfo,
     VideoQualityEnum,
 )
 from videocaptioner.core.subtitle.ass_renderer import ffmpeg_supports_ass_filter
-from videocaptioner.core.utils.platform_utils import open_folder
+from videocaptioner.core.utils.platform_utils import open_folder, reveal_in_explorer
+from videocaptioner.ui.common.app_icons import AppIcon
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.common.dubbing_options import (
-    DUBBING_VOICES,
-    DubbingVoiceOption,
-)
-from videocaptioner.ui.common.theme_tokens import app_palette
-from videocaptioner.ui.components.workflow_widgets import (
-    CONTENT_GAP,
-    CONTROL_RADIUS,
-    PANEL_RADIUS,
-    SECTION_GAP,
-    FileRow,
-    ModernPanel,
-    OutputCard,
-    SmallActionButton,
-    WorkflowSettingRow,
+from videocaptioner.ui.common.dubbing_options import get_provider_voices
+from videocaptioner.ui.common.theme_tokens import app_palette, rgba
+from videocaptioner.ui.components.workbench import (
+    CollapsibleSideHost,
+    CompactButton,
+    DropZone,
+    ElidedLabel,
+    ErrorCard,
+    HeaderLinkButton,
+    IconBox,
+    MediaThumb,
+    OptionCard,
+    PanelHeader,
+    PillSelect,
+    ProgressBarLine,
+    RoundIconButton,
+    SectionLabel,
+    StatusPill,
+    ToggleCard,
+    ToggleSwitch,
+    WorkbenchButton,
+    WorkbenchPanel,
+    apply_font,
+    draw_rounded_surface,
+    file_type_icon,
+    icon_pixmap,
 )
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.dubbing_thread import DubbingThread
+from videocaptioner.ui.thread.video_info_thread import VideoInfoThread
 from videocaptioner.ui.thread.video_synthesis_thread import VideoSynthesisThread
-from videocaptioner.ui.thread.voice_preview_thread import VoicePreviewThread, bundled_voice_preview
 
-DUBBING_PRESET_LABELS = {
-    voice.preset: voice.title
-    for provider, voices in DUBBING_VOICES.items()
-    for voice in voices
-}
+_SUBTITLE_FORMATS = {fmt.value for fmt in SupportedSubtitleFormats}
+_VIDEO_FORMATS = {fmt.value for fmt in SupportedVideoFormats}
 
-TEXT_TRACK_LABELS = {
-    "auto": "自动选择",
-    "first": "第一行",
-    "second": "第二行",
-}
+TEXT_TRACK_LABELS = {"auto": "自动选择", "first": "第一行", "second": "第二行"}
 
-class VideoSynthesisInterface(QWidget):
-    finished = pyqtSignal()
+
+def _voice_labels() -> dict[str, str]:
+    """当前配音提供商的可选音色（preset -> 标题），与配音页提供商选择联动。"""
+    return {
+        voice.preset: voice.title
+        for voice in get_provider_voices(cfg.dubbing_provider.value)
+    }
+TIMING_LABELS = {"natural": "自然", "balanced": "平衡", "strict": "严格贴合"}
+AUDIO_MODE_LABELS = {"replace": "替换原声", "mix": "混合原声", "duck": "压低原声"}
+SUBTITLE_MODE_LABELS = {False: "硬字幕", True: "软字幕"}
+
+
+class PageState(Enum):
+    IDLE = auto()
+    RUNNING = auto()
+    DONE = auto()
+
+
+@dataclass
+class Readiness:
+    """IDLE 状态的呈现计算结果。"""
+
+    view: str  # "empty" / "files"
+    title: str
+    bottom: str
+    pill: tuple[str, str]
+    primary: tuple[str, AppIcon, bool]  # 文案 / 图标 / 是否可点
+    blocker: str = ""  # 右栏错误卡文案（缺 Key / 缺 FFmpeg 等）
+    plan: list[str] = field(default_factory=list)  # 生成计划步骤标题
+
+
+# ---------------------------------------------------------------------------
+# 线程编排
+# ---------------------------------------------------------------------------
+
+
+class SynthesisController(QObject):
+    """编排配音 / 合成线程；全流程时在控制器内链式执行。
+
+    进度映射：全流程 配音 0-55、合成 55-100；单流程 0-100。
+    """
+
+    progressChanged = pyqtSignal(int, str)
+    completed = pyqtSignal(list)  # [(标签, 路径)]
+    failed = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._dubbing_thread: Optional[DubbingThread] = None
+        self._synthesis_thread: Optional[VideoSynthesisThread] = None
+        self._chained_synthesis: Optional[SynthesisTask] = None
+        self._results: list[tuple[str, str]] = []
+        self._cancelled = False
+
+    # ----- 启动 -----
+
+    def start_synthesis_only(self, task: SynthesisTask) -> bool:
+        if self.is_running():
+            return False
+        self._results = []
+        self._chained_synthesis = None
+        self._cancelled = False
+        self._start_synthesis(task, offset=0)
+        return True
+
+    def start_dubbing(
+        self, task: DubbingTask, chained_synthesis: Optional[SynthesisTask] = None
+    ) -> bool:
+        """配音；chained_synthesis 不为空时配音完成后接续视频合成。"""
+        if self.is_running():
+            return False
+        self._results = []
+        self._chained_synthesis = chained_synthesis
+        self._cancelled = False
+        thread = DubbingThread(task)
+        thread.finished.connect(self._on_dubbing_finished)
+        thread.progress.connect(self._on_dubbing_progress)
+        thread.error.connect(self.failed)
+        self._dubbing_thread = thread
+        thread.start()
+        return True
+
+    # ----- 内部链路 -----
+
+    def _start_synthesis(self, task: SynthesisTask, offset: int):
+        thread = VideoSynthesisThread(task)
+        thread.finished.connect(self._on_synthesis_finished)
+        scale = (100 - offset) / 100
+        thread.progress.connect(
+            lambda value, message: self.progressChanged.emit(
+                int(offset + value * scale), message
+            )
+        )
+        thread.error.connect(self.failed)
+        self._synthesis_thread = thread
+        thread.start()
+
+    def _on_dubbing_progress(self, value: int, message: str):
+        if self._chained_synthesis is not None:
+            value = int(value * 0.55)
+        self.progressChanged.emit(value, message)
+
+    def _on_dubbing_finished(self, task: DubbingTask):
+        # 取消后已投递的 queued finished 信号仍会到达，丢弃以免启动已取消的链式合成。
+        if self._cancelled:
+            return
+        if task.output_audio_path:
+            self._results.append(("配音音频", task.output_audio_path))
+        if self._chained_synthesis is not None:
+            if not task.output_video_path:
+                self.failed.emit("配音视频输出路径为空")
+                return
+            synthesis = self._chained_synthesis
+            self._chained_synthesis = None
+            synthesis.video_path = task.output_video_path
+            self._start_synthesis(synthesis, offset=55)
+            return
+        if task.output_video_path:
+            self._results.append(("配音视频", task.output_video_path))
+        self.completed.emit(list(self._results))
+
+    def _on_synthesis_finished(self, task: SynthesisTask):
+        if self._cancelled:
+            return
+        # 链式模式的中间配音视频在任务目录里，随任务目录由页面统一清理。
+        if task.output_path:
+            self._results.insert(0, ("字幕视频", task.output_path))
+        self.completed.emit(list(self._results))
+
+    # ----- 控制 -----
+
+    def is_running(self) -> bool:
+        return any(
+            thread is not None and thread.isRunning()
+            for thread in (self._dubbing_thread, self._synthesis_thread)
+        )
+
+    def cancel(self):
+        self._cancelled = True
+        self._chained_synthesis = None
+        for attr in ("_dubbing_thread", "_synthesis_thread"):
+            thread = getattr(self, attr)
+            setattr(self, attr, None)
+            if thread is not None and thread.isRunning():
+                try:
+                    thread.finished.disconnect()
+                    thread.progress.disconnect()
+                    thread.error.disconnect()
+                except TypeError:
+                    pass
+                thread.stop()
+
+    def shutdown(self):
+        for thread in (self._dubbing_thread, self._synthesis_thread):
+            if thread is not None:
+                thread.stop()
+
+
+# ---------------------------------------------------------------------------
+# 左侧：文件行 / 计划行 / 结果行 / 底部状态条
+# ---------------------------------------------------------------------------
+
+
+class FileStateRow(QFrame):
+    """输入文件行（.file-row）：名称 + 说明 + 状态胶囊；缺失时虚线边。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, label: str, icon: AppIcon = AppIcon.FILE, parent=None):
+        super().__init__(parent)
+        self.setObjectName("fileStateRow")
+        self._missing = True
+        self._icon = icon
+        self.setMinimumHeight(56)
+        self.setCursor(Qt.PointingHandCursor)  # type: ignore[arg-type]
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+        self.iconLabel = QLabel(self)
+        self.iconLabel.setFixedSize(18, 18)
+        layout.addWidget(self.iconLabel)
+        self.nameLabel = QLabel(label, self)
+        self.nameLabel.setObjectName("fileRowName")
+        self.nameLabel.setFixedWidth(76)
+        apply_font(self.nameLabel, 14, 850)
+        layout.addWidget(self.nameLabel)
+        self.detailLabel = ElidedLabel("", self)
+        self.detailLabel.setObjectName("fileRowDetail")
+        apply_font(self.detailLabel, 14, 720)
+        layout.addWidget(self.detailLabel, 1)
+        self.pill = StatusPill("", "warn", self)
+        layout.addWidget(self.pill)
+        self.syncStyle()
+
+    def setName(self, name: str):
+        self.nameLabel.setText(name)
+
+    def setState(self, detail: str, pill_text: str, level: str, missing: bool):
+        self.detailLabel.setText(detail)
+        self.pill.setState(pill_text, level)
+        if missing != self._missing:
+            self._missing = missing
+            self.update()
+        self.syncStyle()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:  # type: ignore[attr-defined]
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        from PyQt5.QtCore import QRectF
+        from PyQt5.QtGui import QPainter, QPainterPath, QPen
+
+        from videocaptioner.ui.components.workbench import to_qcolor
+
+        palette = app_palette()
+        surface = palette.card_surface
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 12, 12)
+        painter.fillPath(path, to_qcolor(surface))
+        pen = QPen(to_qcolor(palette.line_soft), 1)
+        if self._missing:
+            pen.setStyle(Qt.DashLine)  # type: ignore[attr-defined]
+        painter.setPen(pen)
+        painter.drawPath(path)
+        super().paintEvent(event)
+
+    def syncStyle(self):
+        palette = app_palette()
+        detail_color = palette.subtle if self._missing else palette.muted
+        self.iconLabel.setPixmap(
+            icon_pixmap(self._icon, palette.subtle if self._missing else palette.muted, 18)
+        )
+        self.setStyleSheet(
+            f"""
+            QFrame#fileStateRow {{ background: transparent; border: none; }}
+            QLabel#fileRowName {{ color: {palette.text}; background: transparent; }}
+            QLabel#fileRowDetail {{ color: {detail_color}; background: transparent; }}
+            """
+        )
+
+
+class PlanStepRow(QFrame):
+    """生成计划行（.plan-step）：图标 + 步骤名 + 状态胶囊。"""
+
+    def __init__(self, icon: AppIcon, title: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("planStepRow")
+        self._icon = icon
+        self.setMinimumHeight(56)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+        self.iconBox = IconBox(self._icon, self, size=32, tone="accent")
+        layout.addWidget(self.iconBox)
+        self.titleLabel = QLabel(title, self)
+        self.titleLabel.setObjectName("planTitle")
+        apply_font(self.titleLabel, 15, 820)
+        layout.addWidget(self.titleLabel, 1)
+        self.pill = StatusPill(self.tr("待生成"), "neutral", self)
+        layout.addWidget(self.pill)
+        self.syncStyle()
+
+    def setTitle(self, title: str):
+        self.titleLabel.setText(title)
+
+    def paintEvent(self, event):
+        palette = app_palette()
+        surface = palette.card_surface
+        draw_rounded_surface(self, surface, palette.line_soft, 12)
+        super().paintEvent(event)
+
+    def syncStyle(self):
+        palette = app_palette()
+        self.iconBox.syncStyle()
+        self.setStyleSheet(
+            f"""
+            QFrame#planStepRow {{ background: transparent; border: none; }}
+            QLabel#planTitle {{ color: {palette.text}; background: transparent; }}
+            """
+        )
+
+
+class SynthesisBottomBar(QFrame):
+    """底部状态条：提示文案 +（运行中）进度条 + 状态胶囊。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("synthesisBottomBar")
+        self.setFixedHeight(40)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 0, 14, 0)
+        layout.setSpacing(14)
+        # 消息文本用弹性省略吸收长度变化，进度条与胶囊右锚定；
+        # 百分比胶囊固定最小宽（"100%"），位数变化不再让整行抖动
+        self.messageLabel = ElidedLabel("", self)
+        self.messageLabel.setObjectName("bottomMessage")
+        apply_font(self.messageLabel, 14, 730)
+        layout.addWidget(self.messageLabel, 1)
+        self.progressLine = ProgressBarLine(self)
+        self.progressLine.setFixedWidth(320)
+        self.progressLine.hide()
+        layout.addWidget(self.progressLine)
+        self.pill = StatusPill("", "warn", self)
+        self.pill.setMinimumWidth(66)
+        layout.addWidget(self.pill)
+        self.syncStyle()
+
+    def setState(self, message: str, pill_text: str, level: str, progress: int = -1):
+        self.messageLabel.setText(message)
+        self.pill.setState(pill_text, level)
+        self.progressLine.setVisible(progress >= 0)
+        if progress >= 0:
+            self.progressLine.setValue(progress)
+
+    def syncStyle(self):
+        palette = app_palette()
+        self.setStyleSheet(
+            f"""
+            QFrame#synthesisBottomBar {{
+                background: transparent;
+                border: none;
+                border-top: 1px solid {palette.line_soft};
+            }}
+            QLabel#bottomMessage {{ color: {palette.muted}; background: transparent; }}
+            """
+        )
+
+
+class ResultFileRow(QFrame):
+    """结果文件行（.result-file）：名称 + 元信息 + 完成胶囊，点击打开。"""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("resultFileRow")
+        self._path = ""
+        self.setMinimumHeight(58)
+        self.setCursor(Qt.PointingHandCursor)  # type: ignore[arg-type]
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(14)
+        self._icon = AppIcon.FILE
+        self.iconBox = QFrame(self)
+        self.iconBox.setObjectName("resultIconBox")
+        self.iconBox.setFixedSize(34, 34)
+        icon_layout = QVBoxLayout(self.iconBox)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        self.iconLabel = QLabel(self.iconBox)
+        self.iconLabel.setAlignment(Qt.AlignCenter)  # type: ignore[arg-type]
+        icon_layout.addWidget(self.iconLabel)
+        layout.addWidget(self.iconBox)
+        column = QVBoxLayout()
+        column.setSpacing(4)
+        self.nameLabel = ElidedLabel("", self)
+        self.nameLabel.setObjectName("resultRowName")
+        apply_font(self.nameLabel, 15, 840)
+        column.addWidget(self.nameLabel)
+        self.metaLabel = QLabel(self)
+        self.metaLabel.setObjectName("resultRowMeta")
+        apply_font(self.metaLabel, 13, 760)
+        column.addWidget(self.metaLabel)
+        layout.addLayout(column, 1)
+        self.pill = StatusPill(self.tr("完成"), "ok", self)
+        layout.addWidget(self.pill)
+        self.syncStyle()
+
+    def setResult(self, label: str, path: str):
+        self._path = path
+        file = Path(path)
+        self._icon = file_type_icon(path)
+        self.syncStyle()
+        self.nameLabel.setText(file.name)
+        suffix = file.suffix.lstrip(".").upper()
+        size = ""
+        if file.exists():
+            size = f" · {max(1, file.stat().st_size // 1024)} KB"
+            if file.stat().st_size >= 1024 * 1024:
+                size = f" · {file.stat().st_size / 1024 / 1024:.1f} MB"
+        self.metaLabel.setText(f"{label} · {suffix}{size}")
+        self.setToolTip(path)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._path:  # type: ignore[attr-defined]
+            self.clicked.emit(self._path)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        palette = app_palette()
+        surface = palette.card_surface
+        draw_rounded_surface(self, surface, palette.line_soft, 12)
+        super().paintEvent(event)
+
+    def syncStyle(self):
+        palette = app_palette()
+        self.iconLabel.setPixmap(icon_pixmap(self._icon, palette.muted, 17))
+        self.setStyleSheet(
+            f"""
+            QFrame#resultFileRow {{ background: transparent; border: none; }}
+            QFrame#resultIconBox {{
+                background: {palette.control};
+                border: none;
+                border-radius: 10px;
+            }}
+            QLabel#resultRowName {{ color: {palette.text}; background: transparent; }}
+            QLabel#resultRowMeta {{ color: {palette.subtle}; background: transparent; }}
+            """
+        )
+
+
+def _section_label(text: str, parent=None) -> QLabel:
+    return SectionLabel(text, parent)
+
+
+# ---------------------------------------------------------------------------
+# 右侧：本次生成面板
+# ---------------------------------------------------------------------------
+
+
+class GeneratePanel(WorkbenchPanel):
+    """右侧「本次生成」：输出内容开关 + 字幕/配音参数 + 主按钮。"""
+
+    settingsRequested = pyqtSignal()
+    collapseRequested = pyqtSignal()
+    voiceLibraryRequested = pyqtSignal()
+    primaryRequested = pyqtSignal()
+    cancelRequested = pyqtSignal()
+    openFolderRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        # 自管内边距：滚动区横向通到面板边，滚动条落在右侧留白带里，
+        # 不再贴着参数卡；头部 / 参数卡 / 底部按钮仍按 22 对齐。
+        super().__init__(parent, padded=False)
+        self.bodyLayout.setContentsMargins(0, 22, 0, 22)
+        self.bodyLayout.setSpacing(0)
+
+        self.header = PanelHeader(
+            self.tr("本次生成"), inline=True, underline=True, parent=self
+        )
+        # 直径与转录/字幕页右栏头部按钮一致（默认 34）
+        self.collapseButton = RoundIconButton(AppIcon.RIGHT_ARROW, parent=self)
+        self.collapseButton.setToolTip(self.tr("收起本栏"))
+        self.collapseButton.clicked.connect(self.collapseRequested)
+        self.header.addRight(self.collapseButton)
+        self.configButton = RoundIconButton(AppIcon.SETTING, parent=self)
+        self.configButton.setToolTip(self.tr("打开合成配置"))
+        self.configButton.clicked.connect(self.settingsRequested)
+        self.header.addRight(self.configButton)
+        head_wrap = QVBoxLayout()
+        head_wrap.setContentsMargins(22, 0, 22, 0)
+        head_wrap.addWidget(self.header)
+        self.bodyLayout.addLayout(head_wrap)
+
+        body = QVBoxLayout()
+        # 顶部 18 / 卡片间距 14：与转录、字幕处理页右栏参数区一致；
+        # 右 12 + 滚动条列 10 = 22，参数卡与头部 / 底部按钮对齐；
+        # 底部留白：滚动到底时最后一张参数卡不贴视口边（否则像被截断）
+        body.setContentsMargins(22, 18, 12, 12)
+        body.setSpacing(14)
+
+        body.addWidget(_section_label(self.tr("输出内容"), self))
+        self.subtitleCard = ToggleCard(
+            self.tr("字幕视频"), self.tr("把字幕合成到视频里"), parent=self
+        )
+        body.addWidget(self.subtitleCard)
+        self.dubbingCard = ToggleCard(
+            self.tr("配音音轨"), self.tr("按字幕生成配音"), parent=self
+        )
+        body.addWidget(self.dubbingCard)
+
+        self.errorCard = ErrorCard(parent=self)
+        self.errorCard.hide()
+        body.addWidget(self.errorCard)
+
+        # 字幕视频参数
+        self.subtitleSection = QWidget(self)
+        subtitle_layout = QVBoxLayout(self.subtitleSection)
+        subtitle_layout.setContentsMargins(0, 6, 0, 0)
+        subtitle_layout.setSpacing(14)
+        subtitle_layout.addWidget(_section_label(self.tr("字幕视频参数"), self))
+        self.subtitleModeSelect = PillSelect(self)
+        subtitle_layout.addWidget(OptionCard(self.tr("字幕方式"), self.subtitleModeSelect, self))
+        self.styleSwitch = ToggleSwitch(parent=self)
+        self.styleCard = OptionCard(self.tr("字幕样式"), self.styleSwitch, self)
+        subtitle_layout.addWidget(self.styleCard)
+        self.renderModeSelect = PillSelect(self)
+        self.renderModeCard = OptionCard(self.tr("渲染模式"), self.renderModeSelect, self)
+        subtitle_layout.addWidget(self.renderModeCard)
+        self.qualitySelect = PillSelect(self)
+        self.qualityCard = OptionCard(self.tr("视频质量"), self.qualitySelect, self)
+        subtitle_layout.addWidget(self.qualityCard)
+        body.addWidget(self.subtitleSection)
+
+        # 配音参数
+        self.dubbingSection = QWidget(self)
+        dubbing_layout = QVBoxLayout(self.dubbingSection)
+        dubbing_layout.setContentsMargins(0, 6, 0, 0)
+        dubbing_layout.setSpacing(14)
+        dubbing_layout.addWidget(_section_label(self.tr("配音参数"), self))
+        voice_control = QWidget(self)
+        voice_row = QHBoxLayout(voice_control)
+        voice_row.setContentsMargins(0, 0, 0, 0)
+        voice_row.setSpacing(8)
+        self.voiceSelect = PillSelect(self)
+        voice_row.addWidget(self.voiceSelect)
+        self.voiceLibraryLink = HeaderLinkButton(self.tr("音色库"), AppIcon.MUSIC, self)
+        self.voiceLibraryLink.clicked.connect(self.voiceLibraryRequested)
+        voice_row.addWidget(self.voiceLibraryLink)
+        dubbing_layout.addWidget(OptionCard(self.tr("音色"), voice_control, self))
+        self.textTrackSelect = PillSelect(self)
+        dubbing_layout.addWidget(OptionCard(self.tr("文本轨道"), self.textTrackSelect, self))
+        self.timingSelect = PillSelect(self)
+        self.timingCard = OptionCard(self.tr("时间贴合"), self.timingSelect, self)
+        dubbing_layout.addWidget(self.timingCard)
+        self.audioModeSelect = PillSelect(self)
+        self.audioModeCard = OptionCard(self.tr("音频处理"), self.audioModeSelect, self)
+        dubbing_layout.addWidget(self.audioModeCard)
+        body.addWidget(self.dubbingSection)
+        body.addStretch(1)
+
+        # 参数区可滚动：两组输出全开时参数较多，矮窗口下不挤掉主按钮
+        body_host = QWidget(self)
+        body_host.setLayout(body)
+        self.bodyScroll = QScrollArea(self)
+        self.bodyScroll.setWidgetResizable(True)
+        self.bodyScroll.setFrameShape(QFrame.NoFrame)
+        self.bodyScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore[arg-type]
+        self.bodyScroll.setWidget(body_host)
+        self.bodyLayout.addWidget(self.bodyScroll, 1)
+
+        # 底部：分隔线 + 操作按钮，左右 22 与头部对齐
+        bottom = QVBoxLayout()
+        bottom.setContentsMargins(22, 0, 22, 0)
+        bottom.setSpacing(0)
+        # 滚动区与按钮区之间留间隔 + 分隔线（仅参数溢出可滚时出现），
+        # 否则滚动中被视口裁切的参数卡看起来像被按钮盖住
+        bottom.addSpacing(10)
+        self.scrollDivider = QFrame(self)
+        self.scrollDivider.setObjectName("scrollDivider")
+        self.scrollDivider.setFixedHeight(1)
+        self.scrollDivider.hide()
+        self.bodyScroll.verticalScrollBar().rangeChanged.connect(
+            lambda _min, max_value: self.scrollDivider.setVisible(max_value > 0)
+        )
+        bottom.addWidget(self.scrollDivider)
+        bottom.addSpacing(10)
+
+        self.cancelButton = WorkbenchButton(self.tr("取消"), AppIcon.CANCEL, parent=self)
+        self.cancelButton.clicked.connect(self.cancelRequested)
+        self.cancelButton.hide()
+        bottom.addWidget(self.cancelButton)
+        bottom.addSpacing(10)
+        self.openFolderButton = WorkbenchButton(
+            self.tr("打开文件夹"), AppIcon.FOLDER, parent=self
+        )
+        self.openFolderButton.clicked.connect(self.openFolderRequested)
+        self.openFolderButton.hide()
+        bottom.addWidget(self.openFolderButton)
+        bottom.addSpacing(10)
+        self.primaryButton = WorkbenchButton(
+            self.tr("等待文件"), AppIcon.FILE, primary=False, height=48, parent=self
+        )
+        self.primaryButton.setEnabled(False)
+        self.primaryButton.clicked.connect(self.primaryRequested)
+        bottom.addWidget(self.primaryButton)
+        self.bodyLayout.addLayout(bottom)
+        self.syncStyle()
+
+    def setError(self, message: str):
+        self.errorCard.setText(message)
+        self.errorCard.setVisible(bool(message))
+
+    def setButton(self, text: str, *, icon: AppIcon, primary: bool, enabled: bool):
+        self.primaryButton.setText(text)
+        self.primaryButton.setIcon(icon)
+        self.primaryButton.setPrimary(primary)
+        self.primaryButton.setEnabled(enabled)
+
+    def syncStyle(self):
+        super().syncStyle()
+        palette = app_palette()
+        if hasattr(self, "errorCard"):
+            self.errorCard.syncStyle()
+        if hasattr(self, "scrollDivider"):
+            self.scrollDivider.setStyleSheet(
+                f"background: {palette.line_soft}; border: none;"
+            )
+        if hasattr(self, "bodyScroll"):
+            # 滚动条规则必须并在 QScrollArea 自己的样式表里：macOS 上只给
+            # QScrollBar 子控件设样式时仍走 transient 浮层模式（不占布局空间），
+            # 滚动条会盖在参数卡右缘上；并入后强制占位模式，对齐才成立。
+            self.bodyScroll.setStyleSheet(
+                f"""
+                QScrollArea {{ background: transparent; border: none; }}
+                QScrollBar:vertical {{
+                    background: transparent; width: 10px; margin: 2px 3px;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: {rgba(palette.muted, 0.32)};
+                    border-radius: 2px; min-height: 28px;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                    background: transparent;
+                }}
+                """
+            )
+            self.bodyScroll.widget().setStyleSheet("background: transparent;")
+
+
+# ---------------------------------------------------------------------------
+# 页面
+# ---------------------------------------------------------------------------
+
+
+class VideoSynthesisInterface(QWidget):
+    """字幕视频合成页（组合开关工作台）。"""
+
+    finished = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
         self.setObjectName("VideoSynthesisInterface")
-        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
-        self.setAcceptDrops(True)  # 启用拖放功能
-        self.setup_ui()
-        self.set_value()
-        self.setup_signals()
-        self.task = None
-        self.dubbing_task: DubbingTask | None = None
-        self._pending_synthesis_after_dubbing = False
-        self._final_synthesis_task: SynthesisTask | None = None
-        self.preview_player = QMediaPlayer(self)
+        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
+        self.setAcceptDrops(True)
 
-        self.installEventFilter(ToolTipFilter(self, 100, ToolTipPosition.BOTTOM))
+        self.state = PageState.IDLE
+        self.subtitle_path: Optional[str] = None
+        self.video_path: Optional[str] = None
+        self.task: Optional[SynthesisTask] = None
+        self._results: list[tuple[str, str]] = []
+        self._active_task_dir: Optional[str] = None
+        self._pipeline_task_dir: Optional[str] = None
+        self._config_signal_connections: list[tuple] = []
 
-    def setup_ui(self):
-        self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(42, 26, 42, 28)
-        self.main_layout.setSpacing(18)
+        self.controller = SynthesisController(self)
+        self._info_thread: Optional[VideoInfoThread] = None
+        self._build_ui()
+        self._connect_signals()
+        self._load_options_from_config()
+        self._refresh()
+        if cfg.synthesis_panel_collapsed.value:
+            self.sideHost.setCollapsed(True, animate=False)
+            self._sync_collapsed_controls()
 
-        self.command_bar = CommandBar(self)
-        self.command_bar.hide()
+    # ------------------------------------------------------------------ UI
 
-        self._setup_command_bar()
-
-        top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(24)
-        top_layout.addStretch(1)
-
-        self.mode_label = CaptionLabel("", self)
-        self.mode_label.hide()
-        self.open_folder_button = SmallActionButton(self.tr("打开文件夹"), self, FIF.FOLDER)
-        self.open_folder_button.setFixedWidth(128)
-        self.open_folder_button.clicked.connect(self.open_video_folder)
-
-        self.synthesize_button = PrimaryPushButton(
-            self.tr("生成成片"), self, icon=FIF.PLAY
+    def _build_ui(self):
+        palette = app_palette()
+        self.setStyleSheet(
+            f"QWidget#VideoSynthesisInterface {{ background: {palette.bg}; }}"
         )
-        self.synthesize_button.setObjectName("synthesisPrimaryButton")
-        self.synthesize_button.setFixedHeight(40)
-        self.synthesize_button.setFixedWidth(150)
-        setFont(self.synthesize_button, 13, 820)
-        top_layout.addWidget(self.open_folder_button, 0, Qt.AlignBottom)  # type: ignore
-        top_layout.addWidget(self.synthesize_button, 0, Qt.AlignBottom)  # type: ignore
-        self.main_layout.addLayout(top_layout)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 2)
+        root.setSpacing(18)
 
-        self.scroll_area = ScrollArea(self)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet(
-            "QScrollArea { border: none; background-color: transparent; }"
+        # 左：输入 / 计划 / 结果面板
+        self.workspace = WorkbenchPanel(self, padded=False)
+        self.header = PanelHeader(self.tr("输入文件"), inline=False, parent=self.workspace)
+        self.subtitleButton = CompactButton(self.tr("选择字幕"), AppIcon.FOLDER_ADD, self)
+        self.header.addRight(self.subtitleButton)
+        self.videoButton = CompactButton(self.tr("选择视频"), AppIcon.FOLDER_ADD, self)
+        self.header.addRight(self.videoButton)
+        self.headStartButton = WorkbenchButton(
+            self.tr("生成成片"), AppIcon.PLAY, primary=True, height=32, parent=self
         )
-        self.scroll_widget = QWidget(self.scroll_area)
-        self.scroll_widget.setObjectName("videoSynthesisScrollWidget")
-        self.scroll_widget.setStyleSheet(
-            "QWidget#videoSynthesisScrollWidget { background-color: transparent; }"
+        self.headStartButton.setMinimumWidth(104)
+        self.headStartButton.hide()
+        self.header.addRight(self.headStartButton)
+        self.expandButton = RoundIconButton(AppIcon.LAYOUT, diameter=32, parent=self)
+        self.expandButton.setToolTip(self.tr("展开生成栏"))
+        self.expandButton.hide()
+        self.header.addRight(self.expandButton)
+        self.workspace.bodyLayout.addWidget(self.header)
+
+        self.stack = QStackedWidget(self)
+
+        # 空态拖放
+        self.dropZone = DropZone(
+            icon=AppIcon.VIDEO,
+            title=self.tr("拖入字幕和视频文件"),
+            pick_text=self.tr("点击选择文件"),
+            pick_icon=AppIcon.FOLDER_ADD,
+            formats_line=self.tr("字幕：srt / ass / vtt    视频：mp4 / mov / mkv"),
+            parent=self,
         )
-        self.content_layout = QVBoxLayout(self.scroll_widget)
-        self.content_layout.setContentsMargins(0, 0, 0, 0)
-        self.content_layout.setSpacing(0)
+        drop_host = QWidget(self)
+        drop_layout = QVBoxLayout(drop_host)
+        drop_layout.setContentsMargins(16, 16, 16, 16)
+        drop_layout.addWidget(self.dropZone)
+        self.stack.addWidget(drop_host)
 
-        self.config_card = self._create_input_card()
-        self.config_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        self.content_layout.addWidget(self.config_card, 0)
-        self.content_layout.addStretch(1)
+        # 文件清单 + 生成计划
+        inputs_host = QWidget(self)
+        inputs_layout = QVBoxLayout(inputs_host)
+        inputs_layout.setContentsMargins(16, 16, 16, 16)
+        inputs_layout.setSpacing(10)
+        self.subtitleRow = FileStateRow(self.tr("字幕文件"), AppIcon.SUBTITLE, self)
+        inputs_layout.addWidget(self.subtitleRow)
+        self.videoRow = FileStateRow(self.tr("视频文件"), AppIcon.VIDEO, self)
+        inputs_layout.addWidget(self.videoRow)
+        inputs_layout.addSpacing(8)
+        self.planSteps: list[PlanStepRow] = [
+            PlanStepRow(AppIcon.VOLUME, self.tr("生成配音音轨"), self),
+            PlanStepRow(AppIcon.SUBTITLE, self.tr("合成字幕视频"), self),
+            PlanStepRow(AppIcon.FOLDER, self.tr("保存结果文件"), self),
+        ]
+        for step in self.planSteps:
+            inputs_layout.addWidget(step)
+        inputs_layout.addStretch(1)
+        self.stack.addWidget(inputs_host)
 
-        self.scroll_area.setWidget(self.scroll_widget)
-        self.main_layout.addWidget(self.scroll_area, 1)
+        # 结果视图
+        done_host = QWidget(self)
+        done_layout = QVBoxLayout(done_host)
+        done_layout.setContentsMargins(16, 16, 16, 16)
+        done_layout.setSpacing(12)
+        self.resultThumb = MediaThumb(self)
+        self.resultThumb.setMinimumHeight(240)
+        done_layout.addWidget(self.resultThumb, 1)
+        self.resultRows = [ResultFileRow(self), ResultFileRow(self)]
+        for row in self.resultRows:
+            row.hide()
+            done_layout.addWidget(row)
+        self.stack.addWidget(done_host)
 
-        self.bottom_layout = QHBoxLayout()
-        self.bottom_layout.setContentsMargins(0, 0, 0, 0)
-        self.bottom_layout.setSpacing(14)
-        self.progress_bar = ProgressBar(self)
-        self.status_label = BodyLabel(self.tr("就绪"), self)
-        self.status_label.setFixedWidth(132)
-        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
-        setFont(self.status_label, 12, 720)
-        self.bottom_layout.addWidget(self.progress_bar, 1)
-        self.bottom_layout.addWidget(self.status_label)
-        self.main_layout.addLayout(self.bottom_layout)
-        self._set_progress_visible(False)
-        self._sync_page_style()
+        self.workspace.bodyLayout.addWidget(self.stack, 1)
+        self.bottomBar = SynthesisBottomBar(self)
+        self.workspace.bodyLayout.addWidget(self.bottomBar)
+        root.addWidget(self.workspace, 1)
 
-    def _create_input_card(self):
-        card = QWidget(self)
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(CONTENT_GAP)
+        # 右：本次生成（可折叠）
+        self.generatePanel = GeneratePanel(self)
+        self.sideHost = CollapsibleSideHost(self.generatePanel, parent=self)
+        root.addWidget(self.sideHost, 1)
 
-        left_stack = QWidget(card)
-        left_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        left_layout = QVBoxLayout(left_stack)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(SECTION_GAP)
+    # ------------------------------------------------------------- signals
 
-        self.output_panel = ModernPanel(self.tr("导出内容"), left_stack)
-        output_grid = QHBoxLayout()
-        output_grid.setContentsMargins(0, 0, 0, 0)
-        output_grid.setSpacing(12)
-        self.output_subtitle_button = OutputCard(
-            self.tr("字幕视频"),
-            self.tr("把字幕合成到视频里，支持软字幕或样式硬字幕。"),
-            FIF.FONT,
-            self.output_panel.body,
+    def _connect_signals(self):
+        self.controller.progressChanged.connect(self._on_progress)
+        self.controller.completed.connect(self._on_completed)
+        self.controller.failed.connect(self._on_failed)
+
+        self.dropZone.browseRequested.connect(self._browse_any)
+        self.subtitleButton.clicked.connect(self._browse_subtitle)
+        self.videoButton.clicked.connect(self._browse_video)
+        self.subtitleRow.clicked.connect(self._browse_subtitle)
+        self.videoRow.clicked.connect(self._browse_video)
+        self.headStartButton.clicked.connect(self._on_primary)
+        self.expandButton.clicked.connect(lambda: self.sideHost.setCollapsed(False))
+
+        panel = self.generatePanel
+        panel.primaryRequested.connect(self._on_primary)
+        panel.cancelRequested.connect(self._cancel)
+        panel.openFolderRequested.connect(self._open_result_folder)
+        panel.settingsRequested.connect(self._open_synthesis_settings)
+        panel.voiceLibraryRequested.connect(self._open_voice_library)
+        panel.collapseRequested.connect(lambda: self.sideHost.setCollapsed(True))
+        self.sideHost.collapsedChanged.connect(self._on_panel_collapsed)
+        for row in self.resultRows:
+            row.clicked.connect(self._open_file)
+
+        panel.subtitleCard.toggled.connect(
+            lambda checked: self._set_config_bool(cfg.need_video, checked)
         )
-        self.output_dubbing_button = OutputCard(
-            self.tr("配音音轨"),
-            self.tr("按字幕生成配音，可单独导出音频或合入视频。"),
-            FIF.VOLUME,
-            self.output_panel.body,
+        panel.dubbingCard.toggled.connect(
+            lambda checked: self._set_config_bool(cfg.dubbing_enabled, checked)
         )
-        output_grid.addWidget(self.output_subtitle_button, 1)
-        output_grid.addWidget(self.output_dubbing_button, 1)
-        self.output_panel.bodyLayout.addLayout(output_grid)
-
-        self.files_panel = ModernPanel(self.tr("输入文件"), left_stack)
-        self.subtitle_row = FileRow(self.tr("字幕文件"), "", self.tr("选择或者拖拽字幕文件"), self.files_panel.body)
-        self.video_row = FileRow(self.tr("视频文件"), "", self.tr("选择或者拖拽视频文件"), self.files_panel.body)
-        self.subtitle_label = self.subtitle_row.titleLabel
-        self.subtitle_input = self.subtitle_row.lineEdit
-        self.subtitle_button = self.subtitle_row.button
-        self.video_label = self.video_row.titleLabel
-        self.video_input = self.video_row.lineEdit
-        self.video_button = self.video_row.button
-        self.files_panel.bodyLayout.addWidget(self.subtitle_row)
-        self.files_panel.bodyLayout.addWidget(self.video_row)
-        self.requirement_hint = CaptionLabel("", self.files_panel.body)
-        self.requirement_hint.setWordWrap(True)
-        self.requirement_hint.hide()
-
-        left_layout.addWidget(self.output_panel)
-        left_layout.addWidget(self.files_panel)
-        left_layout.addStretch(1)
-
-        right_stack = QWidget(card)
-        right_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        right_layout = QVBoxLayout(right_stack)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(SECTION_GAP)
-        self.settings_panel = ModernPanel(self.tr("合成参数"), right_stack)
-        self._setup_settings_panel()
-        right_layout.addWidget(self.settings_panel)
-        self._setup_dubbing_card(right_stack, right_layout)
-
-        layout.addWidget(left_stack, 112, Qt.AlignTop)  # type: ignore[arg-type]
-        layout.addWidget(right_stack, 88, Qt.AlignTop)  # type: ignore[arg-type]
-        layout.setStretch(0, 112)
-        layout.setStretch(1, 88)
-        return card
-
-    def _setup_settings_panel(self):
-        self.subtitle_type_button = DropDownPushButton(
-            self.tr("硬字幕"), self.settings_panel.body
+        panel.styleSwitch.toggled.connect(self._on_style_toggled)
+        panel.subtitleModeSelect.currentTextChanged.connect(self._on_subtitle_mode)
+        panel.renderModeSelect.currentTextChanged.connect(self._on_render_mode)
+        panel.qualitySelect.currentTextChanged.connect(self._on_quality)
+        panel.voiceSelect.currentTextChanged.connect(self._on_voice)
+        panel.textTrackSelect.currentTextChanged.connect(
+            lambda text: self._set_label_config(cfg.dubbing_text_track, TEXT_TRACK_LABELS, text)
         )
-        self.subtitle_type_button.setFixedHeight(34)
-        self.subtitle_type_button.setMinimumWidth(140)
-        self.subtitle_type_menu = RoundMenu(parent=self)
-        hard_action = Action(text=self.tr("硬字幕"))
-        soft_action = Action(text=self.tr("软字幕"))
-        hard_action.triggered.connect(lambda _checked=False: self.on_soft_subtitle_action_triggered(False))
-        soft_action.triggered.connect(lambda _checked=False: self.on_soft_subtitle_action_triggered(True))
-        self.subtitle_type_menu.addAction(hard_action)
-        self.subtitle_type_menu.addAction(soft_action)
-        self.subtitle_type_button.setMenu(self.subtitle_type_menu)
-
-        self.use_style_switch = SwitchButton("", self.settings_panel.body)
-        self.use_style_switch.setOnText("")
-        self.use_style_switch.setOffText("")
-        self.use_style_switch.setFixedWidth(46)
-        self.use_style_switch.setCheckedIndicatorColor(app_palette().accent, app_palette().accent)
-
-        self.render_mode_button = DropDownPushButton(
-            cfg.subtitle_render_mode.value.value, self.settings_panel.body
+        panel.timingSelect.currentTextChanged.connect(
+            lambda text: self._set_label_config(cfg.dubbing_timing, TIMING_LABELS, text)
         )
-        self.render_mode_menu = RoundMenu(parent=self)
-        for mode in SubtitleRenderModeEnum:
-            action = Action(text=mode.value)
-            action.triggered.connect(
-                lambda checked, m=mode.value: self.on_render_mode_changed(m)
-            )
-            self.render_mode_menu.addAction(action)
-        self.render_mode_button.setMenu(self.render_mode_menu)
-
-        self.video_quality_button = DropDownPushButton(
-            cfg.video_quality.value.value, self.settings_panel.body
-        )
-        self.video_quality_menu = RoundMenu(parent=self)
-        for quality in VideoQualityEnum:
-            action = Action(text=quality.value)
-            action.triggered.connect(
-                lambda checked, q=quality.value: self.on_video_quality_action_changed(q)
-            )
-            self.video_quality_menu.addAction(action)
-        self.video_quality_button.setMenu(self.video_quality_menu)
-        self.render_mode_button.setFixedHeight(34)
-        self.video_quality_button.setFixedHeight(34)
-        self.subtitle_type_button.setFixedWidth(140)
-        self.render_mode_button.setFixedWidth(140)
-        self.video_quality_button.setFixedWidth(140)
-
-        self.subtitle_type_row = WorkflowSettingRow(
-            self.tr("字幕方式"),
-            self.tr("硬字幕会直接烧录到画面"),
-            self.subtitle_type_button,
-            self.settings_panel.body,
-        )
-        self.use_style_row = WorkflowSettingRow(
-            self.tr("字幕样式"),
-            self.tr("使用样式页的 ASS 样式"),
-            self.use_style_switch,
-            self.settings_panel.body,
-        )
-        self.render_mode_row = WorkflowSettingRow(
-            self.tr("渲染模式"),
-            self.tr("使用 ASS 样式渲染"),
-            self.render_mode_button,
-            self.settings_panel.body,
-        )
-        self.video_quality_row = WorkflowSettingRow(
-            self.tr("视频质量"),
-            self.tr("质量越高，生成越慢"),
-            self.video_quality_button,
-            self.settings_panel.body,
-        )
-        self.settings_panel.bodyLayout.addWidget(self.subtitle_type_row)
-        self.settings_panel.bodyLayout.addWidget(self.use_style_row)
-        self.settings_panel.bodyLayout.addWidget(self.render_mode_row)
-        self.settings_panel.bodyLayout.addWidget(self.video_quality_row)
-
-    def _setup_command_bar(self):
-        """设置顶部命令栏"""
-        # Keep these actions as internal state mirrors for existing signal handlers.
-        # The visible output switches live in the input card to avoid duplicate
-        # "字幕视频 / 配音音轨" controls in the same page.
-        self.add_subtitle_action = Action(
-            FIF.FONT,
-            self.tr("字幕视频"),
-            triggered=self.on_add_subtitle_action_triggered,
-            checkable=True,
-        )
-        self.add_subtitle_action.setToolTip(self.tr("把字幕合成到视频里"))
-
-        self.add_dubbing_action = Action(
-            FIF.VOLUME,
-            self.tr("配音音轨"),
-            triggered=self.on_add_dubbing_action_triggered,
-            checkable=True,
-        )
-        self.add_dubbing_action.setToolTip(self.tr("生成配音音轨并合入视频"))
-
-        # 添加软字幕选项
-        self.soft_subtitle_action = Action(
-            FIF.FONT,
-            self.tr("软字幕"),
-            triggered=self.on_soft_subtitle_action_triggered,
-            checkable=True,
-        )
-        self.soft_subtitle_action.setToolTip(self.tr("使用软字幕嵌入视频"))
-        self.command_bar.addAction(self.soft_subtitle_action)
-
-        # 添加分隔符
-        self.command_bar.addSeparator()
-
-        # 添加使用样式开关
-        self.use_style_action = Action(
-            FIF.PALETTE,
-            self.tr("使用样式"),
-            triggered=self.on_use_style_action_triggered,
-            checkable=True,
-        )
-        self.use_style_action.setToolTip(self.tr("启用字幕样式渲染"))
-        self.command_bar.addAction(self.use_style_action)
-
-        self.command_bar.addSeparator()
-
-        # 保留兼容设置页信号的 Action；实际输出选择使用顶部“添加字幕/添加配音”。
-        self.need_video_action = Action(
-            FIF.VIDEO,
-            self.tr("合成视频"),
-            triggered=self.on_need_video_action_triggered,
-            checkable=True,
-        )
-        self.need_video_action.setToolTip(self.tr("是否生成新的视频文件"))
-
-        # 添加打开文件夹按钮
-        folder_action = Action(FIF.FOLDER, "", triggered=self.open_video_folder)
-        folder_action.setToolTip(self.tr("打开输出文件夹"))
-        self.command_bar.addAction(folder_action)
-
-    def setup_signals(self):
-        # 文件选择相关信号
-        self.subtitle_button.clicked.connect(self.choose_subtitle_file)
-        self.video_button.clicked.connect(self.choose_video_file)
-        self.subtitle_input.textChanged.connect(self._update_input_requirements)
-        self.video_input.textChanged.connect(self._update_input_requirements)
-        self.output_subtitle_button.clicked.connect(self.on_output_subtitle_button_clicked)
-        self.output_dubbing_button.clicked.connect(self.on_output_dubbing_button_clicked)
-        self.use_style_switch.checkedChanged.connect(self.on_use_style_action_triggered)
-
-        # 合成和文件夹相关信号
-        self.synthesize_button.clicked.connect(
-            lambda: self.start_output_generation(need_create_task=True)
-        )
-        cfg.soft_subtitle.valueChanged.connect(self.on_soft_subtitle_changed)
-        cfg.need_video.valueChanged.connect(self.on_need_video_changed)
-        cfg.dubbing_enabled.valueChanged.connect(self.on_dubbing_enabled_changed)
-        cfg.video_quality.valueChanged.connect(lambda value: self.on_video_quality_changed(value.value))
-        cfg.use_subtitle_style.valueChanged.connect(self.on_use_style_changed)
-        cfg.subtitle_render_mode.valueChanged.connect(
-            lambda value: self.on_render_mode_changed_external(value.value)
+        panel.audioModeSelect.currentTextChanged.connect(
+            lambda text: self._set_label_config(cfg.dubbing_audio_mode, AUDIO_MODE_LABELS, text)
         )
 
-        self.dubbing_preset_combo.currentTextChanged.connect(self.on_dubbing_preset_changed)
-        self.text_track_combo.currentTextChanged.connect(self.on_text_track_changed)
-        self.voice_preview_button.clicked.connect(self.preview_current_voice)
-        self.voice_dialog_button.clicked.connect(self.show_voice_dialog)
+        self._connect_config_signal(cfg.need_video, self._on_outputs_changed)
+        self._connect_config_signal(cfg.dubbing_enabled, self._on_outputs_changed)
 
-    def set_value(self):
-        """设置初始值"""
-        self.soft_subtitle_action.setChecked(cfg.soft_subtitle.value)
-        self.need_video_action.setChecked(cfg.need_video.value)
-        self.video_quality_button.setText(cfg.video_quality.value.value)
+    def _connect_config_signal(self, option, handler: Callable):
+        option.valueChanged.connect(handler)
+        self._config_signal_connections.append((option.valueChanged, handler))
 
-        # 设置样式相关初始值
-        self.use_style_action.setChecked(cfg.use_subtitle_style.value)
-        self.use_style_switch.blockSignals(True)
-        self.use_style_switch.setChecked(cfg.use_subtitle_style.value)
-        self.use_style_switch.blockSignals(False)
-        self.render_mode_button.setText(cfg.subtitle_render_mode.value.value)
-        self._set_combo_key(self.dubbing_preset_combo, DUBBING_PRESET_LABELS, cfg.dubbing_preset.value)
-        self._set_combo_key(self.text_track_combo, TEXT_TRACK_LABELS, cfg.dubbing_text_track.value)
-        self._sync_subtitle_type_button()
-        self._sync_voice_summary()
-        self._update_output_action_text()
-        self._update_synthesis_controls_state()
-        self._update_dubbing_controls_state()
-        self._update_input_requirements()
-        self._sync_page_style()
+    def _disconnect_config_signals(self):
+        for signal, handler in self._config_signal_connections:
+            try:
+                signal.disconnect(handler)
+            except (RuntimeError, TypeError):
+                pass
+        self._config_signal_connections.clear()
+
+    # ------------------------------------------------------- config <-> UI
+
+    def _load_options_from_config(self):
+        panel = self.generatePanel
+        panel.subtitleCard.setChecked(bool(cfg.need_video.value))
+        panel.dubbingCard.setChecked(bool(cfg.dubbing_enabled.value))
+        panel.subtitleModeSelect.setItems(
+            list(SUBTITLE_MODE_LABELS.values()),
+            SUBTITLE_MODE_LABELS[bool(cfg.soft_subtitle.value)],
+        )
+        panel.styleSwitch.setChecked(bool(cfg.use_subtitle_style.value))
+        panel.renderModeSelect.setItems(
+            [mode.value for mode in SubtitleRenderModeEnum],
+            cfg.subtitle_render_mode.value.value,
+        )
+        panel.qualitySelect.setItems(
+            [quality.value for quality in VideoQualityEnum],
+            cfg.video_quality.value.value,
+        )
+        self._sync_voice_options()
+        panel.textTrackSelect.setItems(
+            list(TEXT_TRACK_LABELS.values()),
+            TEXT_TRACK_LABELS.get(cfg.dubbing_text_track.value, "自动选择"),
+        )
+        panel.timingSelect.setItems(
+            list(TIMING_LABELS.values()),
+            TIMING_LABELS.get(cfg.dubbing_timing.value, "平衡"),
+        )
+        panel.audioModeSelect.setItems(
+            list(AUDIO_MODE_LABELS.values()),
+            AUDIO_MODE_LABELS.get(cfg.dubbing_audio_mode.value, "替换原声"),
+        )
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.set_value()
+        # 从配音页回来时提供商 / 音色可能已变，重新同步音色选项
+        self._sync_voice_options()
 
-    def _setup_dubbing_card(self, parent: QWidget, parent_layout: QVBoxLayout):
-        self.dubbing_card = ModernPanel(self.tr("配音"), parent)
-        self.voice_box = QFrame(self.dubbing_card.body)
-        self.voice_box.setObjectName("voiceBox")
-        voice_layout = QVBoxLayout(self.voice_box)
-        voice_layout.setContentsMargins(12, 12, 12, 12)
-        voice_layout.setSpacing(10)
+    def _set_config_bool(self, option, checked: bool):
+        if option.value != checked:
+            cfg.set(option, checked)
 
-        voice_title_row = QHBoxLayout()
-        voice_title_row.setContentsMargins(0, 0, 0, 0)
-        voice_title_row.setSpacing(10)
-        self.voice_title_label = BodyLabel("-", self.voice_box)
-        setFont(self.voice_title_label, 13, 760)
-        voice_title_row.addWidget(self.voice_title_label)
-        voice_title_row.addStretch(1)
+    @staticmethod
+    def _set_label_config(option, labels: dict, label: str):
+        for key, value in labels.items():
+            if value == label:
+                if option.value != key:
+                    cfg.set(option, key)
+                return
 
-        self.dubbing_preset_combo = ComboBox(self.voice_box)
-        self.dubbing_preset_combo.addItems(list(DUBBING_PRESET_LABELS.values()))
-        self.dubbing_preset_combo.setMinimumWidth(220)
-        self.dubbing_preset_combo.hide()
-        self.text_track_combo = ComboBox(self.voice_box)
-        self.text_track_combo.addItems(list(TEXT_TRACK_LABELS.values()))
-        self.text_track_combo.setMinimumWidth(128)
-        self.voice_preview_button = PushButton(FIF.PLAY, self.tr("试听"), self.voice_box)
-        self.voice_dialog_button = PushButton(FIF.MUSIC, self.tr("音色库"), self.voice_box)
-        self.voice_preview_button.setFixedHeight(34)
-        self.voice_dialog_button.setFixedHeight(34)
+    def _on_outputs_changed(self, _value=None):
+        self.generatePanel.subtitleCard.setChecked(bool(cfg.need_video.value))
+        self.generatePanel.dubbingCard.setChecked(bool(cfg.dubbing_enabled.value))
+        if self.state == PageState.DONE:
+            # 完成后调整输出选择即视为准备下一次生成
+            self.state = PageState.IDLE
+        self._refresh()
 
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(8)
-        action_row.addWidget(self.text_track_combo, 1)
-        action_row.addWidget(self.voice_preview_button)
-        action_row.addWidget(self.voice_dialog_button)
+    def _on_style_toggled(self, checked: bool):
+        self._set_config_bool(cfg.use_subtitle_style, checked)
+        if checked and cfg.soft_subtitle.value:
+            # 样式只对硬字幕生效，开样式时自动切硬字幕。
+            cfg.set(cfg.soft_subtitle, False)
+            self.generatePanel.subtitleModeSelect.setCurrentText(
+                SUBTITLE_MODE_LABELS[False]
+            )
+        self._refresh_param_locks()
 
-        voice_layout.addLayout(voice_title_row)
-        voice_layout.addWidget(self.dubbing_preset_combo)
-        voice_layout.addLayout(action_row)
-        self.dubbing_card.bodyLayout.addWidget(self.voice_box)
-        self.dubbing_card.bodyLayout.addStretch(1)
-        parent_layout.addWidget(self.dubbing_card, 1)
+    def _on_subtitle_mode(self, label: str):
+        soft = label == SUBTITLE_MODE_LABELS[True]
+        self._set_config_bool(cfg.soft_subtitle, soft)
+        if soft and cfg.use_subtitle_style.value:
+            cfg.set(cfg.use_subtitle_style, False)
+            self.generatePanel.styleSwitch.setChecked(False)
+        self._refresh_param_locks()
 
-    def on_soft_subtitle_action_triggered(self, checked: bool):
-        """处理软字幕按钮点击。"""
-        cfg.set(cfg.soft_subtitle, checked)
-        self.soft_subtitle_action.setChecked(checked)
-        self._sync_subtitle_type_button()
-
-        if checked:
-            if self.use_style_action.isChecked():
-                self.use_style_action.setChecked(False)
-                cfg.set(cfg.use_subtitle_style, False)
-                self.use_style_switch.blockSignals(True)
-                self.use_style_switch.setChecked(False)
-                self.use_style_switch.blockSignals(False)
-                self._update_style_controls_state()
-        self._update_style_controls_state()
-
-    def on_soft_subtitle_changed(self, checked: bool):
-        """处理外部软字幕配置变更（仅更新UI状态）"""
-        self.soft_subtitle_action.setChecked(checked)
-        self._sync_subtitle_type_button()
-
-    def on_need_video_action_triggered(self, checked: bool):
-        """处理视频合成按钮点击。"""
-        cfg.set(cfg.need_video, checked)
-        self._update_output_action_text()
-        self._update_synthesis_controls_state()
-        self._update_start_button_text()
-        self._update_input_requirements()
-
-    def on_need_video_changed(self, checked: bool):
-        """处理外部视频合成配置变更（仅更新UI状态）"""
-        self.need_video_action.setChecked(checked)
-        self._update_output_action_text()
-        self._update_synthesis_controls_state()
-        self._update_input_requirements()
-
-    def on_add_subtitle_action_triggered(self, checked: bool | None = None):
-        checked = not cfg.need_video.value if checked is None else checked
-        cfg.set(cfg.need_video, checked)
-        self.need_video_action.setChecked(checked)
-        self._update_output_action_text()
-        self._update_synthesis_controls_state()
-        self._update_start_button_text()
-        self._update_input_requirements()
-
-    def on_add_dubbing_action_triggered(self, checked: bool | None = None):
-        checked = not cfg.dubbing_enabled.value if checked is None else checked
-        cfg.set(cfg.dubbing_enabled, checked)
-        self._update_output_action_text()
-        self._update_dubbing_controls_state()
-        self._update_input_requirements()
-
-    def on_dubbing_enabled_changed(self, checked: bool):
-        self._update_output_action_text()
-        self._update_dubbing_controls_state()
-        self._update_input_requirements()
-
-    def on_video_quality_action_changed(self, quality_text: str):
-        """处理质量选择"""
-        # 根据文本找到对应的枚举
-        quality_enum = None
-        for e in VideoQualityEnum:
-            if e.value == quality_text:
-                quality_enum = e
+    def _on_render_mode(self, label: str):
+        for mode in SubtitleRenderModeEnum:
+            if mode.value == label:
+                if cfg.subtitle_render_mode.value != mode:
+                    cfg.set(cfg.subtitle_render_mode, mode)
                 break
 
-        if quality_enum is None:
-            return
-
-        cfg.set(cfg.video_quality, quality_enum)
-        self.video_quality_button.setText(quality_text)
-        self._sync_summary_state()
-
-    def on_video_quality_changed(self, quality_text: str):
-        """处理外部质量配置变更（仅更新UI状态）"""
-        self.video_quality_button.setText(quality_text)
-        self._sync_summary_state()
-
-    def on_use_style_action_triggered(self, checked: bool):
-        """处理使用样式开关点击"""
-        cfg.set(cfg.use_subtitle_style, checked)
-        self.use_style_action.setChecked(checked)
-        self.use_style_switch.blockSignals(True)
-        self.use_style_switch.setChecked(checked)
-        self.use_style_switch.blockSignals(False)
-        self._update_style_controls_state()
-
-        if checked:
-            if self.soft_subtitle_action.isChecked():
-                self.soft_subtitle_action.setChecked(False)
-                cfg.set(cfg.soft_subtitle, False)
-                self._sync_subtitle_type_button()
-
-    def on_use_style_changed(self, checked: bool):
-        """处理外部使用样式配置变更（仅更新 UI）"""
-        self.use_style_action.setChecked(checked)
-        self.use_style_switch.blockSignals(True)
-        self.use_style_switch.setChecked(checked)
-        self.use_style_switch.blockSignals(False)
-        self._update_style_controls_state()
-
-    def on_render_mode_changed(self, mode_text: str):
-        """处理渲染模式选择（本界面触发）"""
-        mode_enum = None
-        for e in SubtitleRenderModeEnum:
-            if e.value == mode_text:
-                mode_enum = e
+    def _on_quality(self, label: str):
+        for quality in VideoQualityEnum:
+            if quality.value == label:
+                if cfg.video_quality.value != quality:
+                    cfg.set(cfg.video_quality, quality)
                 break
-        if mode_enum:
-            cfg.set(cfg.subtitle_render_mode, mode_enum)
-            self.render_mode_button.setText(mode_text)
-            self._sync_summary_state()
 
-    def on_render_mode_changed_external(self, mode_text: str):
-        """处理外部渲染模式变更（仅更新 UI）"""
-        self.render_mode_button.setText(mode_text)
-        self._sync_summary_state()
+    def _sync_voice_options(self):
+        labels = _voice_labels()
+        current = labels.get(cfg.dubbing_preset.value) or next(
+            iter(labels.values()), ""
+        )
+        self.generatePanel.voiceSelect.setItems(list(labels.values()), current)
 
-    def _update_synthesis_controls_state(self):
-        """更新所有合成相关控件的启用/禁用状态"""
-        need_video = cfg.need_video.value
+    def _on_voice(self, label: str):
+        for preset, title in _voice_labels().items():
+            if title == label:
+                if cfg.dubbing_preset.value != preset:
+                    cfg.set(cfg.dubbing_preset, preset)
+                    option = get_dubbing_preset(preset)
+                    if option is not None:
+                        cfg.set(cfg.dubbing_voice, option.voice)
+                self._refresh()
+                return
 
-        # 合成视频关闭时，禁用所有相关选项
-        self.soft_subtitle_action.setEnabled(need_video)
-        self.subtitle_type_button.setEnabled(need_video)
-        self.use_style_action.setEnabled(need_video)
-        self.video_quality_button.setEnabled(need_video)
+    def _refresh_param_locks(self):
+        """渲染模式仅硬字幕 + 启用样式时可调。"""
+        hard_with_style = (
+            not cfg.soft_subtitle.value and cfg.use_subtitle_style.value
+        )
+        self.generatePanel.renderModeSelect.setEnabled(hard_with_style)
 
-        # 渲染模式按钮需要同时满足：合成视频开启 且 使用样式开启
-        self._update_style_controls_state()
+    # --------------------------------------------------------- state engine
 
-    def _update_style_controls_state(self):
-        """更新样式相关控件的启用/禁用状态"""
-        need_video = cfg.need_video.value
-        use_style = self.use_style_action.isChecked()
-        self.use_style_switch.setEnabled(need_video)
-        # 渲染模式按钮：需要合成视频开启 且 使用样式开启
-        self.render_mode_button.setEnabled(need_video and use_style)
-        if hasattr(self, "use_style_row"):
-            self.use_style_row.setDescription(
-                self.tr("使用样式页的 ASS 样式") if use_style else self.tr("使用默认字幕样式")
-            )
-        if hasattr(self, "render_mode_row"):
-            self.render_mode_row.setDescription(
-                self.tr("使用 ASS 样式渲染") if use_style else self.tr("开启字幕样式后可选择渲染模式")
-            )
-        if hasattr(self, "subtitle_type_row") and not need_video:
-            self.subtitle_type_row.setDescription(self.tr("选择字幕视频后可设置字幕方式"))
-        self._sync_summary_state()
+    def _evaluate(self) -> Readiness:
+        """根据开关与输入计算 IDLE 的呈现。"""
+        add_subtitle = bool(cfg.need_video.value)
+        add_dubbing = bool(cfg.dubbing_enabled.value)
+        has_subtitle = bool(self.subtitle_path)
+        has_video = bool(self.video_path)
 
-    def _update_dubbing_controls_state(self):
-        enabled = cfg.dubbing_enabled.value
-        self.dubbing_card.setEnabled(enabled)
-        self._update_start_button_text()
-        self._sync_summary_state()
+        plan = []
+        if add_dubbing:
+            plan.append(self.tr("生成配音音轨"))
+        if add_subtitle:
+            plan.append(self.tr("合成字幕视频"))
+        plan.append(self.tr("保存结果文件"))
 
-    def _update_output_action_text(self):
-        self.add_subtitle_action.setChecked(cfg.need_video.value)
-        self.add_dubbing_action.setChecked(cfg.dubbing_enabled.value)
-        self.output_subtitle_button.setChecked(cfg.need_video.value)
-        self.output_dubbing_button.setChecked(cfg.dubbing_enabled.value)
-        self._sync_summary_state()
-
-    def _update_start_button_text(self):
-        add_subtitle = cfg.need_video.value
-        add_dubbing = cfg.dubbing_enabled.value
-        if add_subtitle and add_dubbing:
-            self.synthesize_button.setText(self.tr("生成成片"))
-            self.mode_label.setText(self.tr("输出：字幕 + 配音视频"))
-        elif add_dubbing:
-            if self.video_input.text().strip():
-                self.synthesize_button.setText(self.tr("生成配音视频"))
-                self.mode_label.setText(self.tr("输出：配音视频"))
-            else:
-                self.synthesize_button.setText(self.tr("生成配音音频"))
-                self.mode_label.setText(self.tr("输出：配音音频"))
-        elif add_subtitle:
-            self.synthesize_button.setText(self.tr("生成字幕视频"))
-            self.mode_label.setText(self.tr("输出：字幕视频"))
-        else:
-            self.synthesize_button.setText(self.tr("先选择输出"))
-            self.mode_label.setText(self.tr("请选择“字幕视频”或“配音音轨”"))
-        self._sync_start_button_enabled(add_subtitle, add_dubbing)
-        self._sync_summary_state()
-
-    def _sync_start_button_enabled(self, add_subtitle: bool, add_dubbing: bool):
-        self.synthesize_button.setEnabled(self._has_required_inputs(add_subtitle, add_dubbing))
-
-    def _has_required_inputs(self, add_subtitle: bool, add_dubbing: bool) -> bool:
         if not add_subtitle and not add_dubbing:
-            return False
+            return Readiness(
+                view="files" if has_subtitle else "empty",
+                title=self.tr("输入文件"),
+                bottom=self.tr("请在右侧至少打开一种输出内容"),
+                pill=(self.tr("未选择输出"), "warn"),
+                primary=(self.tr("选择输出内容"), AppIcon.SETTING, False),
+            )
+        if not has_subtitle:
+            need_both = add_subtitle
+            return Readiness(
+                view="empty",
+                title=self.tr("输入文件"),
+                bottom=self.tr("需要字幕文件和视频文件")
+                if need_both
+                else self.tr("需要字幕文件"),
+                pill=(self.tr("等待文件"), "warn"),
+                primary=(self.tr("等待文件"), AppIcon.FILE, False),
+            )
+        if add_subtitle and not has_video:
+            return Readiness(
+                view="files",
+                title=self.tr("输入文件"),
+                bottom=self.tr("还需要视频文件"),
+                pill=(self.tr("缺少视频"), "warn"),
+                primary=(self.tr("等待视频"), AppIcon.VIDEO, False),
+                plan=plan,
+            )
 
-        subtitle_path = self.subtitle_input.text().strip()
-        if not subtitle_path or not Path(subtitle_path).is_file():
-            return False
+        blocker = self._preflight_blocker(add_dubbing)
+        if blocker:
+            return Readiness(
+                view="files",
+                title=self.tr("配置检查"),
+                bottom=blocker[0],
+                pill=blocker[1],
+                primary=(self._primary_text(add_subtitle, add_dubbing), AppIcon.PLAY, False),
+                blocker=blocker[2],
+                plan=plan,
+            )
 
-        video_path = self.video_input.text().strip()
-        if add_subtitle:
-            return bool(video_path) and Path(video_path).is_file()
+        bottoms = {
+            (True, True): self.tr("将先生成配音，再合成字幕视频"),
+            (True, False): self.tr("将把字幕合成进视频"),
+            (False, True): self.tr("仅生成配音音频，视频文件可不选"),
+        }
+        return Readiness(
+            view="files",
+            title=self.tr("生成前确认"),
+            bottom=bottoms[(add_subtitle, add_dubbing)],
+            pill=(self.tr("可以生成"), "ok"),
+            primary=(self._primary_text(add_subtitle, add_dubbing), AppIcon.PLAY, True),
+            plan=plan,
+        )
 
-        return not video_path or Path(video_path).is_file()
-
-    def _update_input_requirements(self):
-        add_subtitle = cfg.need_video.value
-        add_dubbing = cfg.dubbing_enabled.value
-
+    def _primary_text(self, add_subtitle: bool, add_dubbing: bool) -> str:
         if add_subtitle and add_dubbing:
-            self.video_label.setText(self.tr("视频文件"))
-            self.video_input.setPlaceholderText(self.tr("必填：选择或者拖拽视频文件"))
-            self.requirement_hint.setText(self.tr("将生成带字幕和配音的视频；字幕和视频都需要提供。"))
-        elif add_subtitle:
-            self.video_label.setText(self.tr("视频文件"))
-            self.video_input.setPlaceholderText(self.tr("必填：选择或者拖拽视频文件"))
-            self.requirement_hint.setText(self.tr("将把字幕合成到视频中；请提供字幕和视频文件。"))
-        elif add_dubbing:
-            self.video_label.setText(self.tr("参考视频"))
-            self.video_input.setPlaceholderText(
-                self.tr("可选：选择视频可把配音合入视频")
-            )
-            self.requirement_hint.setText(self.tr("仅提供字幕会生成配音音频；同时提供视频会生成配音视频。"))
-        else:
-            self.video_label.setText(self.tr("视频文件"))
-            self.video_input.setPlaceholderText(self.tr("选择或者拖拽视频文件"))
-            self.requirement_hint.setText(self.tr("请选择要导出的内容：字幕视频、配音音轨，或两者都生成。"))
-        self._update_start_button_text()
-        self.synthesize_button.setToolTip(
-            self.tr("{mode}；将生成：{outputs}").format(
-                mode=self._current_mode_text(),
-                outputs=self._planned_outputs_text(),
-            )
-        )
-        self._sync_file_status()
-        self._sync_summary_state()
-
-    def _current_mode_text(self) -> str:
-        add_subtitle = cfg.need_video.value
-        add_dubbing = cfg.dubbing_enabled.value
-        has_video = bool(self.video_input.text().strip())
-        if add_subtitle and add_dubbing:
-            return self.tr("字幕 + 配音成片")
-        if add_subtitle:
-            return self.tr("字幕视频合成")
-        if add_dubbing and has_video:
-            return self.tr("配音视频")
+            return self.tr("生成成片")
         if add_dubbing:
-            return self.tr("配音音频")
-        return self.tr("未选择输出")
+            return self.tr("生成配音音频")
+        return self.tr("生成字幕视频")
 
-    def on_output_subtitle_button_clicked(self, checked: bool):
-        cfg.set(cfg.need_video, checked)
-        self.add_subtitle_action.setChecked(checked)
-        self._update_output_action_text()
-        self._update_synthesis_controls_state()
-        self._update_start_button_text()
-        self._update_input_requirements()
-
-    def on_output_dubbing_button_clicked(self, checked: bool):
-        cfg.set(cfg.dubbing_enabled, checked)
-        self.add_dubbing_action.setChecked(checked)
-        self._update_output_action_text()
-        self._update_dubbing_controls_state()
-        self._update_start_button_text()
-        self._update_input_requirements()
-
-    def _planned_outputs_text(self) -> str:
-        add_subtitle = cfg.need_video.value
-        add_dubbing = cfg.dubbing_enabled.value
-        has_video = bool(self.video_input.text().strip())
-        if add_subtitle and add_dubbing:
-            return self.tr("字幕视频 + 配音音频")
-        if add_subtitle:
-            return self.tr("带字幕视频")
-        if add_dubbing and has_video:
-            return self.tr("配音视频 + 配音音频")
-        if add_dubbing:
-            return self.tr("配音音频")
-        return self.tr("请选择添加字幕或添加配音")
-
-    def on_dubbing_preset_changed(self, text: str):
-        preset = self._preset_from_label(text)
-        cfg.set(cfg.dubbing_preset, preset)
-        cfg.set(cfg.dubbing_voice, self._voice_from_preset(preset))
-        self._sync_voice_summary()
-        self._show_provider_tip(preset)
-
-    def on_text_track_changed(self, text: str):
-        cfg.set(cfg.dubbing_text_track, self._key_from_label(TEXT_TRACK_LABELS, text))
-        self._sync_summary_state()
-
-    def show_voice_dialog(self):
-        window = self.window()
-        if hasattr(window, "dubbingInterface"):
-            window.switchTo(window.dubbingInterface)  # type: ignore[attr-defined]
-
-    def preview_current_voice(self):
-        if hasattr(self, "voice_preview_thread") and self.voice_preview_thread.isRunning():
-            return
-        preset = self._key_from_label(DUBBING_PRESET_LABELS, self.dubbing_preset_combo.currentText())
-        preset_config = get_dubbing_preset(preset)
-        if (
-            preset_config.provider != "edge"
-            and not cfg.dubbing_api_key.value.strip()
-            and not bundled_voice_preview(preset)
-        ):
-            InfoBar.warning(
-                self.tr("需要 API Key"),
-                self.tr("该音色没有内置试听音频，请先在配音设置里填写 API Key。"),
-                duration=3500,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return
-        self.voice_preview_button.setEnabled(False)
-        self.voice_preview_button.setText(self.tr("试听中..."))
-        self.voice_preview_thread = VoicePreviewThread(preset)
-        self.voice_preview_thread.finished.connect(self.on_voice_preview_finished)
-        self.voice_preview_thread.error.connect(self.on_voice_preview_error)
-        self.voice_preview_thread.start()
-
-    def on_voice_preview_finished(self, path: str):
-        self.voice_preview_button.setEnabled(True)
-        self.voice_preview_button.setText(self.tr("试听当前"))
-        self.preview_player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
-        self.preview_player.play()
-
-    def on_voice_preview_error(self, message: str):
-        self.voice_preview_button.setEnabled(True)
-        self.voice_preview_button.setText(self.tr("试听当前"))
-        InfoBar.error(
-            self.tr("试听失败"),
-            message,
-            duration=INFOBAR_DURATION_ERROR,
-            position=InfoBarPosition.TOP,
-            parent=self,
-        )
-
-    def apply_voice_preset(self, preset: str):
-        label = DUBBING_PRESET_LABELS.get(preset, preset)
-        self.dubbing_preset_combo.setCurrentText(label)
-        cfg.set(cfg.dubbing_preset, preset)
-        cfg.set(cfg.dubbing_voice, self._voice_from_preset(preset))
-        self._sync_voice_summary()
-
-    def _sync_page_style(self):
-        palette = app_palette()
-        accent = palette.accent
-        self.setStyleSheet(
-            f"""
-            QWidget#VideoSynthesisInterface {{
-                background: {palette.bg};
-            }}
-            QScrollArea {{
-                border: none;
-                background: transparent;
-            }}
-            QWidget#videoSynthesisScrollWidget {{
-                background: transparent;
-            }}
-            QFrame#voiceBox {{
-                background: {palette.field};
-                border: 1px solid {palette.line_soft};
-                border-radius: {PANEL_RADIUS}px;
-            }}
-            LineEdit, QLineEdit {{
-                color: {palette.text};
-                background: {palette.field};
-                border: 1px solid {palette.line};
-                border-radius: {CONTROL_RADIUS}px;
-                padding: 0 10px;
-            }}
-            ComboBox, PushButton, DropDownPushButton {{
-                color: {palette.text};
-                background: {palette.field};
-                border: 1px solid {palette.line};
-                border-radius: {CONTROL_RADIUS}px;
-                font-weight: 760;
-            }}
-            PrimaryPushButton#synthesisPrimaryButton {{
-                color: {palette.accent_fg};
-                background: {accent};
-                border: 1px solid {accent};
-                border-radius: {CONTROL_RADIUS}px;
-                font-weight: 880;
-            }}
-            ProgressBar {{
-                min-height: 8px;
-                max-height: 8px;
-            }}
-            """
-        )
-        for panel in self.findChildren(ModernPanel):
-            panel.syncStyle()
-        for row in self.findChildren(FileRow):
-            row.syncStyle()
-        for row in self.findChildren(WorkflowSettingRow):
-            row.syncStyle()
-        for card in self.findChildren(OutputCard):
-            card.syncStyle()
-        self.open_folder_button.syncStyle()
-
-    def _sync_subtitle_type_button(self):
-        if cfg.soft_subtitle.value:
-            self.subtitle_type_button.setText(self.tr("软字幕"))
-            self.subtitle_type_row.setDescription(self.tr("作为独立字幕轨道嵌入视频"))
-        else:
-            self.subtitle_type_button.setText(self.tr("硬字幕"))
-            self.subtitle_type_row.setDescription(self.tr("硬字幕会直接烧录到画面"))
-
-    def _sync_file_status(self):
-        subtitle_ok = Path(self.subtitle_input.text().strip()).is_file()
-        video_text = self.video_input.text().strip()
-        if hasattr(self, "subtitle_row"):
-            self.subtitle_row.setReady(subtitle_ok)
-        if hasattr(self, "video_row"):
-            self.video_row.setReady(bool(video_text) and Path(video_text).is_file())
-
-    def _sync_summary_state(self):
-        subtitle_path = self.subtitle_input.text().strip()
-        video_path = self.video_input.text().strip()
-        if not cfg.need_video.value and not cfg.dubbing_enabled.value:
-            status = self.tr("请选择导出内容")
-        elif not subtitle_path:
-            status = self.tr("等待字幕文件")
-        elif not Path(subtitle_path).is_file():
-            status = self.tr("字幕文件不存在")
-        elif cfg.need_video.value and not video_path:
-            status = self.tr("等待视频文件")
-        elif video_path and not Path(video_path).is_file():
-            status = self.tr("视频文件不存在")
-        else:
-            status = self.tr("可以开始生成")
-        if hasattr(self, "status_label"):
-            self.status_label.setText(self.tr("就绪") if status == self.tr("可以开始生成") else status)
-        self._sync_start_button_enabled(cfg.need_video.value, cfg.dubbing_enabled.value)
-
-    def _set_progress_visible(self, visible: bool) -> None:
-        self.progress_bar.setVisible(visible)
-        self.status_label.setVisible(visible)
-
-    def _begin_generation_progress(self) -> None:
-        self._set_progress_visible(True)
-        self.progress_bar.resume()
-        self.progress_bar.reset()
-        self.status_label.setText(self.tr("准备生成"))
-
-    def _finish_generation_progress(self) -> None:
-        self._set_progress_visible(True)
-        self.progress_bar.resume()
-        self.progress_bar.setValue(100)
-        self.status_label.setText(self.tr("已完成"))
-
-    def _sync_voice_summary(self):
-        if not hasattr(self, "voice_title_label"):
-            return
-        preset = cfg.dubbing_preset.value
-        voice_option = self._voice_option_from_preset(preset)
-        label = voice_option.title if voice_option else DUBBING_PRESET_LABELS.get(preset, preset).split("（", 1)[0]
-        self.voice_title_label.setText(label)
-
-    @staticmethod
-    def _voice_option_from_preset(preset: str) -> DubbingVoiceOption | None:
-        for voices in DUBBING_VOICES.values():
-            for voice in voices:
-                if voice.preset == preset:
-                    return voice
-        return None
-
-    @staticmethod
-    def _set_combo_key(combo: ComboBox, mapping: dict[str, str], key: str):
-        combo.setCurrentText(mapping.get(key, key))
-
-    def _show_provider_tip(self, preset: str):
-        return
-
-    @staticmethod
-    def _preset_from_label(label: str) -> str:
-        for key, value in DUBBING_PRESET_LABELS.items():
-            if value == label:
-                return key
-        return label
-
-    @staticmethod
-    def _key_from_label(mapping: dict[str, str], label: str) -> str:
-        for key, value in mapping.items():
-            if value == label:
-                return key
-        return next(iter(mapping))
-
-    @staticmethod
-    def _voice_from_preset(preset: str) -> str:
-        from videocaptioner.core.dubbing.presets import get_dubbing_preset
-
-        try:
-            return get_dubbing_preset(preset).voice
-        except ValueError:
-            return ""
-
-    def choose_subtitle_file(self):
-        # 构建文件过滤器
-        subtitle_formats = " ".join(
-            f"*.{fmt.value}" for fmt in SupportedSubtitleFormats
-        )
-        filter_str = f"{self.tr('字幕文件')} ({subtitle_formats})"
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, self.tr("选择字幕文件"), "", filter_str
-        )
-        if file_path:
-            self.subtitle_input.setText(file_path)
-
-    def choose_video_file(self):
-        # 构建文件过滤器
-        video_formats = " ".join(f"*.{fmt.value}" for fmt in SupportedVideoFormats)
-        filter_str = f"{self.tr('视频文件')} ({video_formats})"
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, self.tr("选择视频文件"), "", filter_str
-        )
-        if file_path:
-            self.video_input.setText(file_path)
-
-    def create_task(self):
-        subtitle_file = self.subtitle_input.text()
-        video_file = self.video_input.text()
-        if not subtitle_file or not video_file:
-            InfoBar.error(
-                self.tr("错误"),
-                self.tr("请选择字幕文件和视频文件"),
-                duration=INFOBAR_DURATION_ERROR,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return None
-        if not Path(subtitle_file).is_file():
-            InfoBar.error(
-                self.tr("错误"),
-                self.tr("字幕文件不存在"),
-                duration=INFOBAR_DURATION_ERROR,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return None
-        if not Path(video_file).is_file():
-            InfoBar.error(
-                self.tr("错误"),
-                self.tr("视频文件不存在"),
-                duration=INFOBAR_DURATION_ERROR,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return None
-        return TaskFactory.create_synthesis_task(video_file, subtitle_file)
-
-    def create_dubbing_task(self, output_video_path: str | None = None):
-        subtitle_file = self.subtitle_input.text()
-        video_file = self.video_input.text()
-        if not subtitle_file:
-            InfoBar.error(
-                self.tr("错误"),
-                self.tr("请选择字幕文件"),
-                duration=INFOBAR_DURATION_ERROR,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return None
-        if not Path(subtitle_file).is_file():
-            InfoBar.error(
-                self.tr("错误"),
-                self.tr("字幕文件不存在"),
-                duration=INFOBAR_DURATION_ERROR,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return None
-        if not video_file and cfg.need_video.value:
-            InfoBar.error(
-                self.tr("错误"),
-                self.tr("生成视频时需要选择视频文件"),
-                duration=INFOBAR_DURATION_ERROR,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return None
-        if video_file and not Path(video_file).is_file():
-            InfoBar.error(
-                self.tr("错误"),
-                self.tr("视频文件不存在"),
-                duration=INFOBAR_DURATION_ERROR,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-            return None
-        return TaskFactory.create_dubbing_task(
-            video_file,
-            subtitle_file,
-            output_video_path=output_video_path,
-        )
-
-    def set_task(self, task: SynthesisTask):
-        self.task = task
-        self.update_info()
-
-    def update_info(self):
-        if self.task:
-            self.video_input.setText(self.task.video_path)
-            self.subtitle_input.setText(self.task.subtitle_path)
-
-    def start_video_synthesis(self, need_create_task=True):
-        self.synthesize_button.setEnabled(False)
-        self._begin_generation_progress()
-        if need_create_task:
-            self.task = self.create_task()
-
-        if self.task:
-            self.video_synthesis_thread = VideoSynthesisThread(self.task)
-            self.video_synthesis_thread.finished.connect(
-                self.on_video_synthesis_finished
-            )
-            self.video_synthesis_thread.progress.connect(
-                self.on_video_synthesis_progress
-            )
-            self.video_synthesis_thread.error.connect(self.on_video_synthesis_error)
-            self.video_synthesis_thread.start()
-        else:
-            self.synthesize_button.setEnabled(True)
-            self._set_progress_visible(False)
-
-    def process(self):
-        self.start_output_generation(need_create_task=False)
-
-    def start_output_generation(self, need_create_task=True):
-        add_subtitle = cfg.need_video.value
-        add_dubbing = cfg.dubbing_enabled.value
-        if not self._validate_before_generation(add_subtitle, add_dubbing):
-            return
-
-        self.synthesize_button.setEnabled(False)
-        self._begin_generation_progress()
-        self._pending_synthesis_after_dubbing = False
-        self._final_synthesis_task = None
-
-        if add_dubbing:
-            if add_subtitle:
-                final_task = self.create_task() if need_create_task else self.task
-                if not final_task or not final_task.video_path or not final_task.output_path:
-                    self.synthesize_button.setEnabled(True)
-                    self._set_progress_visible(False)
-                    return
-                temp_video = str(Path(final_task.output_path).with_suffix(".dub.tmp.mp4"))
-                self._final_synthesis_task = final_task
-                self._pending_synthesis_after_dubbing = True
-                self.dubbing_task = self.create_dubbing_task(output_video_path=temp_video)
-            else:
-                self.dubbing_task = self.create_dubbing_task()
-            if self.dubbing_task:
-                self.start_dubbing_task(self.dubbing_task)
-            else:
-                self.synthesize_button.setEnabled(True)
-                self._set_progress_visible(False)
-            return
-
-        self.start_video_synthesis(need_create_task=need_create_task)
-
-    def _validate_before_generation(self, add_subtitle: bool, add_dubbing: bool) -> bool:
-        subtitle_file = self.subtitle_input.text().strip()
-        video_file = self.video_input.text().strip()
-        if not add_subtitle and not add_dubbing:
-            self._show_preflight_error(
-                self.tr("请选择输出内容"),
-                self.tr("请在“输出内容”里至少打开“字幕视频”或“配音”。"),
-            )
-            return False
-        if not subtitle_file:
-            self._show_preflight_error(
-                self.tr("缺少字幕文件"),
-                self.tr("请选择 srt、ass 或 vtt 字幕文件。"),
-            )
-            return False
-        if not Path(subtitle_file).is_file():
-            self._show_preflight_error(self.tr("字幕文件不存在"), subtitle_file)
-            return False
-        if Path(subtitle_file).suffix.lower().lstrip(".") not in {
-            fmt.value for fmt in SupportedSubtitleFormats
-        }:
-            self._show_preflight_error(
-                self.tr("字幕格式不支持"),
-                self.tr("请选择 srt、ass 或 vtt 文件。"),
-            )
-            return False
-        if add_subtitle and not video_file:
-            self._show_preflight_error(
-                self.tr("缺少视频文件"),
-                self.tr("添加字幕或生成最终成片时需要选择视频文件。"),
-            )
-            return False
-        if video_file:
-            if not Path(video_file).is_file():
-                self._show_preflight_error(self.tr("视频文件不存在"), video_file)
-                return False
-            if Path(video_file).suffix.lower().lstrip(".") not in {
-                fmt.value for fmt in SupportedVideoFormats
-            }:
-                self._show_preflight_error(
-                    self.tr("视频格式不支持"),
-                    self.tr("请选择常见视频文件，例如 mp4、mov、mkv。"),
-                )
-                return False
-        if (add_subtitle or add_dubbing) and not shutil.which("ffmpeg"):
-            self._show_preflight_error(
-                self.tr("缺少 FFmpeg"),
+    def _preflight_blocker(self, add_dubbing: bool) -> Optional[tuple]:
+        """返回 (底部文案, (胶囊文案, 等级), 错误卡文案)；通过返回 None。"""
+        if not shutil.which("ffmpeg"):
+            return (
+                self.tr("未找到 FFmpeg"),
+                (self.tr("缺少 FFmpeg"), "fail"),
                 self.tr("请先安装 FFmpeg 并确保 ffmpeg 在 PATH 中。"),
             )
-            return False
-        if (
-            add_subtitle
-            and cfg.subtitle_render_mode.value == SubtitleRenderModeEnum.ASS_STYLE
-            and not ffmpeg_supports_ass_filter()
-        ):
-            self._show_preflight_error(
-                self.tr("FFmpeg 不支持 ASS 硬字幕"),
-                self.tr("请安装带 libass 的完整 FFmpeg，或在字幕样式里切换为圆角背景。"),
-            )
-            return False
         if add_dubbing and not shutil.which("ffprobe"):
-            self._show_preflight_error(
-                self.tr("缺少 FFprobe"),
-                self.tr("配音需要 ffprobe 读取音频时长，请确认 FFmpeg 套件安装完整。"),
+            return (
+                self.tr("未找到 FFprobe"),
+                (self.tr("缺少 FFprobe"), "fail"),
+                self.tr("配音需要 ffprobe 读取音频时长，请确认 FFmpeg 套件完整。"),
             )
-            return False
         if add_dubbing:
             provider = cfg.dubbing_provider.value
             if provider != "edge" and not cfg.dubbing_api_key.value.strip():
-                self._show_preflight_error(
-                    self.tr("缺少配音 API Key"),
-                    self.tr("当前音色需要 API Key；可切换到 Edge 免费音色，或在设置中填写 Key。"),
+                return (
+                    self.tr("当前音色需要 API Key"),
+                    (self.tr("缺少 Key"), "fail"),
+                    self.tr("当前音色缺少 API Key，请检查配音配置，或切换到 Edge 免费音色。"),
                 )
-                return False
-        return True
+        return None
 
-    def _show_preflight_error(self, title: str, message: str):
-        InfoBar.error(
-            title,
-            message,
-            duration=INFOBAR_DURATION_ERROR,
-            position=InfoBarPosition.TOP,
-            parent=self,
+    def _refresh(self):
+        """IDLE 状态的统一刷新入口。"""
+        if self.state != PageState.IDLE:
+            return
+        readiness = self._evaluate()
+        self.header.setTitle(readiness.title)
+        self.stack.setCurrentIndex(0 if readiness.view == "empty" else 1)
+        if readiness.view == "files":
+            self._refresh_file_rows()
+            self._refresh_plan(readiness.plan)
+        # 空态与转录/字幕页一致：不显示底部状态条（拖放区已说明一切）
+        self.bottomBar.setVisible(readiness.view != "empty")
+        self.bottomBar.setState(readiness.bottom, *readiness.pill)
+        text, icon, enabled = readiness.primary
+        self.generatePanel.setButton(text, icon=icon, primary=enabled, enabled=enabled)
+        self.generatePanel.setError(readiness.blocker)
+        self.generatePanel.cancelButton.hide()
+        self.generatePanel.openFolderButton.hide()
+        self.subtitleButton.show()
+        self.videoButton.show()
+        self.videoButton.textLabel.setText(
+            self.tr("可选视频")
+            if cfg.dubbing_enabled.value and not cfg.need_video.value
+            else self.tr("选择视频")
         )
+        # 参数组只跟输出开关走：开了哪个输出就显示哪组全部参数，
+        # 不再按文件就绪度/双开收敛隐藏（参数区可滚动，不怕长）。
+        # 例外：配音配置缺失（缺 Key）时配音组只留音色行，先解决配置。
+        add_subtitle = bool(cfg.need_video.value)
+        add_dubbing = bool(cfg.dubbing_enabled.value)
+        blocked = bool(readiness.blocker)
+        panel = self.generatePanel
+        panel.subtitleSection.setVisible(add_subtitle)
+        panel.dubbingSection.setVisible(add_dubbing)
+        panel.styleCard.setVisible(add_subtitle)
+        panel.qualityCard.setVisible(add_subtitle)
+        show_full_dubbing = add_dubbing and not blocked
+        panel.textTrackSelect.parentWidget().setVisible(show_full_dubbing)
+        panel.timingCard.setVisible(show_full_dubbing)
+        panel.audioModeCard.setVisible(show_full_dubbing)
+        self._refresh_param_locks()
+        self._sync_collapsed_controls()
 
-    def start_dubbing_task(self, task: DubbingTask):
-        self.dubbing_thread = DubbingThread(task)
-        self.dubbing_thread.finished.connect(self.on_dubbing_finished)
-        self.dubbing_thread.progress.connect(self.on_dubbing_progress)
-        self.dubbing_thread.error.connect(self.on_dubbing_error)
-        self.dubbing_thread.start()
-
-    def on_video_synthesis_finished(self, task):
-        self.synthesize_button.setEnabled(True)
-        self._finish_generation_progress()
-        if self._pending_synthesis_after_dubbing and task.video_path:
-            temp_video = Path(task.video_path)
-            if ".dub.tmp" in temp_video.name:
-                temp_video.unlink(missing_ok=True)
-            self._pending_synthesis_after_dubbing = False
-        self.open_video_folder()
-        InfoBar.success(
-            self.tr("成功"),
-            self.tr("已生成：") + self._planned_outputs_text(),
-            duration=INFOBAR_DURATION_SUCCESS,
-            position=InfoBarPosition.TOP,
-            parent=self,
-        )
-
-    def on_dubbing_finished(self, task: DubbingTask):
-        if self._pending_synthesis_after_dubbing and self._final_synthesis_task:
-            if not task.output_video_path:
-                self.on_dubbing_error(self.tr("配音视频输出路径为空"))
-                return
-            self.task = self._final_synthesis_task
-            self.task.video_path = task.output_video_path
-            self.video_synthesis_thread = VideoSynthesisThread(self.task)
-            self.video_synthesis_thread.finished.connect(self.on_video_synthesis_finished)
-            self.video_synthesis_thread.progress.connect(
-                lambda progress, message: self.on_video_synthesis_progress(55 + int(progress * 0.45), message)
+    def _refresh_file_rows(self):
+        add_subtitle = bool(cfg.need_video.value)
+        if self.subtitle_path:
+            self.subtitleRow.setState(
+                Path(self.subtitle_path).name, self.tr("已就绪"), "ok", missing=False
             )
-            self.video_synthesis_thread.error.connect(self.on_video_synthesis_error)
-            self.video_synthesis_thread.start()
+        else:
+            self.subtitleRow.setState(
+                self.tr("必填：选择 SRT / ASS / VTT 字幕"),
+                self.tr("缺少"),
+                "warn",
+                missing=True,
+            )
+        self.videoRow.setName(
+            self.tr("视频文件") if add_subtitle else self.tr("参考视频")
+        )
+        if self.video_path:
+            self.videoRow.setState(
+                Path(self.video_path).name, self.tr("已就绪"), "ok", missing=False
+            )
+        elif add_subtitle:
+            self.videoRow.setState(
+                self.tr("必填：选择 MP4 / MOV / MKV 视频"),
+                self.tr("缺少"),
+                "warn",
+                missing=True,
+            )
+        else:
+            self.videoRow.setState(
+                self.tr("可选：选择后额外生成配音视频"),
+                self.tr("可选"),
+                "neutral",
+                missing=True,
+            )
+
+    def _refresh_plan(self, plan: list[str], statuses: Optional[list[tuple]] = None):
+        """生成计划行：默认全部待生成；运行中由 statuses 指定。"""
+        for index, step in enumerate(self.planSteps):
+            if index < len(plan):
+                step.setTitle(plan[index])
+                step.show()
+                if statuses and index < len(statuses):
+                    step.pill.setState(*statuses[index])
+                else:
+                    step.pill.setState(self.tr("待生成"), "neutral")
+            else:
+                step.hide()
+
+    def _sync_collapsed_controls(self):
+        collapsed = self.sideHost.isCollapsed()
+        self.expandButton.setVisible(collapsed)
+        enabled = (
+            self.state == PageState.IDLE and self.generatePanel.primaryButton.isEnabled()
+        )
+        button = self.headStartButton
+        button.setText(self.generatePanel.primaryButton.text())
+        button.setPrimary(enabled)
+        button.setEnabled(enabled)
+        button.setVisible(collapsed and self.state == PageState.IDLE and enabled)
+
+    def _on_panel_collapsed(self, collapsed: bool):
+        if cfg.synthesis_panel_collapsed.value != collapsed:
+            cfg.set(cfg.synthesis_panel_collapsed, collapsed)
+        self._sync_collapsed_controls()
+
+    # ------------------------------------------------------------ file flow
+
+    def _browse_subtitle(self):
+        if self.controller.is_running():
+            return
+        formats = " ".join(f"*.{fmt}" for fmt in sorted(_SUBTITLE_FORMATS))
+        path, _ = QFileDialog.getOpenFileName(
+            self, self.tr("选择字幕文件"), "", f"{self.tr('字幕文件')} ({formats})"
+        )
+        if path:
+            self.set_subtitle_file(path)
+
+    def _browse_video(self):
+        if self.controller.is_running():
+            return
+        formats = " ".join(f"*.{fmt}" for fmt in sorted(_VIDEO_FORMATS))
+        path, _ = QFileDialog.getOpenFileName(
+            self, self.tr("选择视频文件"), "", f"{self.tr('视频文件')} ({formats})"
+        )
+        if path:
+            self.set_video_file(path)
+
+    def _browse_any(self):
+        formats = " ".join(
+            f"*.{fmt}" for fmt in sorted(_SUBTITLE_FORMATS | _VIDEO_FORMATS)
+        )
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, self.tr("选择字幕和视频文件"), "", f"{self.tr('媒体文件')} ({formats})"
+        )
+        for path in paths:
+            self._dispatch_file(path)
+
+    def _dispatch_file(self, path: str) -> bool:
+        suffix = Path(path).suffix.lstrip(".").lower()
+        if suffix in _SUBTITLE_FORMATS:
+            self.set_subtitle_file(path)
+            return True
+        if suffix in _VIDEO_FORMATS:
+            self.set_video_file(path)
+            return True
+        return False
+
+    def set_subtitle_file(self, path: str):
+        self.subtitle_path = path
+        if self.state == PageState.DONE:
+            self.state = PageState.IDLE
+        self._refresh()
+
+    def set_video_file(self, path: str):
+        self.video_path = path
+        if self.state == PageState.DONE:
+            self.state = PageState.IDLE
+        self._refresh()
+
+    # ------------------------------------------------------------- run flow
+
+    def _on_primary(self):
+        if self.state == PageState.DONE:
+            self.state = PageState.IDLE  # 重新生成
+        if self.state != PageState.IDLE:
+            return
+        readiness = self._evaluate()
+        if not readiness.primary[2]:
+            self._refresh()
+            return
+        add_subtitle = bool(cfg.need_video.value)
+        add_dubbing = bool(cfg.dubbing_enabled.value)
+
+        # ASS 滤镜检查放在点击时做（探测有进程开销，不适合放实时 evaluate）。
+        if (
+            add_subtitle
+            and not cfg.soft_subtitle.value
+            and cfg.subtitle_render_mode.value == SubtitleRenderModeEnum.ASS_STYLE
+            and not ffmpeg_supports_ass_filter()
+        ):
+            self.generatePanel.setError(
+                self.tr("FFmpeg 不支持 ASS 硬字幕，请安装带 libass 的完整 FFmpeg，或切换为圆角背景渲染。")
+            )
             return
 
-        self.synthesize_button.setEnabled(True)
-        self._finish_generation_progress()
-        self.open_video_folder()
-        InfoBar.success(
-            self.tr("成功"),
-            self.tr("已生成：") + self._planned_outputs_text(),
-            duration=INFOBAR_DURATION_SUCCESS,
-            position=InfoBarPosition.TOP,
-            parent=self,
-        )
+        # 首页流水线注入的任务目录只消费一次（含转录/字幕中间产物，收尾一并清理）
+        pipeline_task_dir, self._pipeline_task_dir = self._pipeline_task_dir, None
 
-    def on_dubbing_progress(self, progress: int, message: str):
-        self._set_progress_visible(True)
-        if self._pending_synthesis_after_dubbing:
-            progress = int(progress * 0.55)
-        self.progress_bar.setValue(progress)
-        self.status_label.setText(message)
-
-    def on_dubbing_error(self, error: str):
-        self.synthesize_button.setEnabled(True)
-        self._set_progress_visible(True)
-        self.progress_bar.error()
-        self.status_label.setText(self.tr("失败"))
-        InfoBar.error(
-            self.tr("配音失败"),
-            str(error),
-            duration=INFOBAR_DURATION_ERROR,
-            position=InfoBarPosition.TOP,
-            parent=self,
-        )
-
-    def on_video_synthesis_progress(self, progress, message):
-        self._set_progress_visible(True)
-        self.progress_bar.setValue(progress)
-        self.status_label.setText(message)
-
-    def on_video_synthesis_error(self, error):
-        self.synthesize_button.setEnabled(True)
-        self._set_progress_visible(True)
-        self.progress_bar.error()
-        self.status_label.setText(self.tr("失败"))
-        InfoBar.error(
-            self.tr("错误"),
-            str(error),
-            duration=INFOBAR_DURATION_ERROR,
-            position=InfoBarPosition.TOP,
-            parent=self,
-        )
-
-    def open_video_folder(self):
-        if self.task and self.task.output_path:
-            file_path = Path(self.task.output_path)
-            target_dir = str(
-                file_path.parent
-                if file_path.exists()
-                else (
-                    Path(str(self.task.video_path)).parent
-                    if self.task.video_path
-                    else file_path.parent
-                )
+        if add_dubbing and add_subtitle:
+            # 配音+字幕链式：共享一个任务目录，配音视频是其中的中间产物。
+            task_dir = pipeline_task_dir or TaskFactory.new_task_dir(self.video_path)
+            temp_video = str(
+                Path(task_dir) / output_paths.DUBBING_DIR / f"dubbed{Path(self.video_path).suffix}"
             )
-            # Cross-platform folder opening
-            open_folder(target_dir)
-        elif self.dubbing_task and (self.dubbing_task.output_video_path or self.dubbing_task.output_audio_path):
-            file_path = Path(self.dubbing_task.output_video_path or self.dubbing_task.output_audio_path or "")
-            open_folder(str(file_path.parent))
+            synthesis = TaskFactory.create_synthesis_task(
+                self.video_path, self.subtitle_path, task_dir=task_dir, dubbed=True
+            )
+            dubbing = TaskFactory.create_dubbing_task(
+                self.video_path,
+                self.subtitle_path,
+                output_video_path=temp_video,
+                task_dir=task_dir,
+            )
+            self._active_task_dir = task_dir
+            started = self.controller.start_dubbing(dubbing, chained_synthesis=synthesis)
+        elif add_dubbing:
+            dubbing = TaskFactory.create_dubbing_task(
+                self.video_path or "",
+                self.subtitle_path,
+                task_dir=pipeline_task_dir,
+            )
+            self._active_task_dir = dubbing.task_dir
+            started = self.controller.start_dubbing(dubbing)
         else:
-            InfoBar.warning(
-                self.tr("警告"),
-                self.tr("没有可用的视频文件夹"),
-                duration=INFOBAR_DURATION_WARNING,
-                position=InfoBarPosition.TOP,
-                parent=self,
+            self.task = TaskFactory.create_synthesis_task(
+                self.video_path, self.subtitle_path, task_dir=pipeline_task_dir
             )
+            self._active_task_dir = pipeline_task_dir
+            started = self.controller.start_synthesis_only(self.task)
+        if started:
+            self._enter_running()
+
+    def _enter_running(self):
+        self.state = PageState.RUNNING
+        self.header.setTitle(self.tr("生成中"))
+        self.stack.setCurrentIndex(1)
+        self.bottomBar.show()
+        self._refresh_file_rows()
+        plan = []
+        if cfg.dubbing_enabled.value:
+            plan.append(self.tr("生成配音音轨"))
+        if cfg.need_video.value:
+            plan.append(self.tr("合成字幕视频"))
+        plan.append(self.tr("整理结果文件"))
+        self._refresh_plan(plan, [(self.tr("等待"), "neutral")] * len(plan))
+        self.bottomBar.setState(
+            self.tr("正在生成结果文件"), self.tr("生成中"), "warn", progress=0
+        )
+        self.generatePanel.setButton(
+            self.tr("生成中"), icon=AppIcon.SYNC, primary=False, enabled=False
+        )
+        self.generatePanel.setError("")
+        self.generatePanel.cancelButton.show()
+        self.generatePanel.openFolderButton.hide()
+        self.subtitleButton.hide()
+        self.videoButton.hide()
+        self._sync_collapsed_controls()
+
+    def _on_progress(self, value: int, message: str):
+        if self.state != PageState.RUNNING:
+            return
+        self.bottomBar.setState(
+            message or self.tr("正在生成结果文件"),
+            f"{value}%",
+            "warn",
+            progress=value,
+        )
+        # 计划行状态跟随整体进度（全流程 0-55 配音 / 55-100 合成）。
+        dubbing_on = bool(cfg.dubbing_enabled.value)
+        subtitle_on = bool(cfg.need_video.value)
+        if dubbing_on and subtitle_on:
+            if value < 55:
+                statuses = [(f"{int(value / 55 * 100)}%", "warn"), (self.tr("等待"), "neutral")]
+            else:
+                statuses = [
+                    (self.tr("完成"), "ok"),
+                    (f"{int((value - 55) / 45 * 100)}%", "warn"),
+                ]
+            statuses.append((self.tr("等待"), "neutral"))
+        else:
+            statuses = [(f"{value}%", "warn"), (self.tr("等待"), "neutral")]
+        for step, status in zip([s for s in self.planSteps if s.isVisible()], statuses):
+            step.pill.setState(*status)
+
+    def _cancel(self):
+        self.controller.cancel()
+        # 取消的运行是废弃物，任务目录直接清掉（controller.cancel 已等线程退出）。
+        output_paths.cleanup_task_dir(self._active_task_dir, keep=False)
+        self._active_task_dir = None
+        self.state = PageState.IDLE
+        self._refresh()
+
+    def _on_failed(self, error: str):
+        # 失败保留任务目录供排查，只复位引用。
+        self._active_task_dir = None
+        self.state = PageState.IDLE
+        self._refresh()
+        self.generatePanel.setError(error)
+        self.bottomBar.setState(self.tr("生成失败"), self.tr("失败"), "fail")
+
+    def _on_completed(self, results: list):
+        output_paths.cleanup_task_dir(
+            self._active_task_dir, keep=bool(cfg.keep_intermediates.value)
+        )
+        self._active_task_dir = None
+        self.state = PageState.DONE
+        self._results = results
+        self.header.setTitle(self.tr("结果文件"))
+        self.stack.setCurrentIndex(2)
+        for row, result in zip(self.resultRows, results[: len(self.resultRows)]):
+            row.setResult(*result)
+            row.show()
+        for row in self.resultRows[len(results):]:
+            row.hide()
+
+        # 有视频产物时异步读取封面帧做预览
+        video_result = next(
+            (path for _, path in results if Path(path).suffix.lower() == ".mp4"), None
+        )
+        self.resultThumb.setVisible(video_result is not None)
+        if video_result:
+            self._info_thread = VideoInfoThread(video_result)
+            self._info_thread.finished.connect(self._on_result_info)
+            self._info_thread.start()
+
+        self.bottomBar.setState(self.tr("生成完成"), self.tr("已完成"), "ok")
+        self.generatePanel.setButton(
+            self.tr("重新生成"), icon=AppIcon.SYNC, primary=True, enabled=True
+        )
+        self.generatePanel.cancelButton.hide()
+        self.generatePanel.openFolderButton.show()
+        self.subtitleButton.show()
+        self.videoButton.show()
+        self._sync_collapsed_controls()
+        self._open_result_folder()
+
+    def _on_result_info(self, info: VideoInfo):
+        self.resultThumb.setMedia(info.thumbnail_path, is_audio=False)
+
+    # ------------------------------------------------------------- actions
+
+    def _open_result_folder(self):
+        # 已知具体文件时在文件管理器中直接选中它
+        target = None
+        if self._results:
+            target = Path(self._results[0][1])
+        elif self.video_path:
+            target = Path(self.video_path)
+        elif self.subtitle_path:
+            target = Path(self.subtitle_path)
+        if target is None:
+            return
+        if target.exists():
+            reveal_in_explorer(str(target))
+        else:
+            open_folder(str(target.parent))
+
+    def _open_file(self, path: str):
+        from PyQt5.QtCore import QUrl
+        from PyQt5.QtGui import QDesktopServices
+
+        if Path(path).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _open_synthesis_settings(self):
+        window = self.window()
+        if hasattr(window, "openSettingsPage"):
+            if window.openSettingsPage("subtitle") is not False:  # type: ignore[attr-defined]
+                return
+        setting_interface = getattr(window, "settingInterface", None)
+        if setting_interface is not None and hasattr(window, "switchTo"):
+            if setting_interface.setCurrentPage("subtitle"):
+                window.switchTo(setting_interface)  # type: ignore[attr-defined]
+
+    def _open_voice_library(self):
+        window = self.window()
+        dubbing = getattr(window, "dubbingInterface", None)
+        if dubbing is not None and hasattr(window, "switchTo"):
+            window.switchTo(dubbing)  # type: ignore[attr-defined]
+
+    # --------------------------------------------------------- external API
+
+    def set_task(self, task: SynthesisTask):
+        """外部（流水线）注入任务：填充输入文件与待清理的任务目录。"""
+        self.task = task
+        self.subtitle_path = str(task.subtitle_path) if task.subtitle_path else None
+        self.video_path = str(task.video_path) if task.video_path else None
+        self._pipeline_task_dir = task.task_dir
+        self.state = PageState.IDLE
+        self._refresh()
+
+    def process(self):
+        """外部注入任务后直接开始（流水线模式）。"""
+        self._on_primary()
+
+    # ----------------------------------------------------------- drag&drop
 
     def dragEnterEvent(self, event):
-        """拖拽进入事件处理"""
-        event.accept() if event.mimeData().hasUrls() else event.ignore()
+        if event.mimeData().hasUrls():
+            self.dropZone.setDragActive(True)
+            event.accept()
+        else:
+            event.ignore()
 
-    def dropEvent(self, event: QDropEvent):
-        """拖拽放下事件处理"""
-        files = [u.toLocalFile() for u in event.mimeData().urls()]
-        for file_path in files:
-            if not os.path.isfile(file_path):
-                continue
+    def dragLeaveEvent(self, event):
+        self.dropZone.setDragActive(False)
+        super().dragLeaveEvent(event)
 
-            file_ext = os.path.splitext(file_path)[1][1:].lower()
+    def dropEvent(self, event):
+        self.dropZone.setDragActive(False)
+        if self.controller.is_running():
+            return
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if os.path.isfile(path):
+                self._dispatch_file(path)
 
-            # 检查文件格式是否支持
-            if file_ext in {fmt.value for fmt in SupportedSubtitleFormats}:
-                self.subtitle_input.setText(file_path)
-                InfoBar.success(
-                    self.tr("导入成功"),
-                    self.tr("字幕文件已放入输入框"),
-                    duration=INFOBAR_DURATION_SUCCESS,
-                    parent=self,
-                )
-                break
-            elif file_ext in {fmt.value for fmt in SupportedVideoFormats}:
-                self.video_input.setText(file_path)
-                InfoBar.success(
-                    self.tr("导入成功"),
-                    self.tr("视频文件已输入框"),
-                    duration=INFOBAR_DURATION_SUCCESS,
-                    parent=self,
-                )
-                break
-            else:
-                InfoBar.error(
-                    self.tr("格式错误") + file_ext,
-                    self.tr("请拖入视频或者字幕文件"),
-                    duration=INFOBAR_DURATION_ERROR,
-                    parent=self,
-                )
-
-
-if __name__ == "__main__":
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)  # type: ignore
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)  # type: ignore
-
-    app = QApplication(sys.argv)
-    window = VideoSynthesisInterface()
-    window.resize(600, 400)  # 设置窗口大小
-    window.show()
-    sys.exit(app.exec_())
+    def closeEvent(self, event):
+        self._disconnect_config_signals()
+        self.controller.shutdown()
+        if self._info_thread is not None:
+            self._info_thread.stop()
+        super().closeEvent(event)

@@ -12,7 +12,6 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     LineEdit,
-    MessageBoxBase,
     ScrollArea,
 )
 from qfluentwidgets import FluentIcon as FIF
@@ -24,8 +23,10 @@ from videocaptioner.core.subtitle import get_builtin_fonts, render_ass_preview, 
 from videocaptioner.core.subtitle.style_manager import StyleMode
 from videocaptioner.core.subtitle.styles import RoundedBgStyle
 from videocaptioner.core.utils.platform_utils import open_folder
+from videocaptioner.ui.common.app_icons import AppIcon
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.theme_tokens import app_palette
+from videocaptioner.ui.components.app_dialog import AppDialog
 from videocaptioner.ui.components.form_cards import FormGroup, PushFormCard
 from videocaptioner.ui.components.subtitle_style_controls import (
     SubtitleStyleColorRow,
@@ -114,14 +115,21 @@ class RoundedBgPreviewThread(QThread):
         self.bg_image_path = bg_image_path
 
     def run(self):
-        preview_path = render_preview(
-            primary_text=self.primary_text,
-            secondary_text=self.secondary_text,
-            width=self.width,
-            height=self.height,
-            style=self.style,
-            bg_image_path=self.bg_image_path,
-        )
+        # 同 AssPreviewThread：渲染异常不得 qFatal，失败打日志、不 emit。
+        try:
+            preview_path = render_preview(
+                primary_text=self.primary_text,
+                secondary_text=self.secondary_text,
+                width=self.width,
+                height=self.height,
+                style=self.style,
+                bg_image_path=self.bg_image_path,
+            )
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            return
         self.previewReady.emit(preview_path)
 
 
@@ -130,6 +138,8 @@ class SubtitleStyleInterface(QWidget):
         super().__init__(parent=parent)
         self.setObjectName("SubtitleStyleInterface")
         self.setWindowTitle(self.tr("字幕样式配置"))
+        # 普通 QWidget 需要该属性才会绘制 QSS 背景色
+        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
         self.setAcceptDrops(True)  # 启用拖放功能
         self.preview_thread: QThread | None = None
         self._preview_threads: list[QThread] = []
@@ -166,6 +176,9 @@ class SubtitleStyleInterface(QWidget):
         self.settingsLayout.setSpacing(18)
         self.settingsScrollArea.setWidget(self.settingsWidget)
         self.settingsScrollArea.setWidgetResizable(True)
+        # qfluent ScrollArea 自带不透明底色，会在页面上压出一块黑色矩形；
+        # 透明化后与页面统一用窗口背景色。
+        self.settingsScrollArea.enableTransparentBackground()
 
         # 创建设置组 - 通用
         self.layoutGroup = FormGroup(self.tr("字幕排布"), self.settingsWidget)
@@ -486,7 +499,7 @@ class SubtitleStyleInterface(QWidget):
 
     def _initLayout(self):
         """初始化布局"""
-        self.hBoxLayout.setContentsMargins(28, 28, 28, 28)
+        self.hBoxLayout.setContentsMargins(26, 20, 26, 22)
         self.hBoxLayout.setSpacing(24)
         # 通用设置
         self.layoutGroup.addCard(self.renderModeCard)
@@ -550,7 +563,7 @@ class SubtitleStyleInterface(QWidget):
             }}
             QScrollArea {{
                 border: none;
-                background-color: {palette.bg};
+                background-color: transparent;
             }}
             QWidget#subtitleStylePreviewCard, #subtitleStylePreviewCard {{
                 background-color: {palette.panel};
@@ -1333,28 +1346,22 @@ class SubtitleStyleInterface(QWidget):
                 break  # 只处理第一个图片文件
 
 
-class StyleNameDialog(MessageBoxBase):
+class StyleNameDialog(AppDialog):
     """样式名称输入对话框"""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.titleLabel = BodyLabel(self.tr("新建样式"), self)
-        self.nameLineEdit = LineEdit(self)
-
+        super().__init__("新建样式", icon=AppIcon.ADD, parent=parent, width=380)
+        self.nameLineEdit = LineEdit(self.widget)
         self.nameLineEdit.setPlaceholderText(self.tr("输入样式名称"))
         self.nameLineEdit.setClearButtonEnabled(True)
+        self.bodyLayout.addWidget(self.nameLineEdit)
 
-        # 添加控件到布局
-        self.viewLayout.addWidget(self.titleLabel)
-        self.viewLayout.addWidget(self.nameLineEdit)
-
-        # 设置按钮文本
-        self.yesButton.setText(self.tr("确定"))
-        self.cancelButton.setText(self.tr("取消"))
-
-        self.widget.setMinimumWidth(350)
-        self.yesButton.setDisabled(True)
-        self.nameLineEdit.textChanged.connect(self._validateInput)
-
-    def _validateInput(self, text):
-        self.yesButton.setEnabled(bool(text.strip()))
+        self.addFooterStretch()
+        self.cancelButton = self.addFooterButton(self.tr("取消"))
+        self.cancelButton.clicked.connect(lambda: self.done(0))
+        self.confirmButton = self.addFooterButton(self.tr("确定"), kind="accent")
+        self.confirmButton.clicked.connect(lambda: self.done(1))
+        self.confirmButton.setEnabled(False)
+        self.nameLineEdit.textChanged.connect(
+            lambda text: self.confirmButton.setEnabled(bool(text.strip()))
+        )

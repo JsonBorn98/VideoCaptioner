@@ -125,31 +125,12 @@ def get_provider_option(provider: str) -> DubbingProviderOption:
     return DUBBING_PROVIDERS[0]
 
 
-def get_provider_titles() -> list[str]:
-    return [option.title for option in DUBBING_PROVIDERS]
-
-
-def get_provider_key_by_title(title: str) -> str:
-    for option in DUBBING_PROVIDERS:
-        if option.title == title or option.key == title:
-            return option.key
-    return DUBBING_PROVIDERS[0].key
-
-
 def is_provider_default_base(value: str) -> bool:
     return value in {"", *(option.default_base for option in DUBBING_PROVIDERS)}
 
 
 def get_provider_voices(provider: str) -> tuple[DubbingVoiceOption, ...]:
     return DUBBING_VOICES.get(provider, DUBBING_VOICES["edge"])
-
-
-def get_voice_title(preset: str) -> str:
-    for voices in DUBBING_VOICES.values():
-        for voice in voices:
-            if voice.preset == preset:
-                return voice.title
-    return preset
 
 
 def _translation_catalog() -> tuple[str, ...]:

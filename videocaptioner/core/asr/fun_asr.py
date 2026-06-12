@@ -15,7 +15,6 @@ from typing import Any, Literal, Optional, TypedDict, cast
 
 import requests
 
-from videocaptioner.config import ASSETS_PATH
 from videocaptioner.core.utils.logger import setup_logger
 
 from .asr_data import ASRDataSeg
@@ -25,7 +24,6 @@ logger = setup_logger("fun_asr")
 
 DEFAULT_FUN_ASR_API_BASE = "https://dashscope.aliyuncs.com"
 DEFAULT_FUN_ASR_MODEL = "fun-asr"
-TEST_AUDIO_PATH = ASSETS_PATH / "en.mp3"
 SUPPORTED_LANGUAGE_HINTS = {
     "zh",
     "en",
@@ -396,25 +394,3 @@ class BailianFunASR(BaseASR):
                 segments.append(ASRDataSeg(text=text, start_time=start, end_time=end))
         return segments
 
-
-def check_fun_asr_connection(
-    api_base: str, api_key: str, model: str = DEFAULT_FUN_ASR_MODEL
-) -> tuple[Literal[True], str] | tuple[Literal[False], str]:
-    """Run a lightweight Bailian ASR connectivity check.
-
-    The check only requests an upload policy, so it verifies auth/model access
-    without charging an ASR transcription task.
-    """
-    try:
-        checker = BailianFunASR(
-            str(TEST_AUDIO_PATH),
-            api_key=api_key,
-            api_base=api_base,
-            model=model,
-            use_cache=False,
-        )
-        policy = checker._get_upload_policy()
-        max_size = policy.get("max_file_size_mb", "?")
-        return True, f"可连接，临时上传上限 {max_size} MB"
-    except Exception as exc:
-        return False, str(exc)

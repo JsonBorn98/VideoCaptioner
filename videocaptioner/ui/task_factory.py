@@ -1,13 +1,7 @@
 from typing import Optional
 
 from videocaptioner.core.application import TaskBuilder
-from videocaptioner.core.entities import (
-    DubbingUIConfig,
-    FullProcessTask,
-    SubtitleConfig,
-    SynthesisConfig,
-    TranscribeConfig,
-)
+from videocaptioner.core.entities import DubbingUIConfig
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.config_adapter import app_config_from_ui
 
@@ -32,15 +26,22 @@ class TaskFactory:
         return TaskFactory._builder().get_rounded_style()
 
     @staticmethod
+    def new_task_dir(source: str) -> str:
+        """流水线开始时创建一次任务目录，跨阶段复用，由流程所有者清理。"""
+        return TaskFactory._builder().new_task_dir(source)
+
+    @staticmethod
     def create_transcribe_task(
         file_path: str,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
     ):
         return TaskFactory._builder().create_transcribe_task(
             file_path,
             need_next_task=need_next_task,
             task_id=task_id,
+            task_dir=task_dir,
         )
 
     @staticmethod
@@ -49,12 +50,14 @@ class TaskFactory:
         video_path: Optional[str] = None,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
     ):
         return TaskFactory._builder().create_subtitle_task(
             file_path,
             video_path=video_path,
             need_next_task=need_next_task,
             task_id=task_id,
+            task_dir=task_dir,
         )
 
     @staticmethod
@@ -63,12 +66,16 @@ class TaskFactory:
         subtitle_path: str,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
+        dubbed: bool = False,
     ):
         return TaskFactory._builder().create_synthesis_task(
             video_path,
             subtitle_path,
             need_next_task=need_next_task,
             task_id=task_id,
+            task_dir=task_dir,
+            dubbed=dubbed,
         )
 
     @staticmethod
@@ -78,6 +85,7 @@ class TaskFactory:
         output_video_path: Optional[str] = None,
         output_audio_path: Optional[str] = None,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
     ):
         return TaskFactory._builder().create_dubbing_task(
             video_path,
@@ -85,33 +93,9 @@ class TaskFactory:
             output_video_path=output_video_path,
             output_audio_path=output_audio_path,
             task_id=task_id,
+            task_dir=task_dir,
         )
 
     @staticmethod
     def create_dubbing_ui_config() -> DubbingUIConfig:
         return TaskFactory._builder().create_dubbing_ui_config()
-
-    @staticmethod
-    def create_transcript_and_subtitle_task(file_path: str, output_path: Optional[str] = None):
-        return TaskFactory._builder().create_transcript_and_subtitle_task(
-            file_path,
-            output_path=output_path,
-        )
-
-    @staticmethod
-    def create_full_process_task(
-        file_path: str,
-        output_path: Optional[str] = None,
-        transcribe_config: Optional[TranscribeConfig] = None,
-        subtitle_config: Optional[SubtitleConfig] = None,
-        synthesis_config: Optional[SynthesisConfig] = None,
-        dubbing_config: Optional[DubbingUIConfig] = None,
-    ) -> FullProcessTask:
-        return TaskFactory._builder().create_full_process_task(
-            file_path,
-            output_path=output_path,
-            transcribe_config=transcribe_config,
-            subtitle_config=subtitle_config,
-            synthesis_config=synthesis_config,
-            dubbing_config=dubbing_config,
-        )

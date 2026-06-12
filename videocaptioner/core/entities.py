@@ -467,94 +467,6 @@ LANGUAGES = {
 
 
 @dataclass
-class ASRLanguageCapability:
-    """ASR语言支持能力"""
-
-    supported_languages: list[TranscribeLanguageEnum]
-    supports_auto: bool
-
-
-def _get_all_languages_except_auto() -> list[TranscribeLanguageEnum]:
-    """获取除 AUTO 外的All语言"""
-    return [lang for lang in TranscribeLanguageEnum if lang != TranscribeLanguageEnum.AUTO]
-
-
-ASR_LANGUAGE_CAPABILITIES: dict[TranscribeModelEnum, ASRLanguageCapability] = {
-    TranscribeModelEnum.BIJIAN: ASRLanguageCapability(
-        supported_languages=[
-            TranscribeLanguageEnum.CHINESE,
-            TranscribeLanguageEnum.ENGLISH,
-        ],
-        supports_auto=True,
-    ),
-    TranscribeModelEnum.JIANYING: ASRLanguageCapability(
-        supported_languages=[
-            TranscribeLanguageEnum.CHINESE,
-            TranscribeLanguageEnum.ENGLISH,
-        ],
-        supports_auto=True,
-    ),
-    TranscribeModelEnum.FASTER_WHISPER: ASRLanguageCapability(
-        supported_languages=_get_all_languages_except_auto(),
-        supports_auto=False,
-    ),
-    TranscribeModelEnum.WHISPER_CPP: ASRLanguageCapability(
-        supported_languages=_get_all_languages_except_auto(),
-        supports_auto=True,
-    ),
-    TranscribeModelEnum.WHISPER_API: ASRLanguageCapability(
-        supported_languages=_get_all_languages_except_auto(),
-        supports_auto=True,
-    ),
-    TranscribeModelEnum.BAILIAN_FUN_ASR: ASRLanguageCapability(
-        supported_languages=[
-            TranscribeLanguageEnum.CHINESE,
-            TranscribeLanguageEnum.ENGLISH,
-            TranscribeLanguageEnum.JAPANESE,
-            TranscribeLanguageEnum.KOREAN,
-            TranscribeLanguageEnum.VIETNAMESE,
-            TranscribeLanguageEnum.THAI,
-            TranscribeLanguageEnum.INDONESIAN,
-            TranscribeLanguageEnum.MALAY,
-            TranscribeLanguageEnum.HINDI,
-            TranscribeLanguageEnum.ARABIC,
-            TranscribeLanguageEnum.FRENCH,
-            TranscribeLanguageEnum.GERMAN,
-            TranscribeLanguageEnum.SPANISH,
-            TranscribeLanguageEnum.PORTUGUESE,
-            TranscribeLanguageEnum.RUSSIAN,
-            TranscribeLanguageEnum.ITALIAN,
-            TranscribeLanguageEnum.DUTCH,
-            TranscribeLanguageEnum.SWEDISH,
-            TranscribeLanguageEnum.DANISH,
-            TranscribeLanguageEnum.FINNISH,
-            TranscribeLanguageEnum.NORWEGIAN,
-            TranscribeLanguageEnum.GREEK,
-            TranscribeLanguageEnum.POLISH,
-            TranscribeLanguageEnum.CZECH,
-            TranscribeLanguageEnum.HUNGARIAN,
-            TranscribeLanguageEnum.ROMANIAN,
-            TranscribeLanguageEnum.BULGARIAN,
-            TranscribeLanguageEnum.CROATIAN,
-            TranscribeLanguageEnum.SLOVAK,
-        ],
-        supports_auto=True,
-    ),
-}
-
-
-def get_asr_language_capability(model: TranscribeModelEnum) -> ASRLanguageCapability:
-    """获取指定模型的语言能力"""
-    return ASR_LANGUAGE_CAPABILITIES.get(
-        model,
-        ASRLanguageCapability(
-            supported_languages=_get_all_languages_except_auto(),
-            supports_auto=True,
-        ),
-    )
-
-
-@dataclass
 class AudioStreamInfo:
     """音频流信息"""
 
@@ -837,6 +749,9 @@ class TranscribeTask:
     # 选中的音轨索引
     selected_audio_track_index: int = 0
 
+    # 流水线共享的任务工作目录（中间产物落盘处，成功后由流程所有者清理）
+    task_dir: Optional[str] = None
+
     transcribe_config: Optional[TranscribeConfig] = None
 
 
@@ -862,6 +777,9 @@ class SubtitleTask:
     # 是否需要执行下一个任务（视频合成）
     need_next_task: bool = True
 
+    # 流水线共享的任务工作目录（布局副本等中间产物落盘处）
+    task_dir: Optional[str] = None
+
     subtitle_config: Optional[SubtitleConfig] = None
 
 
@@ -886,6 +804,9 @@ class SynthesisTask:
     # 是否需要执行下一个任务（预留）
     need_next_task: bool = False
 
+    # 流水线共享的任务工作目录（链尾阶段负责按 keep_intermediates 清理）
+    task_dir: Optional[str] = None
+
     synthesis_config: Optional[SynthesisConfig] = None
 
 
@@ -904,71 +825,7 @@ class DubbingTask:
     output_audio_path: Optional[str] = None
     output_video_path: Optional[str] = None
 
+    # 配音中间产物（分段/报告）所在的任务工作目录
+    task_dir: Optional[str] = None
+
     dubbing_config: Optional[DubbingUIConfig] = None
-
-
-@dataclass
-class TranscriptAndSubtitleTask:
-    """转录和字幕任务类"""
-
-    # 任务标识
-    task_id: str = field(default_factory=_generate_task_id)
-
-    queued_at: Optional[datetime.datetime] = None
-    started_at: Optional[datetime.datetime] = None
-    completed_at: Optional[datetime.datetime] = None
-
-    # 输入
-    file_path: Optional[str] = None
-
-    # 输出
-    output_path: Optional[str] = None
-
-    transcribe_config: Optional[TranscribeConfig] = None
-    subtitle_config: Optional[SubtitleConfig] = None
-
-
-@dataclass
-class FullProcessTask:
-    """完整处理任务类(转录+字幕+合成)"""
-
-    # 任务标识
-    task_id: str = field(default_factory=_generate_task_id)
-
-    queued_at: Optional[datetime.datetime] = None
-    started_at: Optional[datetime.datetime] = None
-    completed_at: Optional[datetime.datetime] = None
-
-    # 输入
-    file_path: Optional[str] = None
-    # 输出
-    output_path: Optional[str] = None
-
-    transcribe_config: Optional[TranscribeConfig] = None
-    subtitle_config: Optional[SubtitleConfig] = None
-    synthesis_config: Optional[SynthesisConfig] = None
-    dubbing_config: Optional[DubbingUIConfig] = None
-
-
-class BatchTaskType(Enum):
-    """批量处理任务类型"""
-
-    TRANSCRIBE = "批量转录"
-    SUBTITLE = "批量字幕"
-    TRANS_SUB = "转录+字幕"
-    FULL_PROCESS = "全流程处理"
-
-    def __str__(self):
-        return self.value
-
-
-class BatchTaskStatus(Enum):
-    """批量处理任务状态"""
-
-    WAITING = "等待中"
-    RUNNING = "处理中"
-    COMPLETED = "已完成"
-    FAILED = "失败"
-
-    def __str__(self):
-        return self.value

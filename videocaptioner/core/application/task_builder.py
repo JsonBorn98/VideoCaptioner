@@ -1,4 +1,8 @@
-"""Build executable task dataclasses from canonical application config."""
+"""Build executable task dataclasses from canonical application config.
+
+输出命名与任务目录规则统一在 output_paths 模块，这里只负责把规则
+应用到各任务：成品落源文件旁（unique 防覆盖），中间产物进任务目录。
+"""
 
 from __future__ import annotations
 
@@ -6,18 +10,18 @@ import datetime
 from pathlib import Path
 from typing import Optional
 
+from videocaptioner.config import WORK_PATH
+from videocaptioner.core.application import output_paths
 from videocaptioner.core.application.app_config import AppConfig
 from videocaptioner.core.entities import (
     DubbingTask,
     DubbingUIConfig,
-    FullProcessTask,
     SubtitleConfig,
     SubtitleTask,
     SynthesisConfig,
     SynthesisTask,
     TranscribeConfig,
     TranscribeTask,
-    TranscriptAndSubtitleTask,
 )
 from videocaptioner.core.subtitle.style_manager import load_style
 
@@ -27,6 +31,10 @@ class TaskBuilder:
 
     def __init__(self, app_config: AppConfig):
         self.config = app_config
+
+    def new_task_dir(self, source: str) -> str:
+        """为一次流水线运行创建任务目录（流程所有者负责跨阶段传递与清理）。"""
+        return str(output_paths.new_task_dir(self.config.work_dir or WORK_PATH, source))
 
     def get_ass_style(self, style_name: Optional[str] = None) -> str:
         style = load_style(style_name or self.config.subtitle.style_name)
@@ -67,27 +75,23 @@ class TaskBuilder:
         file_path: str,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
     ) -> TranscribeTask:
-        file_name = Path(file_path).stem
         need_word_timestamp = self.config.subtitle.need_split if need_next_task else False
         if need_next_task:
-            output_path = str(
-                Path(self.config.work_dir)
-                / file_name
-                / "subtitle"
-                / (
-                    f"【原始字幕】{file_name}-"
-                    f"{self.config.transcribe.model.value}-"
-                    f"{self.config.transcribe.language_label}.srt"
-                )
-            )
+            # 流水线中间产物：原始转录进任务目录，路径即语义。
+            task_dir = task_dir or self.new_task_dir(file_path)
+            output_path = str(Path(task_dir) / output_paths.TRANSCRIPT_FILE)
         else:
-            output_path = str(Path(file_path).parent / f"{file_name}.srt")
+            output_path = str(
+                output_paths.unique_path(output_paths.product_path(file_path, ext=".srt"))
+            )
 
         task = TranscribeTask(
             queued_at=datetime.datetime.now(),
             file_path=file_path,
             output_path=output_path,
+            task_dir=task_dir,
             transcribe_config=self.create_transcribe_config(
                 need_word_timestamp=need_word_timestamp
             ),
@@ -120,33 +124,39 @@ class TaskBuilder:
             custom_prompt_text=settings.custom_prompt_text,
         )
 
+    def subtitle_product_tag(self) -> str:
+        """字幕成品 tag：翻译输出目标语言码，否则 optimized。"""
+        if self.config.subtitle.need_translate:
+            return output_paths.language_tag(self.config.subtitle.target_language)
+        return output_paths.TAG_OPTIMIZED
+
     def create_subtitle_task(
         self,
         file_path: str,
         video_path: Optional[str] = None,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
     ) -> SubtitleTask:
-        output_name = Path(file_path).stem.replace("【原始字幕】", "").replace("【下载字幕】", "")
-        suffix = (
-            f"-{self.config.subtitle.translator_service.value}"
-            if self.config.subtitle.need_translate
-            else ""
-        )
-        output_path = str(
-            Path(file_path).parent
-            / (
-                f"【样式字幕】{output_name}{suffix}.ass"
-                if need_next_task
-                else f"【字幕】{output_name}{suffix}.srt"
+        if need_next_task:
+            # 流水线中间产物：样式字幕进任务目录，供后续合成消费。
+            task_dir = task_dir or self.new_task_dir(video_path or file_path)
+            output_path = str(Path(task_dir) / output_paths.STYLED_SUBTITLE_FILE)
+        else:
+            # 成品锚定到媒体文件（有视频时），否则锚定到输入字幕。
+            anchor = video_path or file_path
+            output_path = str(
+                output_paths.unique_path(
+                    output_paths.product_path(anchor, self.subtitle_product_tag(), ext=".srt")
+                )
             )
-        )
 
         task = SubtitleTask(
             queued_at=datetime.datetime.now(),
             subtitle_path=file_path,
             video_path=video_path,
             output_path=output_path,
+            task_dir=task_dir,
             subtitle_config=self.create_subtitle_config(),
             need_next_task=need_next_task,
         )
@@ -174,13 +184,23 @@ class TaskBuilder:
         subtitle_path: str,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
+        dubbed: bool = False,
     ) -> SynthesisTask:
-        output_path = str(Path(video_path).parent / f"【卡卡】{Path(video_path).stem}.mp4")
+        tags = (
+            (output_paths.TAG_DUBBED, output_paths.TAG_SUBTITLED)
+            if dubbed
+            else (output_paths.TAG_SUBTITLED,)
+        )
+        output_path = str(
+            output_paths.unique_path(output_paths.product_path(video_path, *tags, ext=".mp4"))
+        )
         task = SynthesisTask(
             queued_at=datetime.datetime.now(),
             video_path=video_path,
             subtitle_path=subtitle_path,
             output_path=output_path,
+            task_dir=task_dir,
             synthesis_config=self.create_synthesis_config(),
             need_next_task=need_next_task,
         )
@@ -214,14 +234,23 @@ class TaskBuilder:
         output_video_path: Optional[str] = None,
         output_audio_path: Optional[str] = None,
         task_id: Optional[str] = None,
+        task_dir: Optional[str] = None,
     ) -> DubbingTask:
-        video = Path(video_path) if video_path else None
-        subtitle = Path(subtitle_path)
-        if output_video_path is None and video:
-            output_video_path = str(video.parent / f"【配音】{video.stem}{video.suffix}")
+        anchor = video_path or subtitle_path
+        task_dir = task_dir or self.new_task_dir(anchor)
+        if output_video_path is None and video_path:
+            output_video_path = str(
+                output_paths.unique_path(
+                    output_paths.product_path(video_path, output_paths.TAG_DUBBED)
+                )
+            )
         if output_audio_path is None:
-            base_dir = video.parent if video else subtitle.parent
-            output_audio_path = str(base_dir / f"【配音音频】{subtitle.stem}.wav")
+            # 配音音频与配音视频共用 dubbed tag，扩展名区分容器。
+            output_audio_path = str(
+                output_paths.unique_path(
+                    output_paths.product_path(anchor, output_paths.TAG_DUBBED, ext=".wav")
+                )
+            )
 
         task = DubbingTask(
             queued_at=datetime.datetime.now(),
@@ -229,55 +258,9 @@ class TaskBuilder:
             subtitle_path=subtitle_path,
             output_audio_path=output_audio_path,
             output_video_path=output_video_path,
+            task_dir=task_dir,
             dubbing_config=self.create_dubbing_ui_config(),
         )
         if task_id:
             task.task_id = task_id
         return task
-
-    def create_transcript_and_subtitle_task(
-        self,
-        file_path: str,
-        output_path: Optional[str] = None,
-    ) -> TranscriptAndSubtitleTask:
-        if output_path is None:
-            output_path = str(Path(file_path).parent / f"{Path(file_path).stem}_processed.srt")
-        return TranscriptAndSubtitleTask(
-            queued_at=datetime.datetime.now(),
-            file_path=file_path,
-            output_path=output_path,
-        )
-
-    def create_full_process_task(
-        self,
-        file_path: str,
-        output_path: Optional[str] = None,
-        transcribe_config: Optional[TranscribeConfig] = None,
-        subtitle_config: Optional[SubtitleConfig] = None,
-        synthesis_config: Optional[SynthesisConfig] = None,
-        dubbing_config: Optional[DubbingUIConfig] = None,
-    ) -> FullProcessTask:
-        if output_path is None:
-            output_path = str(
-                Path(file_path).parent / f"{Path(file_path).stem}_final{Path(file_path).suffix}"
-            )
-
-        return FullProcessTask(
-            queued_at=datetime.datetime.now(),
-            file_path=file_path,
-            output_path=output_path,
-            transcribe_config=transcribe_config
-            or self.create_transcribe_task(file_path, need_next_task=True).transcribe_config,
-            subtitle_config=subtitle_config
-            or self.create_subtitle_task(
-                str(Path(file_path).with_suffix(".srt")),
-                file_path,
-                need_next_task=True,
-            ).subtitle_config,
-            synthesis_config=synthesis_config
-            or self.create_synthesis_task(
-                file_path,
-                str(Path(file_path).with_suffix(".ass")),
-            ).synthesis_config,
-            dubbing_config=dubbing_config or self.create_dubbing_ui_config(),
-        )

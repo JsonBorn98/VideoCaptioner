@@ -425,6 +425,38 @@ class TestFileIOEdgeCases:
         with pytest.raises(FileNotFoundError):
             ASRData.from_subtitle_file("/nonexistent/path/file.srt")
 
+    def test_save_vtt_and_round_trip(self):
+        """回归：save() 曾漏接 .vtt 分支，输出格式选 VTT/All 时整个转录被误判失败"""
+        segments = [ASRDataSeg("今天天气", 200, 1440), ASRDataSeg("怎么样", 1500, 2280)]
+        asr_data = ASRData(segments)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vtt_path = Path(tmpdir) / "result.vtt"
+            asr_data.save(str(vtt_path))
+            content = vtt_path.read_text(encoding="utf-8")
+            assert content.startswith("WEBVTT")
+            assert "00:00:00.200 --> 00:00:01.440" in content
+            loaded = ASRData.from_subtitle_file(str(vtt_path))
+            assert [seg.text for seg in loaded.segments] == ["今天天气", "怎么样"]
+            assert loaded.segments[0].start_time == 200
+
+    def test_save_supports_every_transcribe_output_format(self):
+        """转录输出格式枚举里的每种格式（含 All 展开）都必须能落盘"""
+        from videocaptioner.core.entities import TranscribeOutputFormatEnum
+
+        segments = [ASRDataSeg("Test", 0, 1000)]
+        asr_data = ASRData(segments)
+        formats = [
+            fmt.value.lower()
+            for fmt in TranscribeOutputFormatEnum
+            if fmt != TranscribeOutputFormatEnum.ALL
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for ext in formats:
+                target = Path(tmpdir) / f"result.{ext}"
+                asr_data.save(str(target))
+                assert target.exists() and target.stat().st_size > 0, ext
+
     def test_save_load_unicode_path(self):
         """测试Unicode文件路径"""
         segments = [ASRDataSeg("测试", 0, 1000)]

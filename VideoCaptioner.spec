@@ -43,7 +43,6 @@ hiddenimports = [
     "edge_tts",
     "diskcache",
     "yt_dlp",
-    "modelscope",
     "psutil",
     "json_repair",
     "langdetect",
@@ -99,7 +98,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    # 桌面 GUI 包：Windows 双击不弹控制台。命令行用户走 pip 安装的 CLI。
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

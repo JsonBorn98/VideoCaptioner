@@ -1,87 +1,74 @@
-import os
+"""捐助弹窗：说明 + 微信/支付宝二维码，基于 AppDialog 壳。"""
+
+from __future__ import annotations
+
+from pathlib import Path
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout
-from qfluentwidgets import BodyLabel, MessageBoxBase
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
 
 from videocaptioner.config import ASSETS_PATH
+from videocaptioner.ui.common.app_icons import AppIcon
+from videocaptioner.ui.common.theme_tokens import app_palette
+from videocaptioner.ui.components.app_dialog import AppDialog
+from videocaptioner.ui.components.workbench import apply_font, draw_rounded_surface
 
 
-class DonateDialog(MessageBoxBase):
-    def __init__(self, parent=None):
+class _QrCard(QFrame):
+    """二维码卡：圆角面板包住二维码与渠道名。"""
+
+    def __init__(self, image_path: Path, caption: str, parent=None):
         super().__init__(parent)
-        # 定义二维码路径
-        self.WECHAT_QR_PATH = os.path.join(ASSETS_PATH, "donate_green.jpg")
-        self.ALIPAY_QR_PATH = os.path.join(ASSETS_PATH, "donate_blue.jpg")
-
-        self.setup_ui()
-        self.setWindowTitle(self.tr("支持作者"))
-
-    def setup_ui(self):
-        # 创建标题标签
-        self.titleLabel = BodyLabel(self.tr("感谢支持"), self)
-
-        # 创建说明文本
-        self.descLabel = BodyLabel(
-            self.tr(
-                "目前本人精力有限，您的支持让我有动力继续折腾这个项目！\n感谢您对开源事业的热爱与支持！"
-            ),
-            self,
-        )
-        self.descLabel.setAlignment(Qt.AlignCenter)  # type: ignore
-
-        # 创建水平布局放置两个二维码
-        self.qrLayout = QHBoxLayout()
-
-        # 创建支付宝二维码标签
-        self.alipayContainer = QVBoxLayout()
-        self.alipayQR = QLabel()
-        self.alipayQR.setPixmap(
-            QPixmap(self.ALIPAY_QR_PATH).scaled(
-                300,
-                300,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.SmoothTransformation,  # type: ignore
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+        qr = QLabel(self)
+        qr.setPixmap(
+            QPixmap(str(image_path)).scaled(
+                228,
+                228,
+                Qt.KeepAspectRatio,  # type: ignore[arg-type]
+                Qt.SmoothTransformation,  # type: ignore[arg-type]
             )
         )
-        self.alipayLabel = BodyLabel(self.tr("支付宝"))
-        self.alipayLabel.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.alipayContainer.addWidget(self.alipayQR, alignment=Qt.AlignCenter)  # type: ignore
-        self.alipayContainer.addWidget(self.alipayLabel)
+        qr.setAlignment(Qt.AlignCenter)  # type: ignore[arg-type]
+        qr.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(qr)
+        self.captionLabel = QLabel(caption, self)
+        self.captionLabel.setAlignment(Qt.AlignCenter)  # type: ignore[arg-type]
+        apply_font(self.captionLabel, 13, 750)
+        layout.addWidget(self.captionLabel)
+        self.syncStyle()
 
-        # 创建微信二维码标签
-        self.wechatContainer = QVBoxLayout()
-        self.wechatQR = QLabel()
-        self.wechatQR.setPixmap(
-            QPixmap(self.WECHAT_QR_PATH).scaled(
-                300,
-                300,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.SmoothTransformation,  # type: ignore
-            )
+    def paintEvent(self, event):
+        palette = app_palette()
+        draw_rounded_surface(self, palette.field, palette.line_soft, 12)
+        super().paintEvent(event)
+
+    def syncStyle(self):
+        self.captionLabel.setStyleSheet(
+            f"color: {app_palette().muted}; background: transparent; border: none;"
         )
-        self.wechatLabel = BodyLabel(self.tr("微信"))
-        self.wechatLabel.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.wechatContainer.addWidget(self.wechatQR, alignment=Qt.AlignCenter)  # type: ignore
-        self.wechatContainer.addWidget(self.wechatLabel)
 
-        # 将二维码添加到水平布局
-        self.qrLayout.addLayout(self.alipayContainer)
-        self.qrLayout.addLayout(self.wechatContainer)
 
-        self.viewLayout.setSpacing(30)
-        # 添加到主布局
-        self.viewLayout.addWidget(self.titleLabel)
-        self.viewLayout.addWidget(self.descLabel)
-        # 添加垂直间距
-        self.viewLayout.addLayout(self.qrLayout)
+class DonateDialog(AppDialog):
+    """支持作者：感谢语 + 两个收款二维码。"""
 
-        # 设置对话框最小宽度
-        self.widget.setMinimumWidth(800)
-        # 设置对话框最小高度
-        self.widget.setMinimumHeight(500)
+    def __init__(self, parent=None):
+        super().__init__("支持作者", icon=AppIcon.HEART, parent=parent, width=620)
+        desc = self.addBodyText(
+            "目前本人精力有限，您的支持让我有动力继续折腾这个项目！\n"
+            "感谢您对开源事业的热爱与支持！"
+        )
+        desc.setAlignment(Qt.AlignCenter)  # type: ignore[arg-type]
 
-        # 隐藏是按钮，只显示取消按钮
-        self.yesButton.hide()
-        self.cancelButton.setText(self.tr("关闭"))
+        qr_row = QHBoxLayout()
+        qr_row.setSpacing(13)
+        qr_row.addWidget(_QrCard(ASSETS_PATH / "donate_blue.jpg", "支付宝", self.widget))
+        qr_row.addWidget(_QrCard(ASSETS_PATH / "donate_green.jpg", "微信", self.widget))
+        self.bodyLayout.addLayout(qr_row)
+
+        self.addFooterStretch()
+        self.dismissButton = self.addFooterButton("关闭")
+        self.dismissButton.clicked.connect(lambda: self.done(0))

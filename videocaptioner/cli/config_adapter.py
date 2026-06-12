@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from videocaptioner.config import MODEL_PATH
 from videocaptioner.core.application.app_config import (
     AppConfig,
     DubbingSettings,
@@ -26,9 +27,9 @@ from videocaptioner.core.entities import FasterWhisperModelEnum, VadMethodEnum, 
 def app_config_from_cli(config: dict) -> AppConfig:
     asr = str(get(config, "transcribe.asr", "bijian"))
     language = str(get(config, "transcribe.language", "auto"))
-    vad_method = str(get(config, "transcribe.faster_whisper.vad_method", "silero_v4_fw"))
+    vad_method = str(get(config, "transcribe.faster_whisper.vad_method", "silero_v4"))
 
-    subtitle_mode = str(get(config, "synthesize.subtitle_mode", "soft"))
+    subtitle_mode = str(get(config, "synthesize.subtitle_mode", "hard"))
     llm_service = str(get(config, "llm.service", "openai"))
     llm_provider = get(config, f"llm.providers.{llm_service}", {}) or {}
     return AppConfig(
@@ -55,8 +56,8 @@ def app_config_from_cli(config: dict) -> AppConfig:
             ),
             whisper_model=enum_by_value(
                 WhisperModelEnum,
-                get(config, "transcribe.whisper_cpp.model", "large-v2"),
-                WhisperModelEnum.LARGE_V2,
+                get(config, "transcribe.whisper_cpp.model", "tiny"),
+                WhisperModelEnum.TINY,
             ),
             whisper_api_key=str(get(config, "whisper_api.api_key", "") or ""),
             whisper_api_base=str(get(config, "whisper_api.api_base", "") or ""),
@@ -69,11 +70,15 @@ def app_config_from_cli(config: dict) -> AppConfig:
             fun_asr_model=str(get(config, "fun_asr.model", "fun-asr") or ""),
             faster_whisper_model=enum_by_value(
                 FasterWhisperModelEnum,
-                get(config, "transcribe.faster_whisper.model", "large-v3"),
-                FasterWhisperModelEnum.LARGE_V3,
+                get(config, "transcribe.faster_whisper.model", "tiny"),
+                FasterWhisperModelEnum.TINY,
+            ),
+            faster_whisper_program=str(
+                get(config, "transcribe.faster_whisper.program", "faster-whisper-xxl.exe")
+                or "faster-whisper-xxl.exe"
             ),
             faster_whisper_model_dir=str(
-                get(config, "transcribe.faster_whisper.model_dir", "") or ""
+                get(config, "transcribe.faster_whisper.model_dir", "") or MODEL_PATH
             ),
             faster_whisper_device=str(
                 get(config, "transcribe.faster_whisper.device", "auto") or "auto"
@@ -82,31 +87,33 @@ def app_config_from_cli(config: dict) -> AppConfig:
                 get(config, "transcribe.faster_whisper.vad_filter", True)
             ),
             faster_whisper_vad_threshold=float(
-                get(config, "transcribe.faster_whisper.vad_threshold", 0.5)
+                get(config, "transcribe.faster_whisper.vad_threshold", 0.4)
             ),
             faster_whisper_vad_method=enum_by_value(
-                VadMethodEnum, vad_method, VadMethodEnum.SILERO_V4_FW
+                VadMethodEnum, vad_method, VadMethodEnum.SILERO_V4
             ),
             faster_whisper_ff_mdx_kim2=bool(
                 get(config, "transcribe.faster_whisper.voice_extraction", False)
             ),
-            faster_whisper_one_word=True,
+            faster_whisper_one_word=bool(
+                get(config, "transcribe.faster_whisper.one_word", True)
+            ),
             faster_whisper_prompt=str(get(config, "transcribe.faster_whisper.prompt", "") or ""),
         ),
         subtitle=SubtitleSettings(
             translator_service=translator_from_cli(get(config, "translate.service", "bing")),
             need_reflect=bool(get(config, "translate.reflect", False)),
             deeplx_endpoint=str(get(config, "translate.deeplx_endpoint", "") or ""),
-            thread_num=int(get(config, "subtitle.thread_num", 4)),
-            batch_size=int(get(config, "subtitle.batch_size", 20)),
-            need_optimize=bool(get(config, "subtitle.optimize", True)),
+            thread_num=int(get(config, "subtitle.thread_num", 10)),
+            batch_size=int(get(config, "subtitle.batch_size", 10)),
+            need_optimize=bool(get(config, "subtitle.optimize", False)),
             need_translate=bool(get(config, "subtitle.translate", False)),
-            need_split=bool(get(config, "subtitle.split", True)),
+            need_split=bool(get(config, "subtitle.split", False)),
             target_language=target_language_from_code(
                 get(config, "translate.target_language", "zh-Hans")
             ),
-            max_word_count_cjk=int(get(config, "subtitle.max_word_count_cjk", 18)),
-            max_word_count_english=int(get(config, "subtitle.max_word_count_english", 12)),
+            max_word_count_cjk=int(get(config, "subtitle.max_word_count_cjk", 28)),
+            max_word_count_english=int(get(config, "subtitle.max_word_count_english", 20)),
             custom_prompt_text=str(
                 get(config, "subtitle.custom_prompt", get(config, "subtitle.prompt", "")) or ""
             ),
@@ -117,10 +124,8 @@ def app_config_from_cli(config: dict) -> AppConfig:
             need_video=bool(get(config, "synthesize.need_video", True)),
             soft_subtitle=bool(get(config, "synthesize.soft_subtitle", subtitle_mode != "hard")),
             video_quality=quality_from_cli(get(config, "synthesize.quality", "medium")),
-            use_subtitle_style=bool(
-                get(config, "synthesize.use_subtitle_style", subtitle_mode == "hard")
-            ),
-            render_mode=render_mode_from_cli(get(config, "synthesize.render_mode", "ass")),
+            use_subtitle_style=bool(get(config, "synthesize.use_subtitle_style", False)),
+            render_mode=render_mode_from_cli(get(config, "synthesize.render_mode", "rounded")),
             rounded_style=RoundedSubtitleStyle(
                 font_name=str(get(config, "synthesize.rounded.font_name", "Noto Sans SC") or ""),
                 font_size=int(get(config, "synthesize.rounded.font_size", 52)),

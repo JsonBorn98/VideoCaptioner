@@ -5,9 +5,14 @@ import sys
 from pathlib import Path
 
 try:
+    # 取干净的发布号（"2.0.0.post1.dev0+g123" → "2.0.0"）。
+    # 版本唯一来源是 git tag（hatch-vcs 生成 _version.py），升版本打 tag 即可。
+    import re as _re
+
     from videocaptioner._version import __version__ as _raw_version
-    # Strip dev suffix (e.g. "1.5.0.dev103+g38544177c" → "1.5.0")
-    VERSION = _raw_version.split(".dev")[0]
+
+    _match = _re.match(r"\d+\.\d+\.\d+", _raw_version)
+    VERSION = _match.group(0) if _match else _raw_version
 except Exception:
     VERSION = "0.0.0-dev"
 YEAR = 2026

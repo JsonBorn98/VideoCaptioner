@@ -106,6 +106,11 @@ class ASRDataSeg:
 class ASRData:
     def __init__(self, segments: List[ASRDataSeg]):
         filtered_segments = [seg for seg in segments if seg.text and seg.text.strip()]
+        for seg in filtered_segments:
+            # 防御外部坏字幕：倒置的时间区间（end < start）按笔误交换，
+            # 否则会原样写回非法 SRT，下游播放器/渲染器行为未定义
+            if seg.end_time < seg.start_time:
+                seg.start_time, seg.end_time = seg.end_time, seg.start_time
         filtered_segments.sort(key=lambda x: x.start_time)
         self.segments = filtered_segments
 
@@ -242,6 +247,8 @@ class ASRData:
                 json.dump(self.to_json(), f, ensure_ascii=False, indent=2)
         elif save_path.endswith(".ass"):
             self.to_ass(save_path=save_path, style_str=ass_style, layout=layout)
+        elif save_path.endswith(".vtt"):
+            self.to_vtt(save_path=save_path, layout=layout)
         else:
             raise ValueError(f"Unsupported file extension: {save_path}")
 
@@ -411,34 +418,36 @@ class ASRData:
                 f.write(ass_content)
         return ass_content
 
-    def to_vtt(self, save_path=None) -> str:
-        """Convert to WebVTT subtitle format
+    def to_vtt(
+        self,
+        layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        save_path=None,
+    ) -> str:
+        """Convert to WebVTT subtitle format"""
+        vtt_lines = ["WEBVTT\n"]
+        for n, seg in enumerate(self.segments, 1):
+            original = seg.text
+            translated = seg.translated_text
 
-        Args:
-            save_path: Optional save path
+            if layout == SubtitleLayoutEnum.ORIGINAL_ON_TOP:
+                text = f"{original}\n{translated}" if translated else original
+            elif layout == SubtitleLayoutEnum.TRANSLATE_ON_TOP:
+                text = f"{translated}\n{original}" if translated else original
+            elif layout == SubtitleLayoutEnum.ONLY_ORIGINAL:
+                text = original
+            else:  # ONLY_TRANSLATE
+                text = translated if translated else original
 
-        Returns:
-            WebVTT format subtitle content
-        """
-        raise NotImplementedError("WebVTT format is not supported")
-        # # WebVTT头部
-        # vtt_lines = ["WEBVTT\n"]
+            # WebVTT 与 SRT 的时间戳仅毫秒分隔符不同（. 与 ,）
+            timestamp = seg.to_srt_ts().replace(",", ".")
+            vtt_lines.append(f"{n}\n{timestamp}\n{text}\n")
 
-        # for n, seg in enumerate(self.segments, 1):
-        #     # 转换时间戳格式从毫秒到 HH:MM:SS.mmm
-        #     start_time = seg._ms_to_srt_time(seg.start_time).replace(",", ".")
-        #     end_time = seg._ms_to_srt_time(seg.end_time).replace(",", ".")
-
-        #     # 添加序号（可选）和时间戳
-        #     vtt_lines.append(f"{n}\n{start_time} --> {end_time}\n{seg.transcript}\n")
-
-        # vtt_text = "\n".join(vtt_lines)
-
-        # if save_path:
-        #     with open(save_path, "w", encoding="utf-8") as f:
-        #         f.write(vtt_text)
-
-        # return vtt_text
+        vtt_text = "\n".join(vtt_lines)
+        if save_path:
+            save_path = handle_long_path(save_path)
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(vtt_text)
+        return vtt_text
 
     def merge_segments(
         self, start_index: int, end_index: int, merged_text: Optional[str] = None

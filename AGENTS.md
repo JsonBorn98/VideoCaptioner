@@ -18,7 +18,8 @@ video/audio input
 
 The app has two product surfaces:
 
-- CLI: `videocaptioner transcribe|subtitle|synthesize|dub|process|doctor|config`
+- CLI: `videocaptioner transcribe|subtitle|synthesize|dub|process|download|`
+  `models|doctor|style|config|gui`
 - GUI: PyQt5 desktop app launched by `uv run videocaptioner`,
   `.venv/bin/python -m videocaptioner`, or `videocaptioner gui`
 
@@ -95,6 +96,46 @@ Provider-specific fields should only appear when that provider needs them. For
 example: Edge dubbing hides key rows; SiliconFlow/Gemini show TTS key/model
 rows; Whisper API and Fun-ASR show their own base/key/model fields.
 
+The transcribe settings page has one unified "测试转录" row for ALL ASR
+providers (B 接口 / J 接口 / Fun-ASR / Whisper API / whisper-cpp /
+faster-whisper). It runs a real short-audio transcription through
+`core/asr/check.py::check_transcribe` with `use_cache=False`, the same entry
+`doctor --check-api` uses for `api.transcribe`. Do not reintroduce
+per-provider "测试连接" buttons or lightweight auth-only probes.
+
+## Output Naming And Task Workspace
+
+`videocaptioner/core/application/output_paths.py` is the single source of
+truth for output file naming and task directories. CLI and GUI share one
+grammar; never hand-write output filename templates at call sites:
+
+```text
+{stem}.{tag}.{ext}        tags: <language code> | optimized | subtitled | dubbed
+```
+
+- Tags name the artifact role and compose in processing order
+  (`video.dubbed.subtitled.mp4`). Parameters (soft/hard subtitle, provider,
+  voice, timing) never go into filenames.
+- Products land next to the source file. GUI paths go through
+  `unique_path()` (auto-increment `" (2)"`); CLI default paths overwrite
+  deterministically for scriptability.
+- All intermediates live in a per-run task directory
+  `{work_dir}/tasks/{YYYYMMDD-HHMMSS}-{stem}/` with fixed names
+  (`transcript.srt`, `subtitle.ass`, `dubbing/…`). The flow owner (home
+  pipeline tail, batch `JobRunner`, synthesis page controller) deletes the
+  directory on success unless `app.keep_intermediates` is on; failures keep
+  it for debugging; cancels always clean it.
+- Raw TTS segments are a content-addressed global cache in
+  `CACHE_PATH/tts_segments` keyed by text + every synthesis-affecting config
+  field (see `DubbingPipeline._segment_hash`). Adding a config field that
+  changes audible output requires extending that hash.
+- Paths flow through task dataclass fields (`task_dir`, explicit
+  subtitle/video paths). Do not rediscover files by name patterns or glob;
+  the legacy `【原始字幕】/【卡卡】` bracket-prefix scheme is removed and must
+  not come back.
+- The grammar is pinned by `tests/test_application/test_output_paths.py`;
+  changing naming starts there.
+
 ## UI Direction
 
 The current migration direction is first-party UI components with qfluentwidgets
@@ -106,10 +147,15 @@ Do:
 - Use `videocaptioner.ui.common.app_icons` for app-owned SVG icons.
 - Put SVGs in `resource/assets/icons/`.
 - Prefer reusable widgets in:
+  - `ui/components/workbench.py` (design-language atoms: buttons, pills,
+    drop zones, panels; use these first)
+  - `ui/components/app_dialog.py` (`AppDialog` shell + `ConfirmDialog`; every
+    in-app dialog must use these instead of qfluent `MessageBox`/
+    `MessageBoxBase`. The shell promotes `parent` to `parent.window()` so
+    dialogs always center on the whole program window, never a tab page.)
   - `ui/components/form_cards.py`
   - `ui/components/settings_controls.py`
   - `ui/components/subtitle_style_controls.py`
-  - `ui/components/workflow_widgets.py`
 - Keep manual stylesheet inside reusable components or page-specific media
   preview areas. Avoid scattering large anonymous styles across pages.
 - Keep page layouts stable at compact widths; button clicks must not resize
@@ -125,14 +171,22 @@ Do not:
 - Add explanatory cards just to fill space. This project prefers compact,
   task-oriented pages.
 
-Useful current design anchors:
+Adopted design anchors (one per page; superseded variants were removed —
+each page's module docstring states its source mock):
 
-- `docs/dev/dubbing-page-layout-demos.html`
-- `docs/dev/dubbing-clone-layout-demo.html`
-- `docs/dev/video-synthesis-layout-demo.html`
-- `docs/dev/doctor-page-layout-demos.html`
-- `docs/dev/home-page-layout-demos.html`
-- `docs/dev/settings-page-layout-demos.html`
+- `docs/dev/design-transcription.html`
+- `docs/dev/design-subtitle.html`
+- `docs/dev/design-synthesis.html`
+- `docs/dev/design-batch.html`
+- `docs/dev/design-task-create.html`
+- `docs/dev/design-model-download.html`
+- `docs/dev/design-doctor.html`
+- `docs/dev/design-dubbing.html` / `design-dubbing-clone.html`
+- `docs/dev/design-home.html`
+- `docs/dev/design-settings.html`
+
+Take reference screenshots of a design HTML with
+`scripts/design_reference_shots.py <html> <out-dir> [selector]`.
 
 For visual work, follow this rhythm:
 
@@ -146,13 +200,22 @@ For visual work, follow this rhythm:
 UI smoke commands:
 
 ```bash
+# Full smoke: screenshots + behavior assertions + compact-window checks.
 .venv/bin/python scripts/ui_smoke_check.py /tmp/vc-ui-check-dark --theme dark
 .venv/bin/python scripts/ui_smoke_check.py /tmp/vc-ui-check-light --theme light
+
+# Fast iteration: screenshots only, no assertions (seconds per page).
+# --pages implies shots-only; settings subpages are setting-<key>.
+.venv/bin/python scripts/ui_smoke_check.py --pages dubbing,setting-dubbing
+.venv/bin/python scripts/ui_smoke_check.py --shots-only --theme both
+.venv/bin/python scripts/ui_smoke_check.py --list
 ```
 
-The script exercises page construction, settings navigation, provider switching,
-dubbing clone UI, video synthesis mode changes, subtitle-style fullscreen state,
-and compact-window states. It also writes contact sheets in the output folders.
+The full mode exercises page construction, settings navigation, provider
+switching, dubbing clone UI, video synthesis mode changes, subtitle-style
+fullscreen state, and compact-window states. Both modes write contact sheets
+and print one `shot=<path>` line per screenshot. Pages are registered in
+`PAGE_REGISTRY` inside the script; add new pages there.
 
 ## Dubbing And Provider Rules
 
@@ -172,6 +235,41 @@ Dubbing providers currently include Edge, Gemini TTS, and SiliconFlow CosyVoice.
 Provider switching has historically caused stale base URL/model/voice state.
 Verify switching in the real app and in `scripts/ui_smoke_check.py`; do not
 patch only one page.
+
+## Online Download And Diagnostics
+
+The yt-dlp download engine lives in `core/download/media.py`
+(`MediaDownloader`, no Qt) and is shared by the GUI thread
+(`ui/thread/media_download_thread.py`, a thin signal shell), the CLI
+`download` command, and the diagnostics source check
+(`core/download/source_check.py`). Network environment helpers (proxy
+routing, cookies, bilibili buvid, browser-cookie fallback ladder, friendly
+errors) live in `core/download/net.py`. Keep all three callers on the shared
+engine so "diagnostics says OK" always matches real download behavior:
+
+- Proxy is routed per site (`proxy_for_url`): Bilibili connects directly
+  (global proxies usually have overseas exits and trigger Bilibili risk
+  control); other sites use `system_proxy()` (env vars, then OS proxy —
+  GUI processes do not inherit shell `HTTP_PROXY`).
+- Bilibili returns `HTTP 412 Precondition Failed` for anonymous requests
+  without a `buvid` device cookie. `inject_bilibili_buvid` fetches one from
+  Bilibili's public `x/frontend/finger/spi` endpoint before parsing.
+- Even with buvid + direct connection + browser headers, Bilibili sometimes
+  412-blocks python/yt-dlp TLS fingerprints while `curl` works. This is an
+  upstream yt-dlp arms race; do NOT burn time re-deriving it.
+- Login-state failures go through ONE fallback ladder
+  (`net.run_with_browser_cookie_fallback`): anonymous/cookies.txt first, then
+  installed browsers' login cookies. Download AND diagnostics use it — so the
+  source check reports "可用（已通过 X 登录态验证）" when the fallback works,
+  and only reports unavailable after the ladder is exhausted. Do not
+  reintroduce a diagnostics path that fails on anonymous 412 with a
+  "downloads will probably still work" hedge.
+- `doctor --check-api` and the doctor page both resolve one stable public
+  video per source (`api.download.youtube` = "Me at the zoo",
+  `api.download.bilibili` = official MV) via `check_download_sources()`.
+- Frequent probing gets rate-limited by both sites for minutes. Space out
+  real network verification runs; a 412/bot-check after repeated tests is
+  risk control, not a code regression.
 
 ## FFmpeg And Subtitle Rendering
 
@@ -208,9 +306,10 @@ Use fast local checks before expensive or online checks:
 .venv/bin/python -m ruff check videocaptioner tests scripts
 .venv/bin/python -m compileall videocaptioner scripts tests
 .venv/bin/python -m pytest tests/test_cli/test_config.py tests/test_cli/test_parser.py
-.venv/bin/python -m pytest tests/test_asr/test_chunking.py tests/test_asr/test_chunked_asr.py
+.venv/bin/python -m pytest tests/test_asr/test_chunking.py tests/test_asr/test_chunked_asr.py tests/test_asr/test_check.py
 .venv/bin/python -m pytest tests/test_tts/test_tts_core.py tests/test_subtitle/test_ass_renderer.py
 .venv/bin/python -m pytest tests/test_dubbing/test_pipeline.py tests/test_dubbing/test_presets.py
+.venv/bin/python -m pytest tests/test_download tests/test_thread tests/test_ui
 ```
 
 Full `pytest` includes tests that hit online ASR, Bing/Google translation, and
@@ -353,13 +452,17 @@ through the shared settings/config store.
 
 ## Useful Docs
 
-- `docs/dev/config-architecture-notes.md`
-- `docs/dev/ui-component-audit.md`
-- `docs/dev/asr-chunked-usage.md`
-- `docs/dev/asr-chunk-merger.md`
+- `docs/dev/config-architecture.md`
+- `docs/dev/view-structure.md`
+- `docs/dev/asr-chunking.md`
 - `docs/dev/translate-module.md`
-- `docs/dev/siliconflow-gemini-api-research.md`
+- `docs/dev/tts-provider-research.md`
 - `videocaptioner/core/subtitle/README.md`
+
+`docs/dev/architecture.md`, `api.md`, and `contributing.md` are public pages
+of the VitePress docs site (see `docs/.vitepress/config.*`) — do not move or
+delete them. Superseded design mocks and internal review notes live in the
+local-only `design-archive/` directory (gitignored).
 
 ## Common Commands
 
@@ -371,6 +474,12 @@ uv run videocaptioner
 # CLI help.
 .venv/bin/python -m videocaptioner --help
 .venv/bin/python -m videocaptioner process --help
+
+# Local ASR models (whisper-cpp / faster-whisper). Mirror fallback
+# HuggingFace -> hf-mirror -> ModelScope, resumable downloads. Core logic in
+# videocaptioner/core/download/, shared by this CLI and the settings UI.
+.venv/bin/python -m videocaptioner models list
+.venv/bin/python -m videocaptioner models download whisper-cpp tiny
 
 # Config with an isolated test TOML.
 VIDEOCAPTIONER_CONFIG_FILE=/tmp/vc-config.toml \

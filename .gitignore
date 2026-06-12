@@ -49,3 +49,6 @@ docs/.vitepress/dist/
 # CLAUDE.md is a tracked symlink to AGENTS.md.
 !CLAUDE.md
 videocaptioner/_version.py
+
+# Local-only archive of superseded design mocks and internal review docs
+/design-archive/

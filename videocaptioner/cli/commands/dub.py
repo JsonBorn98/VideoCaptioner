@@ -1,6 +1,6 @@
 """dub command -- generate dubbed audio/video from subtitles."""
 
-import shutil
+import tempfile
 from argparse import Namespace
 from pathlib import Path
 
@@ -11,9 +11,13 @@ from videocaptioner.cli.validators import (
     validate_subtitle_input,
     validate_video_input,
 )
+from videocaptioner.core.application import output_paths
 from videocaptioner.core.application.config_store import get
 from videocaptioner.core.dubbing import DubbingConfig, DubbingPipeline, SpeakerProfile
 from videocaptioner.core.dubbing.config_builder import build_dubbing_config
+
+# 命令行里逐条展示的超时分段警告上限，其余折叠成一行计数
+_MAX_INLINE_WARNINGS = 5
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -51,8 +55,6 @@ def run(args: Namespace, config: dict) -> int:
         return EXIT.USAGE_ERROR
 
     audio_output, video_output = _resolve_outputs(args, subtitle_path, video_path)
-    artifact_dir = audio_output.parent / ".videocaptioner" / audio_output.stem
-    parts_dir = artifact_dir / "parts"
 
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
@@ -69,16 +71,18 @@ def run(args: Namespace, config: dict) -> int:
                 last_logged_bucket = bucket
                 output.info(f"Dubbing progress: {percent}% - {message}")
 
+    # 变速分段等中间产物进临时目录，跑完即清；原始 TTS 分段在全局缓存里复用。
     try:
-        result = DubbingPipeline(dub_config).run(
-            str(subtitle_path),
-            str(audio_output),
-            video_path=str(video_path) if video_path else None,
-            output_video_path=str(video_output) if video_output else None,
-            text_track=getattr(args, "text_track", None) or "auto",
-            work_dir=str(parts_dir),
-            callback=progress_callback,
-        )
+        with tempfile.TemporaryDirectory(prefix="videocaptioner-dub-") as work_dir:
+            result = DubbingPipeline(dub_config).run(
+                str(subtitle_path),
+                str(audio_output),
+                work_dir=work_dir,
+                video_path=str(video_path) if video_path else None,
+                output_video_path=str(video_output) if video_output else None,
+                text_track=getattr(args, "text_track", None) or "auto",
+                callback=progress_callback,
+            )
     except Exception as exc:
         msg = output.clean_error(str(exc))
         if progress:
@@ -91,18 +95,16 @@ def run(args: Namespace, config: dict) -> int:
             traceback.print_exc()
         return EXIT.RUNTIME_ERROR
 
-    report_path = result.audio_path.with_suffix(".dubbing.json")
-    if report_path.exists():
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        hidden_report = artifact_dir / report_path.name
-        shutil.move(str(report_path), str(hidden_report))
-        report_path = hidden_report
-
     final_path = result.video_path or result.audio_path
     if progress:
         progress.finish(f"Done -> {final_path}")
     if result.warnings and not quiet:
-        output.warn(f"{len(result.warnings)} segment(s) exceeded their target duration; see {report_path}")
+        output.warn(f"{len(result.warnings)} segment(s) exceeded their target duration:")
+        for warning in result.warnings[:_MAX_INLINE_WARNINGS]:
+            output.warn(f"  {warning}")
+        hidden = len(result.warnings) - _MAX_INLINE_WARNINGS
+        if hidden > 0:
+            output.warn(f"  ... and {hidden} more")
     if quiet:
         print(final_path)
     return EXIT.SUCCESS
@@ -203,14 +205,27 @@ def _resolve_outputs(
     subtitle_path: Path,
     video_path: Path | None,
 ) -> tuple[Path, Path | None]:
+    """默认输出：{stem}.dubbed.{ext}，音频与视频共用 dubbed tag。"""
     audio_arg = getattr(args, "audio_output", None)
     output_arg = getattr(args, "output", None)
 
     if video_path:
-        video_output = Path(output_arg) if output_arg else video_path.with_stem(video_path.stem + "_dubbed")
-        audio_output = Path(audio_arg) if audio_arg else video_output.with_suffix(".dub.wav")
+        video_output = (
+            Path(output_arg)
+            if output_arg
+            else output_paths.product_path(video_path, output_paths.TAG_DUBBED)
+        )
+        audio_output = (
+            Path(audio_arg)
+            if audio_arg
+            else output_paths.product_path(video_path, output_paths.TAG_DUBBED, ext=".wav")
+        )
         return audio_output, video_output
 
     chosen_output = output_arg or audio_arg
-    audio_output = Path(chosen_output) if chosen_output else subtitle_path.with_suffix(".dub.wav")
+    audio_output = (
+        Path(chosen_output)
+        if chosen_output
+        else output_paths.product_path(subtitle_path, output_paths.TAG_DUBBED, ext=".wav")
+    )
     return audio_output, None

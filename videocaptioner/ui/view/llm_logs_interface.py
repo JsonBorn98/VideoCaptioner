@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -17,36 +18,35 @@ from qfluentwidgets import (
     CaptionLabel,
     InfoBar,
     InfoBarPosition,
-    MessageBox,
-    MessageBoxBase,
-    PillPushButton,
     PlainTextEdit,
-    PushButton,
     SearchLineEdit,
-    SubtitleLabel,
     TableWidget,
-    ToolButton,
     setCustomStyleSheet,
 )
-from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.config import LLM_LOG_FILE, LOG_PATH
+from videocaptioner.ui.common.app_icons import AppIcon
+from videocaptioner.ui.common.theme_tokens import app_palette
+from videocaptioner.ui.components.app_dialog import AppDialog, ConfirmDialog
+from videocaptioner.ui.components.workbench import (
+    CompactButton,
+    InfoChip,
+    RoundIconButton,
+    apply_font,
+)
 
 PAGE_SIZE = 50
 
 
-class LogDetailDialog(MessageBoxBase):
+class LogDetailDialog(AppDialog):
     """日志详情对话框"""
 
     def __init__(self, log_entry: Dict[str, Any], parent=None):
-        super().__init__(parent)
         self.log_entry = log_entry
+        super().__init__("请求详情", icon=AppIcon.DOCUMENT, parent=parent, width=760)
         self._setup_ui()
 
     def _setup_ui(self):
-        self.titleLabel = SubtitleLabel(self.tr("请求详情"))
-        self.viewLayout.addWidget(self.titleLabel)
-
         # 提取信息
         time_str = self.log_entry.get("time", "")
         model = self.log_entry.get("request", {}).get("model", "未知")
@@ -57,62 +57,45 @@ class LogDetailDialog(MessageBoxBase):
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
 
-        # 顶部信息栏
+        # 顶部信息胶囊；行内空间有限，长模型名截断、token 合并为一枚
+        if len(model) > 28:
+            model = model[:27] + "…"
         info_row = QHBoxLayout()
         info_row.setSpacing(8)
-        info_row.setContentsMargins(0, 0, 0, 8)
-
-        # 用 PillPushButton 展示各项信息（禁用点击）
         items = [
             time_str,
             stage,
             model,
             f"{duration:.1f}s",
-            f"input token: {prompt_tokens}",
-            f"output token: {completion_tokens}",
+            f"tokens {prompt_tokens} / {completion_tokens}",
         ]
         for text in items:
             if text:
-                pill = PillPushButton(str(text))
-                pill.setCheckable(False)
-                pill.setEnabled(False)
-                pill.setFixedHeight(24)
-                info_row.addWidget(pill)
-
+                info_row.addWidget(InfoChip(str(text), self.widget))
         info_row.addStretch()
-        self.viewLayout.addLayout(info_row)
+        self.bodyLayout.addLayout(info_row)
 
-        # Request
-        self.viewLayout.addWidget(SubtitleLabel("Request"))
-        self.request_edit = PlainTextEdit()
-        self.request_edit.setReadOnly(True)
-        self.request_edit.setMinimumHeight(180)
-        request_text = json.dumps(self.log_entry.get("request", {}), indent=2, ensure_ascii=False)
-        self.request_edit.setPlainText(request_text)
-        self.viewLayout.addWidget(self.request_edit)
+        for caption, payload_key in (("Request", "request"), ("Response", "response")):
+            label = QLabel(caption, self.widget)
+            label.setObjectName("appDialogSectionLabel")
+            apply_font(label, 12, 800)
+            self.bodyLayout.addWidget(label)
+            edit = PlainTextEdit(self.widget)
+            edit.setReadOnly(True)
+            edit.setMinimumHeight(180)
+            edit.setPlainText(
+                json.dumps(self.log_entry.get(payload_key, {}), indent=2, ensure_ascii=False)
+            )
+            self.bodyLayout.addWidget(edit)
+            setattr(self, f"{payload_key}_edit", edit)
 
-        # Response
-        self.viewLayout.addWidget(SubtitleLabel("Response"))
-        self.response_edit = PlainTextEdit()
-        self.response_edit.setReadOnly(True)
-        self.response_edit.setMinimumHeight(180)
-        response_text = json.dumps(self.log_entry.get("response", {}), indent=2, ensure_ascii=False)
-        self.response_edit.setPlainText(response_text)
-        self.viewLayout.addWidget(self.response_edit)
-
-        # 底部按钮：替换默认按钮
-        self.yesButton.setText(self.tr("关闭"))
-        self.cancelButton.hide()  # type: ignore
-
-        copy_req_btn = PushButton(FIF.COPY, self.tr("复制请求"))
+        copy_req_btn = self.addFooterButton(self.tr("复制请求"), icon=AppIcon.COPY)
         copy_req_btn.clicked.connect(self._copy_request)
-        self.buttonLayout.insertWidget(0, copy_req_btn)  # type: ignore
-
-        copy_resp_btn = PushButton(FIF.COPY, self.tr("复制响应"))
+        copy_resp_btn = self.addFooterButton(self.tr("复制响应"), icon=AppIcon.COPY)
         copy_resp_btn.clicked.connect(self._copy_response)
-        self.buttonLayout.insertWidget(1, copy_resp_btn)  # type: ignore
-
-        self.widget.setMinimumWidth(700)
+        self.addFooterStretch()
+        dismiss = self.addFooterButton(self.tr("关闭"), kind="accent")
+        dismiss.clicked.connect(lambda: self.done(0))
 
     def _copy_request(self):
         text = json.dumps(self.log_entry.get("request", {}), indent=2, ensure_ascii=False)
@@ -122,7 +105,7 @@ class LogDetailDialog(MessageBoxBase):
         InfoBar.success(
             title="",
             content=self.tr("已复制"),
-            parent=self,
+            parent=self.window(),
             position=InfoBarPosition.TOP,
             duration=1500,
         )
@@ -135,7 +118,7 @@ class LogDetailDialog(MessageBoxBase):
         InfoBar.success(
             title="",
             content=self.tr("已复制"),
-            parent=self,
+            parent=self.window(),
             position=InfoBarPosition.TOP,
             duration=1500,
         )
@@ -148,6 +131,7 @@ class LLMLogsInterface(QWidget):
         super().__init__(parent)
         self.setObjectName("llmLogsInterface")
         self.setWindowTitle(self.tr("LLM 请求日志"))
+        self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore[arg-type]
 
         self.all_logs: List[Dict[str, Any]] = []
         self.filtered_logs: List[Dict[str, Any]] = []
@@ -160,12 +144,29 @@ class LLMLogsInterface(QWidget):
 
     def _setup_ui(self):
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(20, 20, 20, 20)
+        self.main_layout.setContentsMargins(26, 20, 26, 22)
         self.main_layout.setSpacing(12)
 
         self._setup_toolbar()
         self._setup_table()
         self._setup_footer()
+        self._sync_style()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_style()
+
+    def _sync_style(self):
+        """页面背景与提示文字取调色板（此页曾无任何主题适配）。"""
+        palette = app_palette()
+        self.setStyleSheet(
+            f"QWidget#llmLogsInterface {{ background: {palette.bg}; }}"
+        )
+        self.hint_label.setStyleSheet(
+            f"color: {palette.subtle}; background: transparent;"
+        )
+        self.refresh_btn.syncStyle()
+        self.clear_btn.syncStyle()
 
     def _setup_toolbar(self):
         toolbar = QHBoxLayout()
@@ -178,10 +179,10 @@ class LLMLogsInterface(QWidget):
 
         toolbar.addStretch()
 
-        self.refresh_btn = PushButton(FIF.SYNC, self.tr("刷新"))
+        self.refresh_btn = CompactButton(self.tr("刷新"), AppIcon.SYNC)
         toolbar.addWidget(self.refresh_btn)
 
-        self.clear_btn = PushButton(FIF.DELETE, self.tr("清空日志"))
+        self.clear_btn = CompactButton(self.tr("清空日志"), AppIcon.DELETE)
         toolbar.addWidget(self.clear_btn)
 
         self.main_layout.addLayout(toolbar)
@@ -225,7 +226,7 @@ class LLMLogsInterface(QWidget):
         self.table.setSelectionBehavior(self.table.SelectRows)
         self.table.setSelectionMode(self.table.SingleSelection)
         self.table.setBorderVisible(True)
-        self.table.setBorderRadius(8)
+        self.table.setBorderRadius(14)
 
         # 减少单元格内边距，让文字显示更多
         qss = "QTableView::item { padding-left: 8px; padding-right: 8px; }"
@@ -243,21 +244,20 @@ class LLMLogsInterface(QWidget):
         footer.addWidget(self.status_label)
 
         # 双击提示
-        hint_label = CaptionLabel(self.tr("双击查看详情"))
-        hint_label.setStyleSheet("color: gray;")
-        footer.addWidget(hint_label)
+        self.hint_label = CaptionLabel(self.tr("双击查看详情"))
+        footer.addWidget(self.hint_label)
 
         footer.addStretch()
 
         # 右侧：分页
-        self.prev_btn = ToolButton(FIF.LEFT_ARROW)
+        self.prev_btn = RoundIconButton(AppIcon.ARROW_LEFT)
         self.prev_btn.setEnabled(False)
         footer.addWidget(self.prev_btn)
 
         self.page_label = BodyLabel("1 / 1")
         footer.addWidget(self.page_label)
 
-        self.next_btn = ToolButton(FIF.RIGHT_ARROW)
+        self.next_btn = RoundIconButton(AppIcon.RIGHT_ARROW)
         self.next_btn.setEnabled(False)
         footer.addWidget(self.next_btn)
 
@@ -444,10 +444,13 @@ class LLMLogsInterface(QWidget):
 
     def _clear_logs(self):
         """清空日志"""
-        w = MessageBox(
+        w = ConfirmDialog(
             self.tr("确认清空"),
             self.tr("确定要清空所有日志吗？此操作不可恢复。"),
             self,
+            confirm_text=self.tr("清空"),
+            danger=True,
+            icon=AppIcon.DELETE,
         )
         if w.exec():
             try:

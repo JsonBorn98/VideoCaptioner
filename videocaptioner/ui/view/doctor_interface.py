@@ -16,21 +16,24 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     CaptionLabel,
     InfoBar,
-    PrimaryPushButton,
-    PushButton,
     ScrollArea,
     SubtitleLabel,
     TitleLabel,
 )
-from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.cli.commands.doctor import Check, run_diagnostics
 from videocaptioner.core.constant import INFOBAR_DURATION_ERROR, INFOBAR_DURATION_SUCCESS
 from videocaptioner.core.entities import TranscribeModelEnum, TranslatorServiceEnum
+from videocaptioner.ui.common.app_icons import AppIcon
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.dubbing_options import get_provider_option
-from videocaptioner.ui.common.theme_tokens import AppPalette, app_palette, rgba
-from videocaptioner.ui.components.workflow_widgets import StatusBadge
+from videocaptioner.ui.common.theme_tokens import (
+    AppPalette,
+    app_palette,
+    rgba,
+)
+from videocaptioner.ui.components.workbench import StatusPill as WbStatusPill
+from videocaptioner.ui.components.workbench import WorkbenchButton, draw_rounded_surface
 
 Translator = Callable[[str], str]
 
@@ -44,6 +47,7 @@ class ItemStatus(Enum):
 
 class ItemAction(Enum):
     TOOL_HELP = "tool_help"
+    DOWNLOAD_HELP = "download_help"
     TRANSCRIBE_SETTINGS = "transcribe_settings"
     LLM_SETTINGS = "llm_settings"
     TRANSLATE_SETTINGS = "translate_settings"
@@ -72,7 +76,9 @@ class DoctorThread(QThread):
 
     def run(self):
         try:
-            self.finished.emit(run_diagnostics(_build_doctor_config(), check_api=False))
+            self.finished.emit(
+                run_diagnostics(_build_doctor_config(), check_api=False, check_download=True)
+            )
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -94,6 +100,13 @@ class TaskChip(QFrame):
 
         layout.addWidget(category)
         layout.addWidget(title)
+
+    def paintEvent(self, event):
+        # 与 OptionCard 等内层卡片同一套表面：panel 上叠半透明卡 + 细边
+        palette = app_palette()
+        surface = palette.card_surface
+        draw_rounded_surface(self, surface, palette.line_soft, 12)
+        super().paintEvent(event)
 
 
 class StatusDot(QWidget):
@@ -142,15 +155,18 @@ class StatusDot(QWidget):
             painter.drawLine(8, 12, 16, 12)
 
 
-class StatusPill(StatusBadge):
+_WB_LEVELS = {"success": "ok", "danger": "fail", "warning": "warn", "neutral": "neutral"}
+
+
+class StatusPill(WbStatusPill):
+    # 诊断状态胶囊：workbench 胶囊 + ItemStatus 映射
     def __init__(self, status: ItemStatus, parent=None):
-        super().__init__("", parent, level=_status_level(status))
+        super().__init__("", _WB_LEVELS[_status_level(status)], parent)
         self.setMinimumWidth(82)
         self.setStatus(status)
 
     def setStatus(self, status: ItemStatus):
-        self.setText(self.tr(_status_text(status)))
-        self.setLevel(_status_level(status))
+        self.setState(self.tr(_status_text(status)), _WB_LEVELS[_status_level(status)])
 
 
 class DiagnosticRow(QFrame):
@@ -191,9 +207,13 @@ class DiagnosticRow(QFrame):
         pill = StatusPill(item.status, self)
         layout.addWidget(pill, 0, 2, 2, 1, Qt.AlignVCenter)
 
-        button_cls = PrimaryPushButton if item.status == ItemStatus.ERROR else PushButton
-        button = button_cls(item.button_text, self)
-        button.setFixedSize(112, 36)
+        button = WorkbenchButton(
+            item.button_text,
+            primary=item.status == ItemStatus.ERROR,
+            height=36,
+            parent=self,
+        )
+        button.setMinimumWidth(112)
         button.setEnabled(actions_enabled and item.status != ItemStatus.CHECKING)
         button.clicked.connect(lambda: self.actionRequested.emit(item.action))
         layout.addWidget(button, 0, 3, 2, 1, Qt.AlignVCenter)
@@ -218,7 +238,7 @@ class DiagnosticPanel(QFrame):
         title_group.addWidget(title)
         header.addLayout(title_group, 1)
         self.summaryPill = StatusPill(ItemStatus.PENDING, self)
-        self.summaryPill.setFixedWidth(104)
+        self.summaryPill.setMinimumWidth(104)
         header.addWidget(self.summaryPill, 0, Qt.AlignTop)
         self.layout.addLayout(header)
 
@@ -240,17 +260,17 @@ class DiagnosticPanel(QFrame):
         checking = any(item.status == ItemStatus.CHECKING for item in items)
         pending = sum(item.status == ItemStatus.PENDING for item in items)
         if errors:
-            self.summaryPill.setText(self.tr("{count} 项未通过").format(count=errors))
-            self.summaryPill.setLevel("danger")
+            self.summaryPill.setState(
+                self.tr("{count} 项未通过").format(count=errors), "fail"
+            )
         elif checking:
-            self.summaryPill.setText(self.tr("检查中"))
-            self.summaryPill.setLevel("neutral")
+            self.summaryPill.setState(self.tr("检查中"), "neutral")
         elif finished:
-            self.summaryPill.setText(self.tr("全部通过"))
-            self.summaryPill.setLevel("success")
+            self.summaryPill.setState(self.tr("全部通过"), "ok")
         else:
-            self.summaryPill.setText(self.tr("{count} 项待检查").format(count=pending))
-            self.summaryPill.setLevel("neutral")
+            self.summaryPill.setState(
+                self.tr("{count} 项待检查").format(count=pending), "neutral"
+            )
 
         for item in sorted(items, key=lambda i: 0 if i.status == ItemStatus.ERROR else 1):
             row = DiagnosticRow(item, actions_enabled=actions_enabled, parent=self.rowsFrame)
@@ -264,7 +284,7 @@ class DoctorInterface(ScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setWindowTitle(self.tr("诊断"))
-        self.thread: DoctorThread | None = None
+        self._doctor_thread: DoctorThread | None = None
         self.has_results = False
         self.is_running = False
         self.scrollWidget = QWidget()
@@ -272,7 +292,9 @@ class DoctorInterface(ScrollArea):
         self.taskStrip = QFrame(self.scrollWidget)
         self.taskGrid = QGridLayout(self.taskStrip)
         self.panel = DiagnosticPanel(self.scrollWidget)
-        self.runButton = PrimaryPushButton(self.tr("运行诊断"), self.scrollWidget, icon=FIF.SYNC)
+        self.runButton = WorkbenchButton(
+            self.tr("运行诊断"), AppIcon.SYNC, primary=True, parent=self.scrollWidget
+        )
         self._init_ui()
 
     def _init_ui(self):
@@ -285,7 +307,7 @@ class DoctorInterface(ScrollArea):
         self.enableTransparentBackground()
 
         self.pageLayout.setSpacing(18)
-        self.pageLayout.setContentsMargins(42, 38, 42, 42)
+        self.pageLayout.setContentsMargins(26, 20, 26, 22)
 
         toolbar = QWidget(self.scrollWidget)
         toolbarLayout = QHBoxLayout(toolbar)
@@ -298,7 +320,6 @@ class DoctorInterface(ScrollArea):
         heading.addWidget(self.titleLabel)
         self.subTitleLabel.hide()
         toolbarLayout.addLayout(heading, 1)
-        self.runButton.setFixedHeight(40)
         toolbarLayout.addWidget(self.runButton, 0, Qt.AlignTop)
 
         self.taskStrip.setObjectName("taskStrip")
@@ -345,7 +366,7 @@ class DoctorInterface(ScrollArea):
         self.panel.setItems(_pending_items(self.tr))
 
     def _run(self):
-        if self.is_running or (self.thread and self.thread.isRunning()):
+        if self.is_running or (self._doctor_thread and self._doctor_thread.isRunning()):
             return
         self.has_results = False
         self.is_running = True
@@ -355,10 +376,18 @@ class DoctorInterface(ScrollArea):
             _with_status(_base_items(self.tr), ItemStatus.CHECKING),
             actions_enabled=False,
         )
-        self.thread = DoctorThread()
-        self.thread.finished.connect(self._on_finished)
-        self.thread.error.connect(self._on_error)
-        self.thread.start()
+        self._doctor_thread = DoctorThread()
+        self._doctor_thread.finished.connect(self._on_finished)
+        self._doctor_thread.error.connect(self._on_error)
+        self._doctor_thread.start()
+
+    def closeEvent(self, event):
+        # 退出时停诊断网络线程：main_window.closeEvent 会 close() 本页，running
+        # QThread 被销毁会触发 qFatal。只读网络线程，terminate 安全。
+        if self._doctor_thread is not None and self._doctor_thread.isRunning():
+            self._doctor_thread.terminate()
+            self._doctor_thread.wait(1000)
+        super().closeEvent(event)
 
     def _on_finished(self, checks: list[Check]):
         self.has_results = True
@@ -392,6 +421,17 @@ class DoctorInterface(ScrollArea):
         InfoBar.error(self.tr("诊断失败"), message, duration=INFOBAR_DURATION_ERROR, parent=self)
 
     def _handle_action(self, action: ItemAction):
+        if action == ItemAction.DOWNLOAD_HELP:
+            InfoBar.info(
+                self.tr("视频下载"),
+                self.tr(
+                    "YouTube 需要可用的系统代理；哔哩哔哩提示风控（412）时稍等几分钟重试，"
+                    "或在浏览器登录后导出 cookies.txt 放到应用数据目录。"
+                ),
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+            return
         if action == ItemAction.TOOL_HELP:
             InfoBar.info(
                 self.tr("FFmpeg"),
@@ -402,9 +442,10 @@ class DoctorInterface(ScrollArea):
             return
         page_key = _settings_page_for_action(action)
         if page_key:
-            self._open_settings_page(page_key, _action_hint(action, self.tr))
+            self._open_settings_page(page_key)
 
-    def _open_settings_page(self, page_key: str, message: str):
+    def _open_settings_page(self, page_key: str):
+        # 跳转成功不弹通知：通知挂在已离开的诊断页上，返回时才残留弹出。
         window = self.window()
         if hasattr(window, "openSettingsPage"):
             opened = window.openSettingsPage(page_key)  # type: ignore[attr-defined]
@@ -415,15 +456,11 @@ class DoctorInterface(ScrollArea):
                     duration=INFOBAR_DURATION_ERROR,
                     parent=self,
                 )
-                return
         else:
             target = getattr(window, "settingInterface", None)
             if target is not None and hasattr(window, "switchTo"):
                 if target.setCurrentPage(page_key):
                     window.switchTo(target)  # type: ignore[attr-defined]
-                else:
-                    return
-        InfoBar.info(self.tr("跳转"), message, duration=INFOBAR_DURATION_SUCCESS, parent=self)
 
 
 def _clear_layout(layout):
@@ -486,6 +523,13 @@ def _base_items(tr: Translator) -> list[DiagnosticItem]:
             description=_transcribe_description(tr),
             action=ItemAction.TRANSCRIBE_SETTINGS,
             button_text=tr("转录配置"),
+        ),
+        DiagnosticItem(
+            key="download",
+            title=tr("视频下载"),
+            description=tr("解析 YouTube 与哔哩哔哩链接，验证在线视频能否下载。"),
+            action=ItemAction.DOWNLOAD_HELP,
+            button_text=tr("使用说明"),
         ),
     ]
     if _needs_llm():
@@ -550,7 +594,9 @@ def _items_from_checks(checks: list[Check], tr: Translator) -> list[DiagnosticIt
         )
     )
 
-    transcribe_checks = _checks_with_prefix(checks, ("transcribe", "whisper", "whisper-cpp"))
+    transcribe_checks = _checks_with_prefix(
+        checks, ("transcribe", "whisper", "whisper-cpp", "faster-whisper")
+    )
     transcribe_status = _combined_status(transcribe_checks)
     items.append(
         DiagnosticItem(
@@ -566,6 +612,29 @@ def _items_from_checks(checks: list[Check], tr: Translator) -> list[DiagnosticIt
             status=transcribe_status,
         )
     )
+
+    download_checks = _checks_with_prefix(checks, ("api.download",))
+    if download_checks:
+        failed = [check for check in download_checks if check.status != "ok"]
+        if failed:
+            # 检查与真实下载共用同一条回退链路（含浏览器登录态），
+            # 走到这里说明兜底也被拒绝，是真不可用。
+            detail = "；".join(f"{check.message}" for check in failed)
+            description = tr("站点当前不可用（浏览器登录态兜底也已尝试）：{}").format(detail)
+        elif any("登录态" in check.message for check in download_checks):
+            description = tr("YouTube 与哔哩哔哩解析正常（部分站点通过浏览器登录态），可直接粘贴链接下载。")
+        else:
+            description = tr("YouTube 与哔哩哔哩解析正常，可直接粘贴链接下载。")
+        items.append(
+            DiagnosticItem(
+                key="download",
+                title=tr("视频下载"),
+                description=description,
+                action=ItemAction.DOWNLOAD_HELP,
+                button_text=tr("使用说明"),
+                status=_combined_status(download_checks),
+            )
+        )
 
     if _needs_llm():
         llm_checks = _checks_with_prefix(checks, ("llm",))
@@ -730,16 +799,6 @@ def _dubbing_description(tr: Translator) -> str:
     return tr("按当前提供商和音色生成配音；部分服务需要 Key。")
 
 
-def _action_hint(action: ItemAction, tr: Translator) -> str:
-    return {
-        ItemAction.TRANSCRIBE_SETTINGS: tr("已打开转录配置。"),
-        ItemAction.LLM_SETTINGS: tr("已打开大模型配置。"),
-        ItemAction.TRANSLATE_SETTINGS: tr("已打开翻译服务配置。"),
-        ItemAction.DUBBING_SETTINGS: tr("已打开配音配置。"),
-        ItemAction.TOOL_HELP: tr("请安装 FFmpeg / FFprobe。"),
-    }[action]
-
-
 def _settings_page_for_action(action: ItemAction) -> str | None:
     return {
         ItemAction.TRANSCRIBE_SETTINGS: "transcribe",
@@ -755,14 +814,13 @@ QWidget#scrollWidget {{
     background: {palette.bg};
 }}
 QFrame#taskStrip {{
-    background: {palette.field};
-    border: 1px solid {palette.line_soft};
-    border-radius: 8px;
+    background: {palette.panel};
+    border: 1px solid {palette.line};
+    border-radius: 14px;
 }}
 QFrame#taskChip {{
-    background: {palette.field};
-    border: 1px solid {palette.line_soft};
-    border-radius: 7px;
+    background: transparent;
+    border: none;
 }}
 QLabel#taskChipCategory {{
     color: {palette.subtle};
@@ -776,12 +834,12 @@ QLabel#taskChipTitle {{
 QFrame#diagnosticPanel {{
     background: {palette.panel};
     border: 1px solid {palette.line};
-    border-radius: 8px;
+    border-radius: 14px;
 }}
 QFrame#rowsFrame {{
     background: {palette.panel};
     border: 1px solid {palette.line_soft};
-    border-radius: 8px;
+    border-radius: 12px;
 }}
 QFrame#diagnosticRow {{
     background: {palette.panel};
@@ -826,6 +884,14 @@ def _build_doctor_config() -> dict:
         },
         "transcribe": {
             "asr": asr_name,
+            "whisper_cpp": {
+                "model": getattr(cfg.whisper_model.value, "value", str(cfg.whisper_model.value)),
+            },
+            "faster_whisper": {
+                "model": getattr(
+                    cfg.faster_whisper_model.value, "value", str(cfg.faster_whisper_model.value)
+                ),
+            },
         },
         "subtitle": {
             "optimize": cfg.need_optimize.value,

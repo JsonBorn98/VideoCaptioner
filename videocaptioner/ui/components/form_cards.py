@@ -140,17 +140,17 @@ class FormCard(QFrame):
     def syncStyle(self) -> None:  # noqa: N802
         self.setStyleSheet(
             """
-            QFrame#formCard {{
+            QFrame#formCard {
                 border: 0;
                 border-radius: 0;
                 background: transparent;
-            }}
-            QFrame#formCard:hover {{
+            }
+            QFrame#formCard:hover {
                 background: transparent;
-            }}
-            QLabel {{
+            }
+            QLabel {
                 background: transparent;
-            }}
+            }
             """
         )
 

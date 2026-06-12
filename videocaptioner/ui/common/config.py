@@ -8,6 +8,7 @@ from PyQt5.QtGui import QColor
 
 from videocaptioner.config import WORK_PATH
 from videocaptioner.core.application.app_config import (
+    enum_by_value,
     layout_from_cli,
     quality_from_cli,
     render_mode_from_cli,
@@ -51,7 +52,7 @@ from videocaptioner.ui.common.settings_state import (
     SettingsState,
 )
 
-DEFAULT_THEME_COLOR = "#ff28f08b"
+DEFAULT_THEME_COLOR = "#ff00e889"
 
 
 class ThemeMode(Enum):
@@ -109,6 +110,19 @@ class Config(SettingsState):
         EnumSettingSerializer(ThemeMode),
     )
     themeColor = SettingField("UI", "ThemeColor", QColor(DEFAULT_THEME_COLOR))
+    # 工作台页面右栏折叠状态（持久化）
+    transcribe_panel_collapsed = SettingField(
+        "UI", "TranscribePanelCollapsed", False, BoolValidator()
+    )
+    synthesis_panel_collapsed = SettingField(
+        "UI", "SynthesisPanelCollapsed", False, BoolValidator()
+    )
+    subtitle_panel_collapsed = SettingField(
+        "UI", "SubtitlePanelCollapsed", False, BoolValidator()
+    )
+    # 批量处理页：处理模式（full / trans_sub / transcribe / subtitle）与并发数
+    batch_mode = SettingField("UI", "BatchMode", "full")
+    batch_concurrency = RangeSettingField("UI", "BatchConcurrency", 1, RangeValidator(1, 3))
 
     # LLM配置
     llm_service = ChoiceSettingField(
@@ -195,6 +209,11 @@ class Config(SettingsState):
         ChoiceValidator(TranscribeLanguageEnum),
         EnumSettingSerializer(TranscribeLanguageEnum),
     )
+    # 默认句级时间轴：单独导出 SRT 时词级会按字分段，不适合直接使用；
+    # 流水线（智能断句）所需的词级时间戳由 TaskBuilder 自行决定，不受此开关影响。
+    transcribe_word_timestamp = SettingField(
+        "Transcribe", "WordTimestamp", False, BoolValidator()
+    )
 
     # ------------------- Whisper Cpp 配置 -------------------
     whisper_model = ChoiceSettingField(
@@ -244,13 +263,13 @@ class Config(SettingsState):
     # ------------------- Whisper API 配置 -------------------
     whisper_api_base = SettingField("WhisperAPI", "WhisperApiBase", "")
     whisper_api_key = SettingField("WhisperAPI", "WhisperApiKey", "")
-    whisper_api_model = ChoiceSettingField("WhisperAPI", "WhisperApiModel", "")
+    whisper_api_model = SettingField("WhisperAPI", "WhisperApiModel", "")
     whisper_api_prompt = SettingField("WhisperAPI", "WhisperApiPrompt", "")
 
     # ------------------- 百炼 Fun-ASR 配置 -------------------
     fun_asr_api_base = SettingField("FunASR", "FunAsrApiBase", "https://dashscope.aliyuncs.com")
     fun_asr_api_key = SettingField("FunASR", "FunAsrApiKey", "")
-    fun_asr_model = ChoiceSettingField("FunASR", "FunAsrModel", "fun-asr")
+    fun_asr_model = SettingField("FunASR", "FunAsrModel", "fun-asr")
 
     # ------------------- 字幕配置 -------------------
     need_optimize = SettingField("Subtitle", "NeedOptimize", False, BoolValidator())
@@ -366,6 +385,7 @@ class Config(SettingsState):
 
     # ------------------- 保存配置 -------------------
     work_dir = SettingField("Save", "Work_Dir", WORK_PATH, FolderValidator())
+    keep_intermediates = SettingField("Save", "KeepIntermediates", False, BoolValidator())
 
     # ------------------- 软件页面配置 -------------------
     micaEnabled = SettingField("MainWindow", "MicaEnabled", False, BoolValidator())
@@ -452,7 +472,11 @@ def _llm_service_to_key(value: Any) -> str:
 
 
 def _llm_service_from_key(value: Any) -> LLMServiceEnum:
-    return KEY_TO_LLM_SERVICE.get(str(value or "openai").lower(), LLMServiceEnum.OPENAI)
+    # 兼容 CLI/手编 TOML 的非下划线别名（siliconcloud/lmstudio），与
+    # cli/config_adapter 接受的写法一致；否则 GUI 读不到会回落 openai 丢配置。
+    key = str(value or "openai").lower()
+    key = {"siliconcloud": "silicon_cloud", "lmstudio": "lm_studio"}.get(key, key)
+    return KEY_TO_LLM_SERVICE.get(key, LLMServiceEnum.OPENAI)
 
 
 def _enum_value(value: Any) -> Any:
@@ -529,6 +553,15 @@ def _theme_color_to_toml(value: Any) -> str:
     return color.name(QColor.HexRgb) if color.isValid() else "#28f08b"
 
 
+def _work_dir_from_toml(value: Any) -> str:
+    """共享配置里 work_dir 空串表示“未设置”；回退到应用默认工作目录。
+
+    不能交给 FolderValidator 纠正：Path("") 会被纠正成当前进程 CWD，
+    新配置文件的用户会把工作产物写进启动目录（曾把仓库根当工作目录）。
+    """
+    return str(value).strip() or str(WORK_PATH)
+
+
 def _language_from_toml(value: Any) -> Language:
     try:
         return LanguageSerializer().deserialize(str(value or "Auto"))
@@ -568,6 +601,15 @@ def _bindings() -> list[SharedConfigBinding]:
     return [
         SharedConfigBinding(cfg.themeMode, "ui.theme_mode", _theme_to_toml, _theme_from_toml),
         SharedConfigBinding(
+            cfg.transcribe_panel_collapsed, "ui.transcribe_panel_collapsed"
+        ),
+        SharedConfigBinding(cfg.subtitle_panel_collapsed, "ui.subtitle_panel_collapsed"),
+        SharedConfigBinding(
+            cfg.synthesis_panel_collapsed, "ui.synthesis_panel_collapsed"
+        ),
+        SharedConfigBinding(cfg.batch_mode, "ui.batch_mode"),
+        SharedConfigBinding(cfg.batch_concurrency, "ui.batch_concurrency"),
+        SharedConfigBinding(
             cfg.themeColor, "ui.theme_color", _theme_color_to_toml, _theme_color_from_toml
         ),
         SharedConfigBinding(cfg.dpiScale, "ui.dpi_scale"),
@@ -575,7 +617,8 @@ def _bindings() -> list[SharedConfigBinding]:
         SharedConfigBinding(cfg.micaEnabled, "ui.mica_enabled"),
         SharedConfigBinding(cfg.checkUpdateAtStartUp, "ui.check_update_at_startup"),
         SharedConfigBinding(cfg.subtitle_preview_image, "ui.subtitle_preview_image"),
-        SharedConfigBinding(cfg.work_dir, "app.work_dir"),
+        SharedConfigBinding(cfg.work_dir, "app.work_dir", from_toml=_work_dir_from_toml),
+        SharedConfigBinding(cfg.keep_intermediates, "app.keep_intermediates"),
         SharedConfigBinding(cfg.cache_enabled, "app.cache_enabled"),
         SharedConfigBinding(
             cfg.llm_service, "llm.service", _llm_service_to_key, _llm_service_from_key
@@ -661,11 +704,12 @@ def _bindings() -> list[SharedConfigBinding]:
             _transcribe_language_to_key,
             _transcribe_language_from_key,
         ),
+        SharedConfigBinding(cfg.transcribe_word_timestamp, "transcribe.word_timestamp"),
         SharedConfigBinding(
             cfg.whisper_model,
             "transcribe.whisper_cpp.model",
             _enum_value,
-            lambda value: WhisperModelEnum(str(value)),
+            lambda value: enum_by_value(WhisperModelEnum, str(value), WhisperModelEnum.TINY),
         ),
         SharedConfigBinding(cfg.whisper_api_key, "whisper_api.api_key"),
         SharedConfigBinding(cfg.whisper_api_base, "whisper_api.api_base"),
@@ -679,7 +723,9 @@ def _bindings() -> list[SharedConfigBinding]:
             cfg.faster_whisper_model,
             "transcribe.faster_whisper.model",
             _enum_value,
-            lambda value: FasterWhisperModelEnum(str(value)),
+            lambda value: enum_by_value(
+                FasterWhisperModelEnum, str(value), FasterWhisperModelEnum.TINY
+            ),
         ),
         SharedConfigBinding(cfg.faster_whisper_model_dir, "transcribe.faster_whisper.model_dir"),
         SharedConfigBinding(cfg.faster_whisper_device, "transcribe.faster_whisper.device"),
@@ -691,7 +737,9 @@ def _bindings() -> list[SharedConfigBinding]:
             cfg.faster_whisper_vad_method,
             "transcribe.faster_whisper.vad_method",
             _enum_value,
-            lambda value: VadMethodEnum(str(value).replace("-", "_")),
+            lambda value: enum_by_value(
+                VadMethodEnum, str(value).replace("-", "_"), VadMethodEnum.SILERO_V4
+            ),
         ),
         SharedConfigBinding(
             cfg.faster_whisper_ff_mdx_kim2, "transcribe.faster_whisper.voice_extraction"
@@ -754,6 +802,10 @@ def _bindings() -> list[SharedConfigBinding]:
         SharedConfigBinding(cfg.dubbing_api_base, "dubbing.api_base"),
         SharedConfigBinding(cfg.dubbing_model, "dubbing.model"),
         SharedConfigBinding(cfg.dubbing_tts_workers, "dubbing.tts_workers"),
+        # 克隆参考音频/文本：绑定后 valueChanged 会触发共享持久化，重启不再丢；
+        # 与 config_store DEFAULTS、cli/config_adapter 的读取保持闭环。
+        SharedConfigBinding(cfg.dubbing_clone_audio, "dubbing.clone_audio"),
+        SharedConfigBinding(cfg.dubbing_clone_text, "dubbing.clone_text"),
     ]
 
 
