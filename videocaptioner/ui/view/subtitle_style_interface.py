@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from PIL import ImageFont
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFontDatabase
 from PyQt5.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -58,6 +58,8 @@ DEFAULT_BG_PORTRAIT = {
     "width": 480,
     "height": 852,
 }
+
+PREVIEW_DEBOUNCE_MS = 80
 
 
 class AssPreviewThread(QThread):
@@ -124,6 +126,9 @@ class RoundedBgPreviewThread(QThread):
         self.previewReady.emit(preview_path)
 
 
+PreviewThread = AssPreviewThread | RoundedBgPreviewThread
+
+
 class SubtitleStyleInterface(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -143,6 +148,14 @@ class SubtitleStyleInterface(QWidget):
 
         # 控制是否触发样式变更回调（加载样式时禁用）
         self._loading_style = False
+
+        self.preview_thread: Optional[PreviewThread] = None
+        self._preview_request_pending = False
+        self._preview_generation = 0
+        self._preview_debounce_timer = QTimer(self)
+        self._preview_debounce_timer.setSingleShot(True)
+        self._preview_debounce_timer.setInterval(PREVIEW_DEBOUNCE_MS)
+        self._preview_debounce_timer.timeout.connect(self._startPreviewUpdate)
 
         # 设置初始值,加载样式
         self.__setValues()
@@ -907,7 +920,35 @@ class SubtitleStyleInterface(QWidget):
         return f"[V4+ Styles]\n{style_format}\n{primary_style}\n{secondary_style}"
 
     def updatePreview(self):
-        """更新预览图片"""
+        """调度预览更新，合并连续的样式调整。"""
+        self._preview_request_pending = True
+        self._preview_debounce_timer.start()
+
+    def _startPreviewUpdate(self):
+        """启动一次预览渲染；已有线程运行时等待 finished 后再处理最新请求。"""
+        if not self._preview_request_pending:
+            return
+
+        if self.preview_thread is not None and self.preview_thread.isRunning():
+            return
+
+        self._preview_request_pending = False
+        thread = self._createPreviewThread()
+        self._preview_generation += 1
+        generation = self._preview_generation
+
+        self.preview_thread = thread
+        thread.previewReady.connect(
+            lambda preview_path, generation=generation: self.onPreviewReady(
+                preview_path, generation
+            )
+        )
+        thread.finished.connect(self._onPreviewThreadFinished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _createPreviewThread(self) -> PreviewThread:
+        """创建当前设置对应的预览线程。"""
         # 获取预览文本
         main_text, sub_text = PERVIEW_TEXTS[self.previewTextCard.comboBox.currentText()]
 
@@ -956,25 +997,35 @@ class SubtitleStyleInterface(QWidget):
                 letter_spacing=self.roundedLetterSpacingCard.spinBox.value(),
             )
 
-            self.preview_thread = RoundedBgPreviewThread(
+            return RoundedBgPreviewThread(
                 preview_text=(main_text, sub_text),
                 style=style,
                 bg_image_path=str(path),
             )
-        else:
-            # ASS 样式模式（样式720P基准，由渲染层自动缩放）
-            style_str = self.generateAssStyles()
-            self.preview_thread = AssPreviewThread(
-                preview_text=(main_text, sub_text),
-                style_str=style_str,
-                bg_image_path=str(path),
-            )
 
-        self.preview_thread.previewReady.connect(self.onPreviewReady)
-        self.preview_thread.start()
+        # ASS 样式模式（样式720P基准，由渲染层自动缩放）
+        style_str = self.generateAssStyles()
+        return AssPreviewThread(
+            preview_text=(main_text, sub_text),
+            style_str=style_str,
+            bg_image_path=str(path),
+        )
 
-    def onPreviewReady(self, preview_path):
+    def _onPreviewThreadFinished(self):
+        thread = self.sender()
+        if self.preview_thread is thread:
+            self.preview_thread = None
+
+        if self._preview_request_pending:
+            self._preview_debounce_timer.start()
+
+    def onPreviewReady(self, preview_path, generation: Optional[int] = None):
         """预览图片生成完成的回调"""
+        if generation is not None and generation != self._preview_generation:
+            return
+        if self._preview_request_pending:
+            return
+
         self.previewImage.setImage(preview_path)
         self.updatePreviewImage()
 
@@ -995,6 +1046,14 @@ class SubtitleStyleInterface(QWidget):
         """窗口显示事件"""
         super().showEvent(event)
         self.updatePreviewImage()
+
+    def closeEvent(self, event):
+        """关闭界面前等待当前预览线程结束，避免运行中的 QThread 被销毁。"""
+        self._preview_debounce_timer.stop()
+        self._preview_request_pending = False
+        if self.preview_thread is not None and self.preview_thread.isRunning():
+            self.preview_thread.wait()
+        super().closeEvent(event)
 
     def _resolve_style_path(self, style_name: str) -> Path:
         """Resolve style name to file path, trying prefixed names."""
