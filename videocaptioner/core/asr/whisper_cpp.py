@@ -2,7 +2,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -48,12 +47,16 @@ class WhisperCppASR(BaseASR):
         # Find model file in models directory
         if whisper_model:
             models_dir = Path(MODEL_PATH)
-            model_files = list(models_dir.glob(f"*ggml*{whisper_model}*.bin"))
-            if not model_files:
-                raise ValueError(
-                    f"Model file not found in {models_dir} for: {whisper_model}"
-                )
-            model_path = str(model_files[0])
+            exact_model_path = models_dir / f"ggml-{whisper_model}.bin"
+            if exact_model_path.exists():
+                model_path = str(exact_model_path)
+            else:
+                model_files = sorted(models_dir.glob(f"*ggml*{whisper_model}*.bin"))
+                if not model_files:
+                    raise ValueError(
+                        f"Model file not found in {models_dir} for: {whisper_model}"
+                    )
+                model_path = str(model_files[0])
             logger.debug(f"Model found: {model_path}")
         else:
             raise ValueError("whisper_model cannot be empty")
@@ -82,7 +85,7 @@ class WhisperCppASR(BaseASR):
         return filtered_segments
 
     def _build_command(
-        self, wav_path, output_path, is_const_me_version: bool
+        self, wav_path, output_path, supports_output_file: bool
     ) -> list[str]:
         """Build whisper-cpp command line arguments."""
         whisper_params = [
@@ -96,10 +99,7 @@ class WhisperCppASR(BaseASR):
             "--output-srt",
         ]
 
-        if not is_const_me_version:
-            if sys.platform != "darwin":
-                whisper_params.append("--no-gpu")
-
+        if supports_output_file:
             whisper_params.extend(
                 ["--output-file", str(output_path.with_suffix(""))]
             )
@@ -111,6 +111,11 @@ class WhisperCppASR(BaseASR):
 
         return whisper_params
 
+    def _supports_output_file_arg(self) -> bool:
+        """Return whether the detected binary supports whisper.cpp's -of/--output-file."""
+        executable_name = self.whisper_cpp_path.name.lower()
+        return executable_name in {"whisper-cli", "whisper-cli.exe"} or os.name != "nt"
+
     def _run(
         self, callback: Optional[Callable[[int, str], None]] = None, **kwargs: Any
     ) -> str:
@@ -120,7 +125,7 @@ class WhisperCppASR(BaseASR):
         if callback is None:
             callback = _default_callback
 
-        is_const_me_version = True if os.name == "nt" else False
+        supports_output_file = self._supports_output_file_arg()
 
         with tempfile.TemporaryDirectory() as temp_path:
             temp_dir = Path(temp_path)
@@ -139,7 +144,7 @@ class WhisperCppASR(BaseASR):
 
                 # Build command
                 whisper_params = self._build_command(
-                    wav_path, output_path, is_const_me_version
+                    wav_path, output_path, supports_output_file
                 )
                 logger.debug("Whisper.cpp command: %s", " ".join(whisper_params))
 
