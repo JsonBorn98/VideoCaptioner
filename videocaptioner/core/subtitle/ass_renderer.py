@@ -228,6 +228,8 @@ def _get_video_resolution(video_path: str) -> Tuple[int, int]:
         ["ffmpeg", "-i", video_path],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         creationflags=(
             getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         ),
@@ -235,7 +237,7 @@ def _get_video_resolution(video_path: str) -> Tuple[int, int]:
 
     # 从 ffmpeg 输出中解析分辨率
     pattern = r"(\d{2,5})x(\d{2,5})"
-    match = re.search(pattern, result.stderr)
+    match = re.search(pattern, result.stderr or "")
     if match:
         return int(match.group(1)), int(match.group(2))
     return 1920, 1080  # 默认返回 1080P

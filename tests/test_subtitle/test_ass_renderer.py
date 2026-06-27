@@ -57,3 +57,34 @@ def test_render_ass_preview_quotes_ffmpeg_filter_paths(monkeypatch, tmp_path):
     assert vf_value.startswith("ass='"), f"ass path is not single-quoted: {vf_value}"
     assert "':fontsdir='" in vf_value, f"fontsdir is not single-quoted: {vf_value}"
     assert vf_value.endswith("'"), f"fontsdir path is not closed: {vf_value}"
+
+
+def test_get_video_resolution_decodes_ffmpeg_stderr_with_replacement(monkeypatch):
+    """Windows must not use the default GBK decoder for FFmpeg stderr."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            "",
+            "Metadata:\n  title: bad byte \ufffd\nStream #0:0: Video: h264, 1920x1080",
+        )
+
+    monkeypatch.setattr(ass_renderer.subprocess, "run", fake_run)
+
+    assert ass_renderer._get_video_resolution("video.mp4") == (1920, 1080)
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["errors"] == "replace"
+
+
+def test_get_video_resolution_handles_missing_stderr(monkeypatch):
+    """Regression guard for reader thread failures returning stderr=None."""
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", None)
+
+    monkeypatch.setattr(ass_renderer.subprocess, "run", fake_run)
+
+    assert ass_renderer._get_video_resolution("video.mp4") == (1920, 1080)
