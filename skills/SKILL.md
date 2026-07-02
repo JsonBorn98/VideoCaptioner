@@ -122,6 +122,33 @@ videocaptioner synthesize video.mp4 -s subtitle.srt --subtitle-mode hard \
   --font-file ./NotoSansSC.ttf --quality high -o styled_video.mp4
 ```
 
+## ASR backend integration notes
+
+When changing or adding ASR backends, first identify the real service contract:
+
+- Whisper-compatible ASR uses `/v1/audio/transcriptions` with multipart local
+  audio. It may or may not support `verbose_json` and
+  `timestamp_granularities`, so retry simpler request shapes before failing.
+- Chat-audio ASR uses `/v1/chat/completions` with `input_audio` content and is
+  not interchangeable with Whisper just because the gateway is
+  OpenAI-compatible.
+- Text-only ASR is not subtitle-ready by itself. If the user requested SRT/ASS
+  timestamps, add or call a forced aligner; do not silently emit one cue for the
+  whole chunk.
+- For MiMo/Qwen-style long transcription, keep automatic chunking. Five-minute
+  chunks plus 10 seconds overlap are the current safe baseline.
+- Qwen local runtime depends on `qwen-asr`; install it into the same Python
+  environment that launches the GUI. Treat it as optional because it pulls large
+  ML dependencies.
+- Keep local model concurrency at one unless memory behavior is measured. The
+  1.7B ASR model plus 0.6B ForcedAligner can sit near a 16 GB VRAM ceiling.
+- Cache raw ASR responses only after segment conversion succeeds, and version
+  cache keys when timestamp parsing semantics change.
+- Connection tests should use tiny bundled sample audio, never the user's full
+  selected media file.
+- Temporary transcription workspaces should live beside the source media as
+  `.videocaptioner-*` and be cleaned on success, failure, and cancellation.
+
 ## Command reference
 
 | Command | Purpose |

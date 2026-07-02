@@ -3,6 +3,8 @@ from videocaptioner.core.asr.bcut import BcutASR
 from videocaptioner.core.asr.chunked_asr import ChunkedASR
 from videocaptioner.core.asr.faster_whisper import FasterWhisperASR
 from videocaptioner.core.asr.jianying import JianYingASR
+from videocaptioner.core.asr.mimo_asr import MiMoASR
+from videocaptioner.core.asr.qwen_local_asr import QwenLocalASR
 from videocaptioner.core.asr.whisper_api import WhisperAPI
 from videocaptioner.core.asr.whisper_cpp import WhisperCppASR
 from videocaptioner.core.entities import TranscribeConfig, TranscribeModelEnum
@@ -42,7 +44,9 @@ def transcribe(audio_path: str, config: TranscribeConfig, callback=None) -> ASRD
     return asr_data
 
 
-def _create_asr_instance(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
+def _create_asr_instance(
+    audio_path: str, config: TranscribeConfig
+) -> ChunkedASR:
     """Create appropriate ASR instance based on configuration.
 
     Args:
@@ -65,6 +69,12 @@ def _create_asr_instance(audio_path: str, config: TranscribeConfig) -> ChunkedAS
 
     elif model_type == TranscribeModelEnum.WHISPER_API:
         return _create_whisper_api_asr(audio_path, config)
+
+    elif model_type == TranscribeModelEnum.MIMO_ASR_API:
+        return _create_mimo_asr(audio_path, config)
+
+    elif model_type == TranscribeModelEnum.QWEN_LOCAL_ASR:
+        return _create_qwen_local_asr(audio_path, config)
 
     elif model_type == TranscribeModelEnum.FASTER_WHISPER:
         return _create_faster_whisper_asr(audio_path, config)
@@ -124,6 +134,67 @@ def _create_whisper_api_asr(audio_path: str, config: TranscribeConfig) -> Chunke
     return ChunkedASR(
         asr_class=WhisperAPI, audio_path=audio_path, asr_kwargs=asr_kwargs
     )
+
+
+def _create_mimo_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
+    """Create MiMo ASR API instance with chunking support.
+
+    MiMo API accepts base64 mp3/wav payloads up to 10 MB and does not return
+    native timestamps. Five-minute chunks keep payloads small and match the
+    Qwen3-ForcedAligner alignment window.
+    """
+    chunk_overlap = _qwen_chunk_overlap(config)
+    asr_kwargs = {
+        "use_cache": True,
+        "need_word_time_stamp": config.need_word_time_stamp,
+        "language": config.transcribe_language,
+        "api_key": config.mimo_asr_api_key or "",
+        "base_url": config.mimo_asr_api_base or "https://api.xiaomimimo.com/v1",
+        "model": config.mimo_asr_model or "mimo-v2.5-asr",
+        "timeout": config.mimo_asr_timeout,
+        "aligner_model": config.qwen_aligner_model or "Qwen/Qwen3-ForcedAligner-0.6B",
+        "aligner_model_dir": config.qwen_model_dir or "",
+        "aligner_device": config.qwen_device or "auto",
+        "aligner_dtype": config.qwen_dtype or "auto",
+        "aligner_temp_dir": config.runtime_temp_dir or "",
+    }
+    return ChunkedASR(
+        asr_class=MiMoASR,
+        audio_path=audio_path,
+        asr_kwargs=asr_kwargs,
+        chunk_length=60 * 5,
+        chunk_overlap=chunk_overlap,
+        chunk_concurrency=1,
+    )
+
+
+def _create_qwen_local_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
+    """Create local Qwen3 ASR instance with Qwen3-ForcedAligner support."""
+    chunk_overlap = _qwen_chunk_overlap(config)
+    asr_kwargs = {
+        "use_cache": True,
+        "need_word_time_stamp": config.need_word_time_stamp,
+        "language": config.transcribe_language,
+        "asr_model": config.qwen_asr_model or "Qwen/Qwen3-ASR-1.7B",
+        "aligner_model": config.qwen_aligner_model or "Qwen/Qwen3-ForcedAligner-0.6B",
+        "model_dir": config.qwen_model_dir or "",
+        "device": config.qwen_device or "auto",
+        "dtype": config.qwen_dtype or "auto",
+        "max_new_tokens": config.qwen_max_new_tokens,
+        "temp_dir": config.runtime_temp_dir or "",
+    }
+    return ChunkedASR(
+        asr_class=QwenLocalASR,
+        audio_path=audio_path,
+        asr_kwargs=asr_kwargs,
+        chunk_length=60 * 5,
+        chunk_overlap=chunk_overlap,
+        chunk_concurrency=1,
+    )
+
+
+def _qwen_chunk_overlap(config: TranscribeConfig) -> int:
+    return max(0, min(int(config.qwen_chunk_overlap_seconds), 60))
 
 
 def _create_faster_whisper_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:

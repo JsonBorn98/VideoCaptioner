@@ -18,7 +18,7 @@ from qfluentwidgets import (
     qconfig,
 )
 
-from videocaptioner.config import SETTINGS_PATH, WORK_PATH
+from videocaptioner.config import MODEL_PATH, SETTINGS_PATH, WORK_PATH
 from videocaptioner.core.entities import (
     FasterWhisperModelEnum,
     LLMServiceEnum,
@@ -219,6 +219,51 @@ class Config(QConfig):
     whisper_api_key = ConfigItem("WhisperAPI", "WhisperApiKey", "")
     whisper_api_model = OptionsConfigItem("WhisperAPI", "WhisperApiModel", "")
     whisper_api_prompt = ConfigItem("WhisperAPI", "WhisperApiPrompt", "")
+
+    # ------------------- MiMo ASR API 配置 -------------------
+    mimo_asr_api_base = ConfigItem(
+        "MiMoASR", "ApiBase", "https://api.xiaomimimo.com/v1"
+    )
+    mimo_asr_api_key = ConfigItem("MiMoASR", "ApiKey", "")
+    mimo_asr_model = ConfigItem("MiMoASR", "Model", "mimo-v2.5-asr")
+    mimo_asr_timeout = RangeConfigItem(
+        "MiMoASR", "Timeout", 600, RangeValidator(30, 7200)
+    )
+
+    # ------------------- Qwen3 ASR / Forced Aligner 配置 -------------------
+    qwen_asr_model = OptionsConfigItem(
+        "QwenASR",
+        "AsrModel",
+        "Qwen/Qwen3-ASR-1.7B",
+        OptionsValidator(["Qwen/Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-0.6B"]),
+    )
+    qwen_aligner_model = OptionsConfigItem(
+        "QwenASR",
+        "AlignerModel",
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        OptionsValidator(["Qwen/Qwen3-ForcedAligner-0.6B"]),
+    )
+    qwen_model_dir = ConfigItem(
+        "QwenASR", "ModelDir", str(MODEL_PATH), FolderValidator()
+    )
+    qwen_device = OptionsConfigItem(
+        "QwenASR",
+        "Device",
+        "auto",
+        OptionsValidator(["auto", "cuda:0", "cpu"]),
+    )
+    qwen_dtype = OptionsConfigItem(
+        "QwenASR",
+        "DType",
+        "auto",
+        OptionsValidator(["auto", "bfloat16", "float16", "float32"]),
+    )
+    qwen_max_new_tokens = RangeConfigItem(
+        "QwenASR", "MaxNewTokens", 2048, RangeValidator(64, 8192)
+    )
+    qwen_chunk_overlap_seconds = RangeConfigItem(
+        "QwenASR", "ChunkOverlapSeconds", 10, RangeValidator(0, 60)
+    )
 
     # ------------------- 字幕配置 -------------------
     need_optimize = ConfigItem("Subtitle", "NeedOptimize", False, BoolValidator())

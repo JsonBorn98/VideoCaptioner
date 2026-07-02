@@ -1,4 +1,5 @@
 import datetime
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -12,10 +13,17 @@ from videocaptioner.core.entities import (
     SynthesisConfig,
     SynthesisTask,
     TranscribeConfig,
+    TranscribeModelEnum,
     TranscribeTask,
     TranscriptAndSubtitleTask,
 )
 from videocaptioner.ui.common.config import cfg
+
+
+def _safe_file_stem_from_source(source: str) -> str:
+    stem = Path(source).stem or "media"
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem).strip(" ._")
+    return stem or "media"
 
 
 class TaskFactory:
@@ -49,17 +57,24 @@ class TaskFactory:
 
     @staticmethod
     def create_transcribe_task(
-        file_path: str,
+        file_path: str = "",
         need_next_task: bool = False,
         task_id: Optional[str] = None,
     ) -> TranscribeTask:
         """创建转录任务"""
         # 获取文件名
-        file_name = Path(file_path).stem
+        file_name = _safe_file_stem_from_source(file_path)
+        has_local_file = bool(file_path and Path(file_path).exists())
 
         # 构建输出路径
+        transcribe_model = cfg.transcribe_model.value
+        timestamp_models = {
+            TranscribeModelEnum.MIMO_ASR_API,
+            TranscribeModelEnum.QWEN_LOCAL_ASR,
+        }
+
         if need_next_task:
-            need_word_time_stamp = cfg.need_split.value
+            need_word_time_stamp = cfg.need_split.value or transcribe_model in timestamp_models
             output_path = str(
                 Path(cfg.work_dir.value)
                 / file_name
@@ -67,8 +82,9 @@ class TaskFactory:
                 / f"【原始字幕】{file_name}-{cfg.transcribe_model.value.value}-{cfg.transcribe_language.value.value}.srt"
             )
         else:
-            need_word_time_stamp = False
-            output_path = str(Path(file_path).parent / f"{file_name}.srt")
+            need_word_time_stamp = transcribe_model in timestamp_models
+            output_dir = Path(file_path).parent if has_local_file else Path(cfg.work_dir.value)
+            output_path = str(output_dir / f"{file_name}.srt")
 
         config = TranscribeConfig(
             transcribe_model=cfg.transcribe_model.value,
@@ -82,6 +98,19 @@ class TaskFactory:
             whisper_api_base=cfg.whisper_api_base.value,
             whisper_api_model=cfg.whisper_api_model.value,
             whisper_api_prompt=cfg.whisper_api_prompt.value,
+            # MiMo ASR API 配置
+            mimo_asr_api_key=cfg.mimo_asr_api_key.value,
+            mimo_asr_api_base=cfg.mimo_asr_api_base.value,
+            mimo_asr_model=cfg.mimo_asr_model.value,
+            mimo_asr_timeout=cfg.mimo_asr_timeout.value,
+            # Qwen ASR / Forced Aligner 配置
+            qwen_asr_model=cfg.qwen_asr_model.value,
+            qwen_aligner_model=cfg.qwen_aligner_model.value,
+            qwen_model_dir=cfg.qwen_model_dir.value,
+            qwen_device=cfg.qwen_device.value,
+            qwen_dtype=cfg.qwen_dtype.value,
+            qwen_max_new_tokens=cfg.qwen_max_new_tokens.value,
+            qwen_chunk_overlap_seconds=cfg.qwen_chunk_overlap_seconds.value,
             # Faster Whisper 配置
             faster_whisper_program=cfg.faster_whisper_program.value,
             faster_whisper_model=cfg.faster_whisper_model.value,

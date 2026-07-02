@@ -39,7 +39,11 @@ docs/.vitepress/dist/
 !/resource/bin/bin_environment.txt
 /AppData/
 /work-dir/
+/.videocaptioner-*/
+**/.videocaptioner-*/
 /*.srt
+/*.ass
+/*.vtt
 /*.mp4
 *.log
 

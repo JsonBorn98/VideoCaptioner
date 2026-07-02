@@ -1,6 +1,6 @@
 from typing import Any, Callable, List, Optional, Union
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 from videocaptioner.core.llm.client import normalize_base_url
 
@@ -63,7 +63,7 @@ class WhisperAPI(BaseASR):
 
     def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
         """Convert API response to segments."""
-        if self.need_word_time_stamp and "words" in resp_data:
+        if self.need_word_time_stamp and resp_data.get("words"):
             return [
                 ASRDataSeg(
                     text=word["word"],
@@ -72,7 +72,8 @@ class WhisperAPI(BaseASR):
                 )
                 for word in resp_data["words"]
             ]
-        else:
+
+        if resp_data.get("segments"):
             return [
                 ASRDataSeg(
                     text=seg["text"].strip(),
@@ -81,6 +82,16 @@ class WhisperAPI(BaseASR):
                 )
                 for seg in resp_data["segments"]
             ]
+
+        text = str(resp_data.get("text", "")).strip()
+        if text:
+            end_time = max(int(self.audio_duration * 1000), 1)
+            logger.warning(
+                "WhisperAPI response did not include timestamps; using one full-duration segment"
+            )
+            return [ASRDataSeg(text=text, start_time=0, end_time=end_time)]
+
+        raise ValueError("WhisperAPI response missing both 'segments' and 'text'.")
 
     def _get_key(self) -> str:
         """Get cache key including model and language."""
@@ -95,23 +106,53 @@ class WhisperAPI(BaseASR):
             if not self.base_url:
                 raise ValueError("Whisper BASE_URL must be set")
 
-            api_kwargs: dict[str, Any] = {
-                "model": self.model,
-                "response_format": "verbose_json",
-                "file": ("audio.mp3", self.file_binary or b"", "audio/mp3"),
-                "prompt": self.prompt,
-                "timestamp_granularities": ["word", "segment"],
-            }
-            # 空字符串表示自动检测，不传 language 参数让 API 自行判断
-            if self.language:
-                api_kwargs["language"] = self.language
+            attempts: list[tuple[str, dict[str, Any]]] = [
+                (
+                    "verbose_json with word/segment timestamps",
+                    {
+                        "response_format": "verbose_json",
+                        "timestamp_granularities": ["word", "segment"],
+                    },
+                ),
+                ("verbose_json", {"response_format": "verbose_json"}),
+                ("json", {"response_format": "json"}),
+                ("text", {"response_format": "text"}),
+            ]
 
-            completion = self.client.audio.transcriptions.create(**api_kwargs)
-            if isinstance(completion, str):
-                raise ValueError(
-                    "WhisperAPI returned type error, please check your base URL."
-                )
-            return completion.to_dict()
+            last_bad_request: Exception | None = None
+            for label, extra_kwargs in attempts:
+                api_kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "file": ("audio.mp3", self.file_binary or b"", "audio/mp3"),
+                    "prompt": self.prompt,
+                    **extra_kwargs,
+                }
+                # 空字符串表示自动检测，不传 language 参数让 API 自行判断
+                if self.language:
+                    api_kwargs["language"] = self.language
+
+                try:
+                    completion = self.client.audio.transcriptions.create(**api_kwargs)
+                    logger.debug("WhisperAPI request succeeded via %s", label)
+                    if isinstance(completion, str):
+                        return {"text": completion}
+                    if hasattr(completion, "to_dict"):
+                        return completion.to_dict()
+                    if isinstance(completion, dict):
+                        return completion
+                    return {"text": str(completion)}
+                except BadRequestError as exc:
+                    # Some OpenAI-compatible ASR endpoints reject timestamp_granularities
+                    # or verbose_json. Retry progressively simpler request shapes.
+                    last_bad_request = exc
+                    logger.warning(
+                        "WhisperAPI request attempt failed via %s: %s", label, exc
+                    )
+                    continue
+
+            if last_bad_request:
+                raise last_bad_request
+            raise RuntimeError("WhisperAPI request failed before sending any attempt")
         except Exception:
             logger.exception("WhisperAPI failed")
             raise

@@ -2,6 +2,8 @@ from .bcut import BcutASR
 from .chunked_asr import ChunkedASR
 from .faster_whisper import FasterWhisperASR
 from .jianying import JianYingASR
+from .mimo_asr import MiMoASR
+from .qwen_local_asr import QwenLocalASR
 from .status import ASRStatus
 from .transcribe import transcribe
 from .whisper_api import WhisperAPI
@@ -12,6 +14,8 @@ __all__ = [
     "ChunkedASR",
     "FasterWhisperASR",
     "JianYingASR",
+    "MiMoASR",
+    "QwenLocalASR",
     "WhisperAPI",
     "WhisperCppASR",
     "transcribe",

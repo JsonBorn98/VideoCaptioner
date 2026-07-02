@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import QStandardPaths, Qt, pyqtSignal
+from PyQt5.QtCore import QStandardPaths, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -140,10 +140,14 @@ class VideoInfoCard(CardWidget):
         self.button_layout = QVBoxLayout()
         self.open_folder_button = PushButton(self.tr("打开文件夹"), self)
         self.start_button = PrimaryPushButton(self.tr("开始转录"), self)
+        self.stop_button = PushButton(self.tr("停止转录"), self)
+        self.stop_button.setIcon(FluentIcon.CANCEL)
         self.button_layout.addWidget(self.open_folder_button)
         self.button_layout.addWidget(self.start_button)
+        self.button_layout.addWidget(self.stop_button)
 
         self.start_button.setDisabled(True)
+        self.stop_button.hide()
 
         button_widget = QWidget()
         button_widget.setLayout(self.button_layout)
@@ -172,6 +176,20 @@ class VideoInfoCard(CardWidget):
         else:
             self.start_button.setEnabled(True)
         self.update_thumbnail(video_info.thumbnail_path)
+
+    def update_waiting_for_media(self) -> None:
+        self.video_info = None
+        self.task = None
+        self.video_title.setText(self.tr("请拖入音频或视频文件"))
+        self.resolution_info.setText(self.tr("画质"))
+        self.file_size_info.setText(self.tr("文件大小"))
+        self.duration_info.setText(self.tr("时长"))
+        self.audio_track_button.hide()
+        self.progress_ring.hide()
+        self.start_button.setText(self.tr("开始转录"))
+        self.start_button.setDisabled(True)
+        self.stop_button.hide()
+        self.update_thumbnail(str(DEFAULT_THUMBNAIL_PATH))
 
     def update_audio_tracks(self, video_info: VideoInfo) -> None:
         """更新音轨选择按钮"""
@@ -254,6 +272,7 @@ class VideoInfoCard(CardWidget):
 
     def setup_signals(self) -> None:
         self.start_button.clicked.connect(self.on_start_button_clicked)
+        self.stop_button.clicked.connect(self.on_stop_button_clicked)
         self.open_folder_button.clicked.connect(self.on_open_folder_clicked)
 
     def on_start_button_clicked(self):
@@ -261,7 +280,14 @@ class VideoInfoCard(CardWidget):
         self.progress_ring.setValue(0)
         self.progress_ring.show()
         self.start_button.setDisabled(True)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText(self.tr("停止转录"))
+        self.stop_button.show()
         self.start_transcription()
+
+    def on_stop_button_clicked(self):
+        """停止转录按钮点击事件"""
+        self.stop_transcription()
 
     def on_open_folder_clicked(self):
         """打开文件夹按钮点击事件"""
@@ -285,9 +311,24 @@ class VideoInfoCard(CardWidget):
         """开始转录过程"""
         self.transcription_interface.is_processing = True  # type: ignore
         self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.show()
 
         if need_create_task:
-            self.task = TaskFactory.create_transcribe_task(self.video_info.file_path)
+            if self.video_info is not None:
+                self.task = TaskFactory.create_transcribe_task(self.video_info.file_path)
+            else:
+                self.transcription_interface.is_processing = False  # type: ignore
+                self.progress_ring.hide()
+                self.start_button.setEnabled(True)
+                self.stop_button.hide()
+                InfoBar.warning(
+                    self.tr("配置不完整"),
+                    self.tr("请先选择媒体文件"),
+                    duration=INFOBAR_DURATION_WARNING,
+                    parent=self.parent().parent(),
+                )
+                return
 
         if not self.task:
             return
@@ -299,6 +340,7 @@ class VideoInfoCard(CardWidget):
         self.transcript_thread.finished.connect(self.on_transcript_finished)
         self.transcript_thread.progress.connect(self.on_transcript_progress)
         self.transcript_thread.error.connect(self.on_transcript_error)
+        self.transcript_thread.canceled.connect(self.on_transcript_canceled)
         self.transcript_thread.start()
 
     def on_transcript_progress(self, value, message):
@@ -311,6 +353,7 @@ class VideoInfoCard(CardWidget):
         self.transcription_interface.is_processing = False  # type: ignore
         self.start_button.setEnabled(True)
         self.start_button.setText(self.tr("重新转录"))
+        self.stop_button.hide()
         self.progress_ring.hide()
         InfoBar.error(
             self.tr("转录失败"),
@@ -323,13 +366,30 @@ class VideoInfoCard(CardWidget):
         """转录完成处理"""
         self.start_button.setEnabled(True)
         self.start_button.setText(self.tr("转录完成"))
+        self.stop_button.hide()
         self.progress_ring.hide()
         self.finished.emit(task)
+
+    def on_transcript_canceled(self):
+        """转录取消处理"""
+        self.transcription_interface.is_processing = False  # type: ignore
+        self.start_button.setEnabled(True)
+        self.start_button.setText(self.tr("重新转录"))
+        self.stop_button.hide()
+        self.progress_ring.hide()
+        InfoBar.warning(
+            self.tr("已停止"),
+            self.tr("转录任务已停止，未保存新的字幕文件"),
+            duration=INFOBAR_DURATION_WARNING,
+            position=InfoBarPosition.BOTTOM,
+            parent=self.parent().parent(),
+        )
 
     def reset_ui(self):
         """重置UI状态"""
         self.start_button.setDisabled(False)
         self.start_button.setText(self.tr("开始转录"))
+        self.stop_button.hide()
         self.progress_ring.setValue(0)
         self.progress_ring.hide()
 
@@ -340,7 +400,24 @@ class VideoInfoCard(CardWidget):
 
     def stop(self):
         if hasattr(self, "transcript_thread"):
-            self.transcript_thread.terminate()
+            self.transcript_thread.cancel(force=True)
+
+    def stop_transcription(self):
+        if not hasattr(self, "transcript_thread"):
+            return
+        if not self.transcript_thread.isRunning():
+            return
+
+        self.start_button.setText(self.tr("正在停止..."))
+        self.start_button.setEnabled(False)
+        self.stop_button.setText(self.tr("正在停止..."))
+        self.stop_button.setEnabled(False)
+        self.transcript_thread.cancel()
+        QTimer.singleShot(3000, self._force_stop_if_needed)
+
+    def _force_stop_if_needed(self):
+        if hasattr(self, "transcript_thread") and self.transcript_thread.isRunning():
+            self.transcript_thread.cancel(force=True)
 
 
 class TranscriptionInterface(QWidget):
@@ -463,6 +540,8 @@ class TranscriptionInterface(QWidget):
             if model.value == model_name:
                 cfg.set(cfg.transcribe_model, model)
                 break
+        if self.video_info_card.video_info is None and self.video_info_card.task is None:
+            self.video_info_card.update_waiting_for_media()
 
     def _on_transcript_finished(self, task: TranscribeTask):
         """转录完成处理"""

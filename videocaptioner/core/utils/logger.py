@@ -28,6 +28,7 @@ def setup_logger(
 
     logger = logging.getLogger(name)
     logger.setLevel(level)
+    logger.propagate = False
 
     if not logger.handlers:
         class LevelSpecificFormatter(logging.Formatter):

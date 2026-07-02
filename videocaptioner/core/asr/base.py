@@ -111,10 +111,11 @@ class BaseASR:
         # Run ASR
         resp_data = self._run(callback, **kwargs)
 
-        # Cache result
-        self._cache.set(cache_key, resp_data, expire=86400 * 2)
-
         segments = self._make_segments(resp_data)
+
+        # Cache only after the raw response can be converted successfully.
+        # This avoids persisting partial API results when post-processing fails.
+        self._cache.set(cache_key, resp_data, expire=86400 * 2)
         return ASRData(segments)
 
     def _get_key(self) -> str:

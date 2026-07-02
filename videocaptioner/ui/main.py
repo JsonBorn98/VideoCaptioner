@@ -5,8 +5,21 @@ import platform
 import sys
 
 
+def _preload_torch_before_qt() -> None:
+    """Avoid Windows DLL init failures when Qt is loaded before PyTorch."""
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("torch") is not None:
+            import torch  # noqa: F401
+    except ImportError:
+        pass
+
+
 def main():
     import traceback
+
+    _preload_torch_before_qt()
 
     from PyQt5.QtCore import Qt, QTranslator
     from PyQt5.QtWidgets import QApplication

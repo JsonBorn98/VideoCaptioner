@@ -119,6 +119,8 @@ class TranscribeModelEnum(Enum):
     BIJIAN = "B 接口"
     JIANYING = "J 接口"
     WHISPER_API = "Whisper [API] ✨"
+    MIMO_ASR_API = "MiMoASR [API]"
+    QWEN_LOCAL_ASR = "Qwen3ASR [Local]"
     FASTER_WHISPER = "FasterWhisper ✨"
     WHISPER_CPP = "WhisperCpp"
 
@@ -507,6 +509,48 @@ ASR_LANGUAGE_CAPABILITIES: dict[TranscribeModelEnum, ASRLanguageCapability] = {
         supported_languages=_get_all_languages_except_auto(),
         supports_auto=True,
     ),
+    TranscribeModelEnum.MIMO_ASR_API: ASRLanguageCapability(
+        supported_languages=[
+            TranscribeLanguageEnum.CHINESE,
+            TranscribeLanguageEnum.ENGLISH,
+        ],
+        supports_auto=True,
+    ),
+    TranscribeModelEnum.QWEN_LOCAL_ASR: ASRLanguageCapability(
+        supported_languages=[
+            TranscribeLanguageEnum.CHINESE,
+            TranscribeLanguageEnum.ENGLISH,
+            TranscribeLanguageEnum.YUE,
+            TranscribeLanguageEnum.ARABIC,
+            TranscribeLanguageEnum.GERMAN,
+            TranscribeLanguageEnum.FRENCH,
+            TranscribeLanguageEnum.SPANISH,
+            TranscribeLanguageEnum.PORTUGUESE,
+            TranscribeLanguageEnum.INDONESIAN,
+            TranscribeLanguageEnum.ITALIAN,
+            TranscribeLanguageEnum.KOREAN,
+            TranscribeLanguageEnum.RUSSIAN,
+            TranscribeLanguageEnum.THAI,
+            TranscribeLanguageEnum.VIETNAMESE,
+            TranscribeLanguageEnum.JAPANESE,
+            TranscribeLanguageEnum.TURKISH,
+            TranscribeLanguageEnum.HINDI,
+            TranscribeLanguageEnum.MALAY,
+            TranscribeLanguageEnum.DUTCH,
+            TranscribeLanguageEnum.SWEDISH,
+            TranscribeLanguageEnum.DANISH,
+            TranscribeLanguageEnum.FINNISH,
+            TranscribeLanguageEnum.POLISH,
+            TranscribeLanguageEnum.CZECH,
+            TranscribeLanguageEnum.TAGALOG,
+            TranscribeLanguageEnum.PERSIAN,
+            TranscribeLanguageEnum.GREEK,
+            TranscribeLanguageEnum.HUNGARIAN,
+            TranscribeLanguageEnum.MACEDONIAN,
+            TranscribeLanguageEnum.ROMANIAN,
+        ],
+        supports_auto=True,
+    ),
 }
 
 
@@ -564,6 +608,20 @@ class TranscribeConfig:
     whisper_api_base: Optional[str] = None
     whisper_api_model: Optional[str] = None
     whisper_api_prompt: Optional[str] = None
+    # MiMo ASR API 配置
+    mimo_asr_api_key: Optional[str] = None
+    mimo_asr_api_base: Optional[str] = None
+    mimo_asr_model: Optional[str] = None
+    mimo_asr_timeout: int = 600
+    # Qwen ASR / Qwen forced aligner 配置
+    qwen_asr_model: Optional[str] = None
+    qwen_aligner_model: Optional[str] = None
+    qwen_model_dir: Optional[str] = None
+    qwen_device: str = "auto"
+    qwen_dtype: str = "auto"
+    qwen_max_new_tokens: int = 2048
+    qwen_chunk_overlap_seconds: int = 10
+    runtime_temp_dir: Optional[str] = None
     # Faster Whisper 配置
     faster_whisper_program: Optional[str] = None
     faster_whisper_model: Optional[FasterWhisperModelEnum] = None
@@ -600,6 +658,25 @@ class TranscribeConfig:
             lines.append(f"API Model: {self.whisper_api_model}")
             if self.whisper_api_prompt:
                 lines.append(f"Prompt: {self.whisper_api_prompt[:30]}...")
+
+        elif self.transcribe_model == TranscribeModelEnum.MIMO_ASR_API:
+            lines.append(f"API Base: {self.mimo_asr_api_base}")
+            lines.append(f"API Key: {self._mask_key(self.mimo_asr_api_key)}")
+            lines.append(f"API Model: {self.mimo_asr_model}")
+            lines.append("Native Timestamps: No")
+            lines.append(f"Aligner Model: {self.qwen_aligner_model}")
+            lines.append(f"Aligner Device: {self.qwen_device}")
+            lines.append(f"Chunk Overlap: {self.qwen_chunk_overlap_seconds}s")
+            lines.append(f"Timeout: {self.mimo_asr_timeout}s")
+
+        elif self.transcribe_model == TranscribeModelEnum.QWEN_LOCAL_ASR:
+            lines.append(f"ASR Model: {self.qwen_asr_model}")
+            lines.append(f"Aligner Model: {self.qwen_aligner_model}")
+            lines.append(f"Model Dir: {self.qwen_model_dir}")
+            lines.append(f"Device: {self.qwen_device}")
+            lines.append(f"DType: {self.qwen_dtype}")
+            lines.append(f"Max New Tokens: {self.qwen_max_new_tokens}")
+            lines.append(f"Chunk Overlap: {self.qwen_chunk_overlap_seconds}s")
 
         elif self.transcribe_model == TranscribeModelEnum.FASTER_WHISPER:
             lines.append(

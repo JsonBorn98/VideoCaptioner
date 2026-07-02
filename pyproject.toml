@@ -43,6 +43,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = []
+qwen = ["qwen-asr"]
 
 [project.urls]
 Homepage = "https://github.com/WEIFENG2333/VideoCaptioner"

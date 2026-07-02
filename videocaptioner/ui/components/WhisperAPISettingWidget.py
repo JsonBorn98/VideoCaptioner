@@ -16,10 +16,13 @@ from qfluentwidgets import FluentIcon as FIF
 from videocaptioner.core.constant import INFOBAR_DURATION_ERROR, INFOBAR_DURATION_SUCCESS
 from videocaptioner.core.entities import TranscribeLanguageEnum
 from videocaptioner.core.llm import check_whisper_connection
+from videocaptioner.core.utils.logger import setup_logger
 
 from ..common.config import cfg
 from .EditComboBoxSettingCard import EditComboBoxSettingCard
 from .LineEditSettingCard import LineEditSettingCard
+
+logger = setup_logger("whisper_api_settings")
 
 
 class WhisperAPISettingWidget(QWidget):
@@ -154,7 +157,7 @@ class WhisperAPISettingWidget(QWidget):
 
         # 创建并启动测试线程
         self.connection_thread = WhisperConnectionThread(base_url, api_key, model)
-        self.connection_thread.finished.connect(self.on_connection_check_finished)
+        self.connection_thread.result_ready.connect(self.on_connection_check_finished)
         self.connection_thread.error.connect(self.on_connection_check_error)
         self.connection_thread.start()
 
@@ -198,7 +201,7 @@ class WhisperAPISettingWidget(QWidget):
 class WhisperConnectionThread(QThread):
     """Whisper API 连接测试线程"""
 
-    finished = pyqtSignal(bool, str)
+    result_ready = pyqtSignal(bool, str)
     error = pyqtSignal(str)
 
     def __init__(self, base_url, api_key, model):
@@ -213,6 +216,7 @@ class WhisperConnectionThread(QThread):
             success, result = check_whisper_connection(
                 self.base_url, self.api_key, self.model
             )
-            self.finished.emit(success, result)
+            self.result_ready.emit(success, result or "")
         except Exception as e:
+            logger.exception("Whisper API connection thread failed")
             self.error.emit(str(e))

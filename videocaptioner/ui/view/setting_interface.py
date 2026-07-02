@@ -27,14 +27,22 @@ from videocaptioner.core.constant import (
     INFOBAR_DURATION_SUCCESS,
     INFOBAR_DURATION_WARNING,
 )
-from videocaptioner.core.entities import LLMServiceEnum, TranscribeModelEnum, TranslatorServiceEnum
+from videocaptioner.core.entities import (
+    LANGUAGES,
+    LLMServiceEnum,
+    TranscribeModelEnum,
+    TranslatorServiceEnum,
+)
 from videocaptioner.core.llm import check_whisper_connection
 from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
+from videocaptioner.core.llm.check_mimo_asr import check_mimo_asr_connection
 from videocaptioner.core.utils.cache import disable_cache, enable_cache
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.components.EditComboBoxSettingCard import EditComboBoxSettingCard
 from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
+from videocaptioner.ui.components.QwenASRSettingWidget import QwenModelDownloadDialog
+from videocaptioner.ui.components.SpinBoxSettingCard import SpinBoxSettingCard
 
 
 class SettingInterface(ScrollArea):
@@ -481,11 +489,139 @@ class SettingInterface(ScrollArea):
             self.transcribeGroup,
         )
 
+        self.mimoAsrBaseCard = LineEditSettingCard(
+            cfg.mimo_asr_api_base,
+            FIF.LINK,
+            self.tr("MiMo ASR API Base URL"),
+            self.tr("输入 MiMo ASR API Base URL"),
+            "https://api.xiaomimimo.com/v1",
+            self.transcribeGroup,
+        )
+        self.mimoAsrKeyCard = LineEditSettingCard(
+            cfg.mimo_asr_api_key,
+            FIF.FINGERPRINT,
+            self.tr("MiMo ASR API Key"),
+            self.tr("输入 MiMo API Key"),
+            "sk-",
+            self.transcribeGroup,
+        )
+        self.mimoAsrModelCard = EditComboBoxSettingCard(
+            cfg.mimo_asr_model,
+            FIF.ROBOT,  # type: ignore
+            self.tr("MiMo ASR 模型"),
+            self.tr("选择 MiMo ASR 模型"),
+            ["mimo-v2.5-asr"],
+            self.transcribeGroup,
+        )
+        self.mimoAsrTimeoutCard = SpinBoxSettingCard(
+            cfg.mimo_asr_timeout,
+            FIF.SPEED_HIGH,  # type: ignore
+            self.tr("超时时间"),
+            self.tr("长音频分块同步等待秒数"),
+            30,
+            7200,
+            self.transcribeGroup,
+        )
+        self.checkMimoAsrConnectionCard = PushSettingCard(
+            self.tr("测试 MiMo ASR 连接"),
+            FIF.CONNECT,
+            self.tr("测试 MiMo ASR API 连接"),
+            self.tr("点击测试 API 连接是否正常"),
+            self.transcribeGroup,
+        )
+
+        self.qwenAsrModelCard = ComboBoxSettingCard(
+            cfg.qwen_asr_model,
+            FIF.ROBOT,
+            self.tr("Qwen3 ASR 模型"),
+            self.tr("选择本地 Qwen3 ASR 模型"),
+            ["Qwen/Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-0.6B"],
+            self.transcribeGroup,
+        )
+        self.qwenAlignerModelCard = ComboBoxSettingCard(
+            cfg.qwen_aligner_model,
+            FIF.SYNC,
+            self.tr("Qwen3 对齐模型"),
+            self.tr("选择 Qwen3-ForcedAligner 模型"),
+            ["Qwen/Qwen3-ForcedAligner-0.6B"],
+            self.transcribeGroup,
+        )
+        self.qwenModelDirCard = LineEditSettingCard(
+            cfg.qwen_model_dir,
+            FIF.FOLDER,
+            self.tr("Qwen 模型目录"),
+            self.tr("本地模型目录；已下载模型会优先从这里加载"),
+            "",
+            self.transcribeGroup,
+        )
+        self.qwenDeviceCard = ComboBoxSettingCard(
+            cfg.qwen_device,
+            FIF.IOT,
+            self.tr("Qwen 运行设备"),
+            self.tr("auto / cuda:0 / cpu"),
+            ["auto", "cuda:0", "cpu"],
+            self.transcribeGroup,
+        )
+        self.qwenDTypeCard = ComboBoxSettingCard(
+            cfg.qwen_dtype,
+            FIF.SPEED_HIGH,  # type: ignore
+            self.tr("Qwen 计算精度"),
+            self.tr("auto / bfloat16 / float16 / float32"),
+            ["auto", "bfloat16", "float16", "float32"],
+            self.transcribeGroup,
+        )
+        self.qwenMaxTokensCard = SpinBoxSettingCard(
+            cfg.qwen_max_new_tokens,
+            FIF.CODE,  # type: ignore
+            self.tr("Qwen 最大输出 Tokens"),
+            self.tr("长音频分块转写时的最大生成长度"),
+            64,
+            8192,
+            self.transcribeGroup,
+        )
+        self.qwenChunkOverlapCard = SpinBoxSettingCard(
+            cfg.qwen_chunk_overlap_seconds,
+            FIF.ALIGNMENT,  # type: ignore
+            self.tr("分块重叠秒数"),
+            self.tr("相邻 5 分钟音频块的重叠时长，减少切分点漏词"),
+            0,
+            60,
+            self.transcribeGroup,
+        )
+        self.manageQwenModelCard = PushSettingCard(
+            self.tr("管理 Qwen 模型"),
+            FIF.DOWNLOAD,
+            self.tr("Qwen 模型管理"),
+            self.tr("下载或更新 Qwen3 ASR / ForcedAligner 模型"),
+            self.transcribeGroup,
+        )
+
         # 默认隐藏 Whisper API 配置卡片（仅在选择 Whisper API 时显示）
         self.whisperApiBaseCard.setVisible(False)
         self.whisperApiKeyCard.setVisible(False)
         self.whisperApiModelCard.setVisible(False)
         self.checkWhisperConnectionCard.setVisible(False)
+
+        for card in [
+            self.mimoAsrBaseCard,
+            self.mimoAsrKeyCard,
+            self.mimoAsrModelCard,
+            self.mimoAsrTimeoutCard,
+            self.checkMimoAsrConnectionCard,
+        ]:
+            card.setVisible(False)
+
+        for card in [
+            self.qwenAsrModelCard,
+            self.qwenAlignerModelCard,
+            self.qwenModelDirCard,
+            self.qwenDeviceCard,
+            self.qwenDTypeCard,
+            self.qwenMaxTokensCard,
+            self.qwenChunkOverlapCard,
+            self.manageQwenModelCard,
+        ]:
+            card.setVisible(False)
 
     def __createTranslateServiceCards(self):
         """创建翻译服务相关的配置卡片"""
@@ -602,6 +738,19 @@ class SettingInterface(ScrollArea):
         self.transcribeGroup.addSettingCard(self.whisperApiKeyCard)
         self.transcribeGroup.addSettingCard(self.whisperApiModelCard)
         self.transcribeGroup.addSettingCard(self.checkWhisperConnectionCard)
+        self.transcribeGroup.addSettingCard(self.mimoAsrBaseCard)
+        self.transcribeGroup.addSettingCard(self.mimoAsrKeyCard)
+        self.transcribeGroup.addSettingCard(self.mimoAsrModelCard)
+        self.transcribeGroup.addSettingCard(self.mimoAsrTimeoutCard)
+        self.transcribeGroup.addSettingCard(self.checkMimoAsrConnectionCard)
+        self.transcribeGroup.addSettingCard(self.qwenAsrModelCard)
+        self.transcribeGroup.addSettingCard(self.qwenAlignerModelCard)
+        self.transcribeGroup.addSettingCard(self.qwenModelDirCard)
+        self.transcribeGroup.addSettingCard(self.qwenDeviceCard)
+        self.transcribeGroup.addSettingCard(self.qwenDTypeCard)
+        self.transcribeGroup.addSettingCard(self.qwenMaxTokensCard)
+        self.transcribeGroup.addSettingCard(self.qwenChunkOverlapCard)
+        self.transcribeGroup.addSettingCard(self.manageQwenModelCard)
 
         # 添加LLM配置卡片
         self.llmGroup.addSettingCard(self.llmServiceCard)
@@ -648,6 +797,8 @@ class SettingInterface(ScrollArea):
 
         # 检查 Whisper 连接
         self.checkWhisperConnectionCard.clicked.connect(self.checkWhisperConnection)
+        self.checkMimoAsrConnectionCard.clicked.connect(self.checkMimoAsrConnection)
+        self.manageQwenModelCard.clicked.connect(self.showQwenModelManager)
 
         # 保存路径
         self.savePathCard.clicked.connect(self.__onsavePathCardClicked)
@@ -892,15 +1043,114 @@ class SettingInterface(ScrollArea):
             self.whisperApiModelCard,
             self.checkWhisperConnectionCard,
         ]
+        mimo_asr_cards = [
+            self.mimoAsrBaseCard,
+            self.mimoAsrKeyCard,
+            self.mimoAsrModelCard,
+            self.mimoAsrTimeoutCard,
+            self.checkMimoAsrConnectionCard,
+        ]
+        qwen_local_only_cards = [self.qwenAsrModelCard, self.qwenMaxTokensCard]
+        qwen_aligner_cards = [
+            self.qwenAlignerModelCard,
+            self.qwenModelDirCard,
+            self.qwenDeviceCard,
+            self.qwenDTypeCard,
+            self.qwenChunkOverlapCard,
+            self.manageQwenModelCard,
+        ]
 
         # 根据选择的模型显示/隐藏 Whisper API 配置
         is_whisper_api = model_name == TranscribeModelEnum.WHISPER_API.value
+        is_mimo_asr = model_name == TranscribeModelEnum.MIMO_ASR_API.value
+        is_qwen_asr = model_name == TranscribeModelEnum.QWEN_LOCAL_ASR.value
         for card in whisper_api_cards:
             card.setVisible(is_whisper_api)
+        for card in mimo_asr_cards:
+            card.setVisible(is_mimo_asr)
+        for card in qwen_local_only_cards:
+            card.setVisible(is_qwen_asr)
+        for card in qwen_aligner_cards:
+            card.setVisible(is_qwen_asr or is_mimo_asr)
 
         # 更新布局
         self.transcribeGroup.adjustSize()
         self.expandLayout.update()
+
+    def showQwenModelManager(self):
+        """显示 Qwen 模型管理对话框"""
+        dialog = QwenModelDownloadDialog(self.window())
+        dialog.exec_()
+
+    def checkMimoAsrConnection(self):
+        """检查 MiMo ASR API 连接"""
+        base_url = self.mimoAsrBaseCard.lineEdit.text().strip()
+        api_key = self.mimoAsrKeyCard.lineEdit.text().strip()
+        model = self.mimoAsrModelCard.comboBox.currentText().strip()
+
+        if not base_url or not api_key or not model:
+            InfoBar.warning(
+                self.tr("配置不完整"),
+                self.tr("请输入 API Base URL、API Key 和模型"),
+                duration=INFOBAR_DURATION_ERROR,
+                parent=self,
+            )
+            return
+
+        self.checkMimoAsrConnectionCard.button.setEnabled(False)
+        self.checkMimoAsrConnectionCard.button.setText(self.tr("正在测试..."))
+
+        language = LANGUAGES[cfg.transcribe_language.value.value]
+        self.mimo_asr_connection_thread = MimoASRConnectionThread(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            language=language,
+            timeout=self.mimoAsrTimeoutCard.spinBox.value(),
+        )
+        self.mimo_asr_connection_thread.result_ready.connect(
+            self.onMimoAsrConnectionCheckFinished
+        )
+        self.mimo_asr_connection_thread.error.connect(
+            self.onMimoAsrConnectionCheckError
+        )
+        self.mimo_asr_connection_thread.start()
+
+    def onMimoAsrConnectionCheckFinished(self, success, result):
+        """处理 MiMo ASR 连接检查完成事件"""
+        self.checkMimoAsrConnectionCard.button.setEnabled(True)
+        self.checkMimoAsrConnectionCard.button.setText(
+            self.tr("测试 MiMo ASR 连接")
+        )
+
+        if success:
+            InfoBar.success(
+                self.tr("连接成功"),
+                self.tr("MiMo ASR API 连接成功！\n转录结果:") + result,
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+        else:
+            InfoBar.error(
+                self.tr("连接失败"),
+                self.tr(f"MiMo ASR API 连接失败！\n{result}"),
+                duration=INFOBAR_DURATION_ERROR,
+                parent=self,
+            )
+
+    def onMimoAsrConnectionCheckError(self, message):
+        """处理 MiMo ASR 连接检查错误事件"""
+        self.checkMimoAsrConnectionCard.button.setEnabled(True)
+        self.checkMimoAsrConnectionCard.button.setText(
+            self.tr("测试 MiMo ASR 连接")
+        )
+
+        InfoBar.error(
+            self.tr("测试错误"),
+            message,
+            duration=INFOBAR_DURATION_ERROR,
+            parent=self,
+        )
 
     def checkWhisperConnection(self):
         """检查 Whisper API 连接"""
@@ -990,6 +1240,34 @@ class SettingInterface(ScrollArea):
             duration=INFOBAR_DURATION_ERROR,
             parent=self,
         )
+
+
+class MimoASRConnectionThread(QThread):
+    """MiMo ASR API 连接测试线程"""
+
+    result_ready = pyqtSignal(bool, str)
+    error = pyqtSignal(str)
+
+    def __init__(self, base_url, api_key, model, language, timeout):
+        super().__init__()
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model = model
+        self.language = language
+        self.timeout = timeout
+
+    def run(self):
+        try:
+            success, result = check_mimo_asr_connection(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                model=self.model,
+                language=self.language,
+                timeout=self.timeout,
+            )
+            self.result_ready.emit(success, result or "")
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class WhisperConnectionThread(QThread):
