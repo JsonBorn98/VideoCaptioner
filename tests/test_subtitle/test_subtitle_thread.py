@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from PyQt5.QtCore import QEventLoop, QTimer
 
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import (
     SubtitleConfig,
     SubtitleTask,
@@ -125,6 +126,38 @@ def base_config():
         thread_num=2,
         batch_size=5,
     )
+
+
+class TestSubtitleThreadLlmRouting:
+    """Test LLM routing decisions for subtitle processing."""
+
+    def test_word_timestamp_fast_merge_does_not_need_llm(self, base_config):
+        config = base_config
+        config.need_split = False
+        config.need_optimize = False
+        config.need_translate = False
+        asr_data = ASRData(
+            [
+                ASRDataSeg(text="Hello", start_time=0, end_time=100),
+                ASRDataSeg(text="world", start_time=100, end_time=200),
+            ]
+        )
+        thread = SubtitleThread(SubtitleTask(subtitle_path="", subtitle_config=config))
+
+        assert not thread.need_llm(config, asr_data)
+
+    def test_word_timestamp_semantic_split_needs_llm(self, base_config):
+        config = base_config
+        config.need_split = True
+        asr_data = ASRData(
+            [
+                ASRDataSeg(text="Hello", start_time=0, end_time=100),
+                ASRDataSeg(text="world", start_time=100, end_time=200),
+            ]
+        )
+        thread = SubtitleThread(SubtitleTask(subtitle_path="", subtitle_config=config))
+
+        assert thread.need_llm(config, asr_data)
 
 
 class TestSubtitleThreadSplit:

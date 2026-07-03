@@ -167,6 +167,11 @@ def run(args: Namespace, config: dict) -> int:
     from videocaptioner.core.asr.asr_data import ASRData
     asr_data = ASRData.from_subtitle_file(str(input_path))
 
+    if need_split and asr_data.is_word_timestamp() and not needs_llm:
+        from videocaptioner.cli.validators import validate_llm
+        if not validate_llm(config):
+            return EXIT.USAGE_ERROR
+
     if len(asr_data.segments) == 0 and not quiet:
         output.warn(f"Input file contains 0 subtitle segments: {input_path}")
 
@@ -182,16 +187,20 @@ def run(args: Namespace, config: dict) -> int:
             progress.update(pct)
 
     try:
-        # 1. Split (if word-level timestamps available)
-        if need_split and asr_data.is_word_timestamp():
+        # 1. Merge/split word-level timestamps.
+        # Fast local merge is always useful for one-word ASR output; LLM semantic
+        # re-segmentation remains controlled by subtitle.split / --no-split.
+        if asr_data.is_word_timestamp():
             if progress:
-                progress.update(5, "Splitting subtitles...")
+                message = "Splitting subtitles..." if need_split else "Merging word subtitles..."
+                progress.update(5, message)
             from videocaptioner.core.split.split import SubtitleSplitter
             splitter = SubtitleSplitter(
                 thread_num=thread_num,
                 model=llm_model,
                 max_word_count_cjk=max_cjk,
                 max_word_count_english=max_english,
+                use_llm=need_split,
             )
             asr_data = splitter.split_subtitle(asr_data)
 

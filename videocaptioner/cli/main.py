@@ -178,7 +178,7 @@ def _build_subtitle_parser(subparsers) -> None:
     proc = p.add_argument_group("Processing options")
     proc.add_argument("--no-optimize", action="store_true", help="Skip LLM subtitle optimization")
     proc.add_argument("--no-translate", action="store_true", help="Skip translation")
-    proc.add_argument("--no-split", action="store_true", help="Skip subtitle re-segmentation")
+    proc.add_argument("--no-split", action="store_true", help="Use fast local word merge instead of LLM re-segmentation")
 
     trans = p.add_argument_group("Translation options")
     trans.add_argument(
@@ -348,7 +348,7 @@ def _build_process_parser(subparsers) -> None:
     pipe = p.add_argument_group("Pipeline options")
     pipe.add_argument("--no-optimize", action="store_true", help="Skip AI subtitle polish")
     pipe.add_argument("--no-translate", action="store_true", help="Skip translation")
-    pipe.add_argument("--no-split", action="store_true", help="Skip subtitle re-segmentation")
+    pipe.add_argument("--no-split", action="store_true", help="Use fast local word merge instead of LLM re-segmentation")
     pipe.add_argument("--no-synthesize", action="store_true", help="Skip video synthesis (output subtitles only)")
     pipe.add_argument("--dub", action="store_true", help="Generate dubbed audio/video after subtitle processing")
     pipe.add_argument("--dub-only", action="store_true", help="Output only the dubbed result, skipping subtitle burn/embedding")

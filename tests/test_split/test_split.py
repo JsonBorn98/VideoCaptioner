@@ -6,6 +6,7 @@
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.split.split import SubtitleSplitter, preprocess_segments
+from videocaptioner.core.utils.text_utils import count_words
 
 
 class TestPreprocessEdgeCases:
@@ -113,6 +114,48 @@ class TestPreprocessEdgeCases:
 
 class TestSubtitleSplitterEdgeCases:
     """测试 SubtitleSplitter 边缘情况"""
+
+    def test_fast_merge_word_segments_without_llm(self, monkeypatch):
+        """单词级字幕快速合并不应调用LLM。"""
+        segments = [
+            ASRDataSeg(text=word, start_time=i * 200, end_time=(i + 1) * 200)
+            for i, word in enumerate(
+                [
+                    "Tell",
+                    "us",
+                    "about",
+                    "the",
+                    "deal",
+                    "with",
+                    "Nvidia",
+                    "and",
+                    "the",
+                    "market",
+                    "reaction",
+                ]
+            )
+        ]
+        asr_data = ASRData(segments)
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("LLM splitter should not be called")
+
+        monkeypatch.setattr(
+            "videocaptioner.core.split.split.split_by_llm",
+            fail_if_called,
+        )
+
+        splitter = SubtitleSplitter(
+            thread_num=1,
+            model="gpt-4o-mini",
+            max_word_count_english=6,
+            use_llm=False,
+        )
+        result = splitter.split_subtitle(asr_data)
+
+        assert len(result.segments) < len(segments)
+        assert sum(count_words(seg.text) for seg in result.segments) == len(segments)
+        assert all(count_words(seg.text) <= 6 for seg in result.segments)
 
     def test_extremely_short_segments(self):
         """测试极短片段(1-2个字)"""

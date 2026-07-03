@@ -131,15 +131,19 @@ class SubtitleThread(QThread):
                 subtitle_config = self._setup_llm_config()
 
             # 2. 重新断句（对于字词级字幕）
+            # 单词级字幕默认先走本地规则快速合并；只有用户开启断句时才调用LLM语义断句。
             if asr_data.is_word_timestamp():
                 update_stage("split")
-                self.progress.emit(5, self.tr("字幕断句..."))
-                logger.info("正在字幕断句...")
+                use_llm_split = subtitle_config.need_split
+                split_message = self.tr("字幕断句...") if use_llm_split else self.tr("快速合并字幕...")
+                self.progress.emit(5, split_message)
+                logger.info("正在%s", "LLM字幕断句" if use_llm_split else "快速合并字幕")
                 splitter = SubtitleSplitter(
                     thread_num=subtitle_config.thread_num,
                     model=subtitle_config.llm_model,
                     max_word_count_cjk=subtitle_config.max_word_count_cjk,
                     max_word_count_english=subtitle_config.max_word_count_english,
+                    use_llm=use_llm_split,
                 )
                 asr_data = splitter.split_subtitle(asr_data)
                 self.update_all.emit(asr_data.to_json())
@@ -242,7 +246,7 @@ class SubtitleThread(QThread):
     def need_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
         return (
             subtitle_config.need_optimize
-            or asr_data.is_word_timestamp()
+            or (subtitle_config.need_split and asr_data.is_word_timestamp())
             or (
                 subtitle_config.need_translate
                 and subtitle_config.translator_service

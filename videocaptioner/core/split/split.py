@@ -53,6 +53,37 @@ MATCH_MAX_SHIFT = 30  # 匹配滑动窗口最大偏移
 MATCH_MAX_UNMATCHED = 5  # 允许的最大未匹配句子数
 MATCH_LARGE_SHIFT = 100  # 未匹配时的大偏移量
 
+# 英文快速规则断句时尽量避免把字幕切在功能词后面。
+# 这些词单独挂在上一行会削弱后续优化/翻译的上下文。
+WEAK_TRAILING_WORDS = {
+    "a",
+    "an",
+    "the",
+    "to",
+    "of",
+    "in",
+    "on",
+    "at",
+    "for",
+    "from",
+    "with",
+    "about",
+    "into",
+    "onto",
+    "by",
+    "as",
+    "than",
+    "and",
+    "or",
+    "but",
+    "if",
+    "because",
+    "that",
+    "this",
+    "these",
+    "those",
+}
+
 
 def preprocess_segments(
     segments: List[ASRDataSeg], need_lower: bool = True
@@ -94,6 +125,7 @@ class SubtitleSplitter:
         model,
         max_word_count_cjk: int = MAX_WORD_COUNT_CJK,
         max_word_count_english: int = MAX_WORD_COUNT_ENGLISH,
+        use_llm: bool = True,
     ):
         """初始化分割器
 
@@ -102,11 +134,13 @@ class SubtitleSplitter:
             model: LLM模型名称
             max_word_count_cjk: CJK最大字数
             max_word_count_english: 英文最大单词数
+            use_llm: 是否使用LLM进行语义断句。False时只使用本地规则快速合并。
         """
         self.thread_num = thread_num
         self.model = model
         self.max_word_count_cjk = max_word_count_cjk
         self.max_word_count_english = max_word_count_english
+        self.use_llm = use_llm
         self.is_running = True
         self._init_thread_pool()
 
@@ -270,6 +304,8 @@ class SubtitleSplitter:
         """处理单个Segments(带重试和降级)"""
         if not asr_data_part.segments:
             return []
+        if not self.use_llm:
+            return self._process_by_rules(asr_data_part.segments)
         try:
             return self._process_by_llm(asr_data_part.segments)
         except Exception as e:
@@ -563,18 +599,17 @@ class SubtitleSplitter:
             ]
             all_equal = all(abs(gap - gaps[0]) < 1e-6 for gap in gaps)
 
+            start_idx = max(n // 6, 1)
+            end_idx = min((5 * n) // 6, n - 2)
             if all_equal:
-                # 间隔相等:中间分割
-                split_index = n // 2
+                # 间隔相等: 在中部附近选择更自然的文本边界
+                split_index = self._choose_rule_split_index(
+                    current_segments, range(start_idx, end_idx), n // 2
+                )
             else:
-                # 间隔不等:寻找最大间隔点
-                start_idx = max(n // 6, 1)
-                end_idx = min((5 * n) // 6, n - 2)
-                split_index = max(
-                    range(start_idx, end_idx),
-                    key=lambda i: current_segments[i + 1].start_time
-                    - current_segments[i].end_time,
-                    default=n // 2,
+                # 间隔不等: 优先大时间间隔，同时避开英文弱功能词边界
+                split_index = self._choose_rule_split_index(
+                    current_segments, range(start_idx, end_idx), n // 2
                 )
                 if split_index == 0 or split_index == n - 1:
                     split_index = n // 2
@@ -587,6 +622,40 @@ class SubtitleSplitter:
         # 按时间排序
         result_segs.sort(key=lambda seg: seg.start_time)
         return result_segs
+
+    @staticmethod
+    def _boundary_word(text: str) -> str:
+        """提取英文边界词，用于快速规则断句的边界评分。"""
+        return text.strip().lower().strip(".,!?;:\"'()[]{}，。！？；：、")
+
+    def _choose_rule_split_index(
+        self,
+        segments: List[ASRDataSeg],
+        candidates: range,
+        fallback: int,
+    ) -> int:
+        """选择规则拆分点。
+
+        快速本地合并没有语义模型，因此用一个很轻量的评分:
+        - 优先保留较大的词间时间间隔
+        - 时间间隔接近时，避免英文字幕以 the/of/to/and 等弱功能词结尾
+        - 保持左右两侧长度相对均衡
+        """
+        n = len(segments)
+        candidate_list = [i for i in candidates if 0 <= i < n - 1]
+        if not candidate_list:
+            return fallback
+
+        middle = (n - 1) / 2
+
+        def score(index: int) -> tuple[int, int, float]:
+            prev_word = self._boundary_word(segments[index].text)
+            gap = segments[index + 1].start_time - segments[index].end_time
+            boundary_penalty = 1 if prev_word in WEAK_TRAILING_WORDS else 0
+            balance_penalty = abs(index - middle)
+            return (gap, -boundary_penalty, -balance_penalty)
+
+        return max(candidate_list, key=score)
 
     def _merge_processed_segments(
         self, processed_segments: List[List[ASRDataSeg]]
