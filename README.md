@@ -85,12 +85,12 @@ videocaptioner config set llm.model gpt-4o-mini
 
 LLM 仅用于字幕优化和大模型翻译，免费功能（必剪识别、必应翻译）无需配置。
 
-支持所有 OpenAI 兼容接口的服务商：
+支持 OpenAI 官方接口以及常见 OpenAI-compatible 服务。请根据可访问性、价格、隐私和服务条款自行选择服务商：
 
 | 服务商 | 官网 |
 |--------|------|
-| **VideoCaptioner 中转站** | [api.videocaptioner.cn](https://api.videocaptioner.cn) — 高并发，性价比高，支持 GPT/Claude/Gemini 等 |
-| SiliconCloud | [cloud.siliconflow.cn](https://cloud.siliconflow.cn/i/HF95kaoz) |
+| OpenAI | [platform.openai.com](https://platform.openai.com) |
+| SiliconCloud | [cloud.siliconflow.cn](https://cloud.siliconflow.cn) |
 | DeepSeek | [platform.deepseek.com](https://platform.deepseek.com) |
 
 在软件设置或 CLI 中填入 API Base URL 和 API Key 即可。[详细配置教程](https://jsonborn98.github.io/VideoCaptioner/config/llm)

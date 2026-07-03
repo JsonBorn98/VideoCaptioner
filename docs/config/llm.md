@@ -41,7 +41,7 @@ VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择
 
 ## 配置方法
 
-### 方式一：使用 SiliconCloud（推荐国内用户）
+### 方式一：使用 SiliconCloud
 
 [SiliconCloud](https://cloud.siliconflow.cn) 集成了国内多家大模型厂商，使用方便。
 
@@ -49,7 +49,7 @@ VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择
 
 1. **注册账号**
 
-   访问 [SiliconCloud](https://cloud.siliconflow.cn/i/onCHcaDx) 注册账号（通过链接注册可获得额外额度）
+   访问 [SiliconCloud](https://cloud.siliconflow.cn) 注册账号
 
 2. **获取 API Key**
 
@@ -74,7 +74,7 @@ VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择
    - **线程数**: 5 或更少
 
 ::: warning 注意
-自 2025 年 2 月 6 日起，未实名用户每日最多请求 DeepSeek-V3 模型 100 次。如不想实名，可考虑使用其他中转站或模型。
+自 2025 年 2 月 6 日起，未实名用户每日最多请求 DeepSeek-V3 模型 100 次。具体限制以服务商当前规则为准。
 :::
 
 ### 方式二：使用 OpenAI
@@ -109,56 +109,16 @@ VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择
 3. **线程数配置**：
    - 建议 5-10 个线程
 
-### 方式四：使用本项目中转站（推荐）⭐
+### 方式四：使用 OpenAI-compatible 服务
 
-本项目提供了高性价比的 LLM API 中转站，支持多种优质模型和高并发。
+如果你使用的是兼容 OpenAI API 的第三方服务，通常可以按以下方式配置：
 
-**特点：**
+- **LLM 服务**: 选择 `OpenAI`（兼容模式）
+- **API Base URL**: 填写服务商提供的 `/v1` 地址
+- **API Key**: 填写服务商提供的密钥
+- **模型选择**: 填写该服务支持的模型名称
 
-- ✅ 支持 OpenAI、Claude、Gemini 等优质模型
-- ✅ 超高并发能力，处理速度极快
-- ✅ 稳定可靠，专为本项目优化
-- ✅ 国内可直接访问
-
-**配置步骤：**
-
-1. **注册账号**
-
-   访问 [https://api.videocaptioner.cn/register](https://api.videocaptioner.cn/register?aff=UrLB) 注册（通过链接注册赠送 $0.4 测试余额）
-
-2. **获取 API Key**
-
-   登录后访问 [Token 页面](https://api.videocaptioner.cn/token) 获取 API Key
-
-3. **在 VideoCaptioner 中配置**
-   - **LLM 服务**: 选择 `OpenAI`（兼容模式）
-   - **API Base URL**: `https://api.videocaptioner.cn/v1`
-   - **API Key**: 你获取的 API Key
-   - 点击 **"检查连接"** 测试
-
-   ![中转站配置](/api-setting-2.png)
-
-4. **模型选择建议**
-
-   根据预算和质量需求选择：
-
-   | 质量层级     | 推荐模型                                               | 耗费比例 | 适用场景             |
-   | ------------ | ------------------------------------------------------ | -------- | -------------------- |
-   | **高质量**   | `gemini-2.0-flash-exp`<br>`claude-sonnet-4.5-20250929` | 3        | 重要内容、专业翻译   |
-   | **较高质量** | `gpt-4o-2024-08-07`<br>`claude-haiku-4-5-20251001`     | 1.2      | 日常使用、高质量需求 |
-   | **中质量**   | `gpt-4o-mini`<br>`gemini-2.0-flash-exp`                | 0.3      | 快速处理、预算有限   |
-
-5. **线程数配置**
-
-   中转站支持超高并发，可以直接拉满：
-   - **线程数**: 20-50（根据你的网络和机器性能）
-
-::: tip 推荐配置
-
-- **日常使用**: `gpt-4o-mini` + 30 线程
-- **追求质量**: `claude-sonnet-4.5` + 20 线程
-- **预算有限**: `gemini-2.0-flash-exp` + 50 线程
-  :::
+线程数和可用模型以服务商文档为准；如果出现超时或 429 错误，请降低线程数。
 
 ### 方式五：本地部署 Ollama
 
@@ -226,9 +186,9 @@ VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择
 | API 类型     | 推荐线程数 | 说明           |
 | ------------ | ---------- | -------------- |
 | OpenAI       | 10-20      | 支持高并发     |
-| 中转站       | 20-50      | 专为高并发优化 |
 | DeepSeek     | 5-10       | 有一定并发限制 |
 | SiliconCloud | 3-5        | 并发能力较弱   |
+| 兼容服务     | 以服务商文档为准 | 不同服务限制差异较大 |
 | Ollama 本地  | 2-8        | 取决于硬件性能 |
 
 ::: tip 提示
@@ -296,7 +256,7 @@ VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择
    - 登录服务商平台查看余额
 
 3. **更换服务商**
-   - 尝试使用本项目中转站
+   - 尝试其他 OpenAI-compatible 服务或官方 API
 
 4. **检查模型可用性**
    - 某些模型可能有地区限制
@@ -325,18 +285,18 @@ VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择
 ### 新手推荐
 
 ```
-服务商: 本项目中转站
+服务商: OpenAI 或 OpenAI-compatible 服务
 模型: gpt-4o-mini
-线程数: 20
+线程数: 5-10
 温度: 0.3
 ```
 
 ### 追求质量
 
 ```
-服务商: 本项目中转站
-模型: claude-sonnet-4.5
-线程数: 15
+服务商: OpenAI 或你信任的兼容服务
+模型: gpt-4o
+线程数: 5-10
 温度: 0.3
 反思翻译: 开启
 ```
