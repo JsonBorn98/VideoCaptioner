@@ -96,7 +96,14 @@ class BaseASR:
         Returns:
             ASRData: Recognition results with segments
         """
+        total_started = time.perf_counter()
         cache_key = f"{self.__class__.__name__}:{self._get_key()}"
+        logger.info(
+            "ASR backend 开始: class=%s, audio_duration=%.2fs, cache=%s",
+            self.__class__.__name__,
+            self.audio_duration,
+            self.use_cache and is_cache_enabled(),
+        )
 
         # Try cache first
         if self.use_cache and is_cache_enabled():
@@ -104,18 +111,41 @@ class BaseASR:
                 Optional[dict], self._cache.get(cache_key, default=None)
             )
             if cached_result is not None:
-                logger.debug("找到缓存，直接返回")
+                logger.info(
+                    "ASR backend 命中缓存: class=%s, elapsed=%.2fs",
+                    self.__class__.__name__,
+                    time.perf_counter() - total_started,
+                )
                 segments = self._make_segments(cached_result)
                 return ASRData(segments)
 
         # Run ASR
+        step_started = time.perf_counter()
         resp_data = self._run(callback, **kwargs)
+        logger.info(
+            "ASR backend 原始响应完成: class=%s, elapsed=%.2fs",
+            self.__class__.__name__,
+            time.perf_counter() - step_started,
+        )
 
+        step_started = time.perf_counter()
         segments = self._make_segments(resp_data)
+        logger.info(
+            "ASR backend 响应解析完成: class=%s, elapsed=%.2fs, segments=%s",
+            self.__class__.__name__,
+            time.perf_counter() - step_started,
+            len(segments),
+        )
 
         # Cache only after the raw response can be converted successfully.
         # This avoids persisting partial API results when post-processing fails.
         self._cache.set(cache_key, resp_data, expire=86400 * 2)
+        logger.info(
+            "ASR backend 完成: class=%s, total=%.2fs, segments=%s",
+            self.__class__.__name__,
+            time.perf_counter() - total_started,
+            len(segments),
+        )
         return ASRData(segments)
 
     def _get_key(self) -> str:

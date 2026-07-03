@@ -18,9 +18,18 @@ uv run videocaptioner doctor --profile gui
 如需开发 Qwen 本地 ASR：
 
 ```bash
-uv sync --python 3.12 --extra qwen
+# 日常源码启动 GUI 时，优先通过 Qwen 组件管理安装独立 runtime
+uv run videocaptioner
 uv run videocaptioner doctor --profile qwen
 ```
+
+只有在调试 `qwen-asr` 依赖本身、需要让当前 `.venv` 直接 import `qwen_asr` 时，才执行：
+
+```bash
+uv sync --python 3.12 --extra qwen
+```
+
+Qwen 组件管理会把运行时安装到 `AppData/runtimes/qwen`，并用 `uv --torch-backend cpu/cu128` 控制 PyTorch 版本。不要用普通 `uv pip install qwen-asr` 替代 CUDA 运行时安装，否则依赖解析可能回退到 CPU PyTorch。
 
 ## 代码规范
 

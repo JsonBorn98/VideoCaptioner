@@ -10,6 +10,56 @@ from videocaptioner.core.entities import TranscribeConfig, TranscribeModelEnum, 
 from videocaptioner.ui.thread.transcript_thread import TranscriptThread
 
 
+def test_force_cancel_qwen_runtime_does_not_terminate_qthread(monkeypatch, qapp):
+    task = TranscribeTask(
+        file_path="video.mp4",
+        transcribe_config=TranscribeConfig(
+            transcribe_model=TranscribeModelEnum.QWEN_LOCAL_ASR,
+        ),
+        output_path="video.srt",
+    )
+    thread = TranscriptThread(task)
+    terminate_called = False
+
+    monkeypatch.setattr(TranscriptThread, "isRunning", lambda self: True)
+
+    def fake_terminate(self):
+        nonlocal terminate_called
+        terminate_called = True
+
+    monkeypatch.setattr(TranscriptThread, "terminate", fake_terminate)
+
+    thread.cancel(force=True)
+
+    assert thread._cancel_requested is True
+    assert terminate_called is False
+
+
+def test_qwen_local_cleanup_does_not_touch_main_process_torch(monkeypatch, qapp):
+    task = TranscribeTask(
+        file_path="video.mp4",
+        transcribe_config=TranscribeConfig(
+            transcribe_model=TranscribeModelEnum.QWEN_LOCAL_ASR,
+        ),
+        output_path="video.srt",
+    )
+    thread = TranscriptThread(task)
+    cleanup_called = False
+
+    def fake_cleanup():
+        nonlocal cleanup_called
+        cleanup_called = True
+
+    monkeypatch.setattr(
+        "videocaptioner.ui.thread.transcript_thread.clear_qwen_model_cache",
+        fake_cleanup,
+    )
+
+    thread._cleanup_runtime_cache()
+
+    assert cleanup_called is False
+
+
 @pytest.mark.integration
 class TestTranscriptThread:
     """Test suite for TranscriptThread."""

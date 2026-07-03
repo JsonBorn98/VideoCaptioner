@@ -1,3 +1,5 @@
+import time
+
 from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.asr.bcut import BcutASR
 from videocaptioner.core.asr.chunked_asr import ChunkedASR
@@ -8,6 +10,9 @@ from videocaptioner.core.asr.qwen_local_asr import QwenLocalASR
 from videocaptioner.core.asr.whisper_api import WhisperAPI
 from videocaptioner.core.asr.whisper_cpp import WhisperCppASR
 from videocaptioner.core.entities import TranscribeConfig, TranscribeModelEnum
+from videocaptioner.core.utils.logger import setup_logger
+
+logger = setup_logger("transcribe")
 
 
 def transcribe(audio_path: str, config: TranscribeConfig, callback=None) -> ASRData:
@@ -31,16 +36,51 @@ def transcribe(audio_path: str, config: TranscribeConfig, callback=None) -> ASRD
     if config.transcribe_model is None:
         raise ValueError("Transcription model not set")
 
+    total_started = time.perf_counter()
+    model_type = config.transcribe_model
+    logger.info(
+        "ASR 转录开始: model=%s, audio=%s, word_timestamp=%s",
+        model_type,
+        audio_path,
+        config.need_word_time_stamp,
+    )
+
     # Create ASR instance based on model type
+    step_started = time.perf_counter()
     asr = _create_asr_instance(audio_path, config)
+    logger.info(
+        "ASR 实例创建完成: model=%s, elapsed=%.2fs",
+        model_type,
+        time.perf_counter() - step_started,
+    )
 
     # Run transcription
+    step_started = time.perf_counter()
     asr_data = asr.run(callback=callback)
+    logger.info(
+        "ASR 模型运行完成: model=%s, elapsed=%.2fs, segments=%s",
+        model_type,
+        time.perf_counter() - step_started,
+        len(asr_data.segments),
+    )
 
     # Optimize subtitle timing if not using word timestamps
     if not config.need_word_time_stamp:
+        step_started = time.perf_counter()
         asr_data.optimize_timing()
+        logger.info(
+            "ASR 字幕时间优化完成: model=%s, elapsed=%.2fs, segments=%s",
+            model_type,
+            time.perf_counter() - step_started,
+            len(asr_data.segments),
+        )
 
+    logger.info(
+        "ASR 转录完成: model=%s, total=%.2fs, segments=%s",
+        model_type,
+        time.perf_counter() - total_started,
+        len(asr_data.segments),
+    )
     return asr_data
 
 

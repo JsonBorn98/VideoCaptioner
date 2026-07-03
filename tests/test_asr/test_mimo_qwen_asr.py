@@ -1,9 +1,12 @@
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 import videocaptioner.core.asr.mimo_asr as mimo_asr_module
 import videocaptioner.core.asr.qwen_local_asr as qwen_local_module
+import videocaptioner.core.asr.qwen_runtime as qwen_runtime_module
 from videocaptioner.core.asr.mimo_asr import MiMoASR
 from videocaptioner.core.asr.qwen_local_asr import QwenLocalASR
 from videocaptioner.core.asr.qwen_runtime import timestamp_items_to_segments
@@ -116,7 +119,7 @@ def test_timestamp_items_to_segments_accepts_forced_aligner_result_wrapper():
 def test_qwen_local_asr_uses_runtime_and_returns_timestamps(monkeypatch):
     calls = []
 
-    def fake_transcribe_with_qwen(**kwargs):
+    def fake_run_qwen_worker(**kwargs):
         calls.append(kwargs)
         return {
             "text": "hello world",
@@ -127,7 +130,7 @@ def test_qwen_local_asr_uses_runtime_and_returns_timestamps(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(qwen_local_module, "transcribe_with_qwen", fake_transcribe_with_qwen)
+    monkeypatch.setattr(qwen_local_module, "run_qwen_worker", fake_run_qwen_worker)
 
     asr = QwenLocalASR(
         audio_input=b"fake mp3",
@@ -148,8 +151,37 @@ def test_qwen_local_asr_uses_runtime_and_returns_timestamps(monkeypatch):
     assert calls[0]["aligner_model"] == "Qwen/Qwen3-ForcedAligner-0.6B"
     assert calls[0]["model_dir"] == "C:/models"
     assert calls[0]["return_time_stamps"] is True
+    assert calls[0]["callback"] is None
     assert [seg.text for seg in segments] == ["hello", "world"]
     assert segments[1].start_time == 400
+
+
+def test_qwen_worker_path_removes_pyqt_qt_bin():
+    path_value = os.pathsep.join(
+        [
+            r"C:\tools",
+            r"C:\repo\.venv\Lib\site-packages\PyQt5\Qt5\bin",
+            r"C:\Windows\System32",
+        ]
+    )
+
+    cleaned = qwen_local_module._without_qt_dll_paths(path_value)
+
+    assert r"PyQt5\Qt5\bin" not in cleaned
+    assert r"C:\tools" in cleaned
+    assert r"C:\Windows\System32" in cleaned
+
+
+def test_qwen_cuda_device_fails_fast_with_cpu_torch(monkeypatch):
+    fake_torch = SimpleNamespace(
+        __version__="2.12.1+cpu",
+        version=SimpleNamespace(cuda=None),
+        _C=SimpleNamespace(),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    with pytest.raises(RuntimeError, match="PyTorch 是 CPU 版"):
+        qwen_runtime_module._validate_requested_device("cuda:0")
 
 
 def test_qwen_local_asr_requires_timestamps_when_requested():

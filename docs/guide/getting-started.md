@@ -42,9 +42,18 @@ Qwen3ASR / Qwen3-ForcedAligner 依赖 `qwen-asr`、PyTorch 和模型权重，默
 
 然后按顺序执行：
 
-1. 点击 **安装 / 修复运行时**。
-2. 下载 `Qwen3-ASR` 和 `Qwen3-ForcedAligner` 模型。
-3. 选择 `Qwen3ASR [Local]`，或在 MiMoASR 中使用本地 Qwen 对齐。
+1. 根据机器选择 **安装 CPU 运行时** 或 **安装 CUDA 运行时**。
+   - 没有 NVIDIA GPU、只想先验证功能，选择 CPU。
+   - 有 NVIDIA GPU 并准备把 Qwen 的 **运行设备** 设为 `cuda:0`，选择 CUDA。
+2. 等待安装进度完成。CUDA 运行时会下载较大的 PyTorch wheel，时间较长是正常现象。
+3. 下载 `Qwen3-ASR` 和 `Qwen3-ForcedAligner` 模型。
+4. 选择 `Qwen3ASR [Local]`，或在 MiMoASR 中使用本地 Qwen 对齐。
+
+Qwen 运行时安装在独立的 `runtimes/qwen` 环境中，不会污染主程序环境。源码启动 GUI 时也推荐使用这里的组件管理安装 Qwen 运行时。
+
+::: warning CUDA 安装检查
+安装 CUDA 运行时后，组件管理里应显示类似 `PyTorch 2.11.0+cu128 (CUDA 12.8, CUDA available)`。如果显示 `+cpu`，说明 PyTorch 被解析成 CPU 版，请关闭正在运行的转录任务后重新点击 **安装 CUDA 运行时**。
+:::
 
 ### 开发者：源码运行
 
@@ -63,8 +72,15 @@ uv run videocaptioner
 需要 Qwen 依赖的源码开发环境：
 
 ```bash
-uv sync --python 3.12 --extra qwen
+# 推荐：先启动 GUI，再通过 Qwen 组件管理安装独立 runtime
+uv run videocaptioner
 uv run videocaptioner doctor --profile qwen
+```
+
+只有在调试 `qwen-asr` 源码级集成、希望把 Qwen 依赖装进当前 `.venv` 时，才需要执行：
+
+```bash
+uv sync --python 3.12 --extra qwen
 ```
 
 ## 基础配置

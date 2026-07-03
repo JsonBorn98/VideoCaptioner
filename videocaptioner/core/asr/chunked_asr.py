@@ -6,6 +6,7 @@
 
 import io
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional, Tuple
 
@@ -84,24 +85,67 @@ class ChunkedASR:
         Returns:
             ASRData: 合并后的转录结果
         """
+        total_started = time.perf_counter()
+        logger.info(
+            "分块 ASR 开始: asr=%s, audio=%s, chunk_length=%.1fs, overlap=%.1fs, concurrency=%s",
+            self.asr_class.__name__,
+            self.audio_path,
+            self.chunk_length_ms / MS_PER_SECOND,
+            self.chunk_overlap_ms / MS_PER_SECOND,
+            self.chunk_concurrency,
+        )
+
         # 1. 分块音频
+        step_started = time.perf_counter()
         chunks = self._split_audio()
+        logger.info(
+            "音频分块完成: chunks=%s, elapsed=%.2fs",
+            len(chunks),
+            time.perf_counter() - step_started,
+        )
 
         # 2. 如果只有一块，直接创建单个 ASR 实例转录
         if len(chunks) == 1:
             logger.debug("Audio shorter than chunk length, direct transcription")
             single_asr = self.asr_class(self.audio_path, **self.asr_kwargs)
-            return single_asr.run(callback)
+            step_started = time.perf_counter()
+            result = single_asr.run(callback)
+            logger.info(
+                "单块 ASR 完成: asr=%s, elapsed=%.2fs, total=%.2fs, segments=%s",
+                self.asr_class.__name__,
+                time.perf_counter() - step_started,
+                time.perf_counter() - total_started,
+                len(result.segments),
+            )
+            return result
 
         logger.debug(f"Audio split into {len(chunks)}  chunks, starting parallel transcription")
 
         # 3. 并发转录All块
+        step_started = time.perf_counter()
         chunk_results = self._transcribe_chunks(chunks, callback)
+        logger.info(
+            "全部分块转录完成: chunks=%s, elapsed=%.2fs",
+            len(chunk_results),
+            time.perf_counter() - step_started,
+        )
 
         # 4. 合并结果
+        step_started = time.perf_counter()
         merged_result = self._merge_results(chunk_results, chunks)
+        logger.info(
+            "分块结果合并完成: elapsed=%.2fs, segments=%s",
+            time.perf_counter() - step_started,
+            len(merged_result.segments),
+        )
 
         logger.debug(f"Chunk transcription complete, {len(merged_result.segments)}  segments")
+        logger.info(
+            "分块 ASR 完成: asr=%s, total=%.2fs, segments=%s",
+            self.asr_class.__name__,
+            time.perf_counter() - total_started,
+            len(merged_result.segments),
+        )
         return merged_result
 
     def _split_audio(self) -> List[Tuple[bytes, int]]:
@@ -182,7 +226,14 @@ class ChunkedASR:
         ) -> Tuple[int, ASRData]:
             """转录单个音频块 - 为每个块创建独立的 ASR 实例"""
             nonlocal last_overall
-            logger.debug(f"Transcribing chunk {idx+1}/{total_chunks} (offset={offset_ms}ms)")
+            chunk_started = time.perf_counter()
+            logger.info(
+                "分块转录开始: chunk=%s/%s, offset=%.2fs, bytes=%s",
+                idx + 1,
+                total_chunks,
+                offset_ms / MS_PER_SECOND,
+                len(chunk_bytes),
+            )
 
             def chunk_callback(progress: int, message: str):
                 nonlocal last_overall
@@ -203,22 +254,51 @@ class ChunkedASR:
             # 调用 ASR 的 run() 方法转录
             asr_data = chunk_asr.run(chunk_callback)
 
-            logger.debug(
-                f"Chunk {idx+1}/{total_chunks} 转录完成，"
-                f"获得 {len(asr_data.segments)}  segments"
+            logger.info(
+                "分块转录完成: chunk=%s/%s, elapsed=%.2fs, segments=%s",
+                idx + 1,
+                total_chunks,
+                time.perf_counter() - chunk_started,
+                len(asr_data.segments),
             )
             return idx, asr_data
 
-        # 使用 ThreadPoolExecutor 并发转录
-        with ThreadPoolExecutor(max_workers=self.chunk_concurrency) as executor:
-            futures = {
-                executor.submit(transcribe_single_chunk, i, chunk_bytes, offset): i
-                for i, (chunk_bytes, offset) in enumerate(chunks)
-            }
+        executor = ThreadPoolExecutor(max_workers=self.chunk_concurrency)
+        futures = {}
+        next_chunk_index = 0
 
-            for future in as_completed(futures):
+        def submit_next_chunk() -> None:
+            nonlocal next_chunk_index
+            if next_chunk_index >= total_chunks:
+                return
+            chunk_bytes, offset = chunks[next_chunk_index]
+            future = executor.submit(
+                transcribe_single_chunk,
+                next_chunk_index,
+                chunk_bytes,
+                offset,
+            )
+            futures[future] = next_chunk_index
+            next_chunk_index += 1
+
+        for _ in range(min(self.chunk_concurrency, total_chunks)):
+            submit_next_chunk()
+
+        try:
+            while futures:
+                future = next(as_completed(futures))
+                futures.pop(future)
                 idx, asr_data = future.result()
                 results[idx] = asr_data
+                submit_next_chunk()
+        except BaseException:
+            logger.exception("分块转录失败，取消剩余 chunk", extra={"suppress_console": True})
+            for pending_future in futures:
+                pending_future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
         logger.debug(f"All {total_chunks}  chunks transcription complete")
         return [r for r in results if r is not None]  # 过滤 None

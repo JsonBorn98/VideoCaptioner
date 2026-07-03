@@ -218,10 +218,56 @@ def _auto_cuda_dtype(device: str) -> Any:
     return torch.float16
 
 
+def _validate_requested_device(device: str) -> None:
+    device = (device or "auto").strip().lower()
+    if not device.startswith("cuda"):
+        return
+
+    ensure_qwen_runtime_on_path()
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "Qwen 配置选择了 CUDA 设备，但当前 Qwen runtime 未安装 PyTorch。"
+            "请在“Qwen 组件管理”中安装 / 修复运行时，或将运行设备改为 cpu/auto。"
+        ) from exc
+
+    torch_version = getattr(torch, "__version__", "unknown")
+    torch_cuda = getattr(torch.version, "cuda", None)
+    torch_c = getattr(torch, "_C", None)
+    cuda_compiled = bool(torch_cuda) or hasattr(torch_c, "_cuda_getDeviceCount")
+    if not cuda_compiled:
+        raise RuntimeError(
+            "Qwen 配置选择了 CUDA 设备，但当前 Qwen runtime 中的 PyTorch 是 CPU 版 "
+            f"({torch_version})。请将“运行设备”改为 cpu/auto，或在 Qwen runtime 中安装 "
+            "CUDA 版 PyTorch 后再选择 cuda:0。"
+        )
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Qwen 配置选择了 CUDA 设备，但 PyTorch 当前无法访问 CUDA。"
+            "请确认 NVIDIA 驱动和 GPU 可用，或将“运行设备”改为 cpu/auto。"
+        )
+
+    if ":" not in device:
+        return
+    try:
+        device_index = int(device.split(":", 1)[1])
+    except ValueError:
+        raise RuntimeError(f"无效的 Qwen CUDA 设备配置: {device}")
+
+    device_count = torch.cuda.device_count()
+    if device_index < 0 or device_index >= device_count:
+        raise RuntimeError(
+            f"Qwen 配置选择了 {device}，但 PyTorch 只检测到 {device_count} 个 CUDA 设备。"
+        )
+
+
 def _load_kwargs(device: str, dtype: str) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
     device = (device or "auto").strip()
     if device:
+        _validate_requested_device(device)
         kwargs["device_map"] = "auto" if device == "auto" else device
     torch_dtype = _torch_dtype(dtype)
     if torch_dtype is None:
@@ -340,6 +386,7 @@ def align_with_qwen(
     if not transcript:
         return []
 
+    _validate_requested_device(device)
     qwen_asr = _require_qwen_asr()
     model_ref = resolve_qwen_model_ref(aligner_model, model_dir)
     cache_key = (model_ref, device or "auto", dtype or "auto")
@@ -379,6 +426,7 @@ def transcribe_with_qwen(
     temp_dir: str = "",
 ) -> dict[str, Any]:
     """Run local Qwen3 ASR, optionally with forced-alignment timestamps."""
+    _validate_requested_device(device)
     qwen_asr = _require_qwen_asr()
     asr_ref = resolve_qwen_model_ref(asr_model, model_dir)
     aligner_ref = resolve_qwen_model_ref(aligner_model, model_dir)

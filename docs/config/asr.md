@@ -57,10 +57,46 @@
 
 依赖安装：
 
-- 桌面 Release：打开 **设置 → 转录配置 → Qwen 组件管理**，先点击 **安装 / 修复运行时**，再下载 ASR / ForcedAligner 模型。
-- 源码开发：执行 `uv sync --python 3.12 --extra qwen`，然后用 `uv run videocaptioner doctor --profile qwen` 检查运行时和模型状态。
+- 桌面 Release：打开 **设置 → 转录配置 → Qwen 组件管理**，选择 **安装 CPU 运行时** 或 **安装 CUDA 运行时**，再下载 ASR / ForcedAligner 模型。
+- 源码运行 GUI：同样推荐在 **Qwen 组件管理** 中安装独立运行时，然后用 `uv run videocaptioner doctor --profile qwen` 检查状态。
+- 源码级调试 `qwen-asr` 集成：如果确实希望把依赖装进当前 `.venv`，再执行 `uv sync --python 3.12 --extra qwen`。
 
-Qwen runtime 会安装到用户数据目录下的独立 `runtimes/qwen` 环境，避免把 PyTorch / qwen-asr 混入主程序包。
+Qwen runtime 会安装到用户数据目录下的独立 `runtimes/qwen` 环境，避免把 PyTorch / qwen-asr 混入主程序包。源码运行时路径通常是项目目录下的 `AppData/runtimes/qwen`；桌面 Release 会使用系统用户数据目录。
+
+### Qwen 运行时选择
+
+| 按钮 | 安装内容 | 适用场景 |
+|------|----------|----------|
+| **安装 CPU 运行时** | `qwen-asr` + CPU PyTorch | 无 NVIDIA GPU、先验证功能、或排查 CUDA 问题 |
+| **安装 CUDA 运行时** | `qwen-asr` + CUDA PyTorch (`cu128`) | NVIDIA GPU，且运行设备选择 `auto` / `cuda:0` |
+
+CUDA 安装流程会使用 `uv --torch-backend cu128` 解析依赖，并在最后重新安装 PyTorch。这样可以避免 `qwen-asr` / `accelerate` 依赖链把 PyTorch 回退成默认 CPU 版。
+
+安装完成后应看到类似：
+
+```text
+PyTorch 2.11.0+cu128 (CUDA 12.8, CUDA available)
+```
+
+如果显示 `+cpu` 或 `CUDA unavailable`，不要继续用 `cuda:0` 转录。请关闭正在运行的转录任务和残留 `python` / `uv` 进程，再重新点击 **安装 CUDA 运行时**。
+
+### 安装进度与日志
+
+安装过程中组件管理会显示当前步骤和摘要进度。CUDA 版 PyTorch wheel 较大，网络较慢时停留在某一步几十秒到数分钟都可能是正常的。
+
+完整安装输出写入：
+
+```text
+AppData/logs/app.log
+```
+
+遇到安装失败时优先查看日志中 `qwen_runtime_manager`、`Installing Qwen runtime dependencies`、`Installing CUDA PyTorch runtime` 附近的内容。
+
+常见错误：
+
+- `Windows 拒绝访问` / `0x80070005`：通常是运行时文件被正在运行的转录任务、残留 Python 进程、杀毒软件或索引器占用。关闭任务后重试；必要时重启软件。
+- `PyTorch ... +cpu`：说明当前运行时仍是 CPU PyTorch。重新执行 **安装 CUDA 运行时**，安装结束后确认状态显示 `+cu128`。
+- `No module named 'nagisa'` / `No module named 'qwen_asr'`：说明 `qwen-asr` 依赖没有完整安装。重新执行对应运行时安装按钮。
 
 性能建议：
 

@@ -491,7 +491,7 @@ class FasterWhisperDownloadDialog(MessageBoxBase):
         if self.program_download_thread and self.program_download_thread.isRunning():
             self.program_download_thread.stop()
         if self.model_download_thread and self.model_download_thread.isRunning():
-            self.model_download_thread.terminate()
+            self.model_download_thread.cancel()
         FasterWhisperDownloadDialog.is_downloading = False
         self.reject()
 
@@ -529,12 +529,15 @@ class FasterWhisperDownloadDialog(MessageBoxBase):
         self.model_download_thread = ModelscopeDownloadThread(
             model["modelScopeLink"], os.path.join(MODEL_PATH, model["value"])
         )
+        model_download_canceled = False
 
         def _on_model_download_progress(value, msg):
             self.progress_bar.setValue(value)
             self.progress_label.setText(msg)
 
         def _on_model_download_finished():
+            if model_download_canceled:
+                return
             FasterWhisperDownloadDialog.is_downloading = False
             self._set_all_download_buttons_enabled(True)
             # 更新状态
@@ -589,6 +592,16 @@ class FasterWhisperDownloadDialog(MessageBoxBase):
             self.progress_bar.hide()
             self.progress_label.hide()
 
+        def _on_model_download_canceled(message):
+            nonlocal model_download_canceled
+            model_download_canceled = True
+            FasterWhisperDownloadDialog.is_downloading = False
+            self._set_all_download_buttons_enabled(True)
+            if download_btn:
+                download_btn.setEnabled(True)
+            self.progress_label.setText(str(message))
+            self.progress_bar.hide()
+
         def _on_model_download_error(error):
             FasterWhisperDownloadDialog.is_downloading = False
             self._set_all_download_buttons_enabled(True)
@@ -602,6 +615,7 @@ class FasterWhisperDownloadDialog(MessageBoxBase):
         self.model_download_thread.progress.connect(_on_model_download_progress)
         self.model_download_thread.finished.connect(_on_model_download_finished)
         self.model_download_thread.error.connect(_on_model_download_error)
+        self.model_download_thread.canceled.connect(_on_model_download_canceled)
         self.model_download_thread.start()
 
     def _set_all_download_buttons_enabled(self, enabled: bool):

@@ -1,7 +1,10 @@
 import datetime
 import shutil
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -35,37 +38,67 @@ class TranscriptThread(QThread):
         self._cancel_emitted = False
         self._temp_audio_path: str | None = None
         self._temp_workspace_path: str | None = None
+        self._step_timings: list[tuple[str, float, str]] = []
 
     def run(self):
+        task_started = time.perf_counter()
+        status = "success"
         try:
             self.task.started_at = datetime.datetime.now()
-            logger.info(f"\n{self.task.transcribe_config.print_config()}")
+            logger.info(
+                "转录任务开始: file=%s, output=%s, model=%s",
+                self.task.file_path,
+                self.task.output_path,
+                (
+                    self.task.transcribe_config.transcribe_model
+                    if self.task.transcribe_config
+                    else None
+                ),
+            )
+            if self.task.transcribe_config:
+                logger.info(
+                    f"\n{self.task.transcribe_config.print_config()}",
+                    extra={"console": True},
+                )
+            else:
+                logger.info("转录配置为空，等待验证阶段返回错误")
 
             self._raise_if_cancelled()
-            self._validate_task()
+            with self._timed_step("validate_task"):
+                self._validate_task()
 
             # 检查是否已下载字幕文件
-            if self._check_downloaded_subtitle():
+            with self._timed_step("check_downloaded_subtitle"):
+                subtitle_already_downloaded = self._check_downloaded_subtitle()
+            if subtitle_already_downloaded:
+                status = "skipped_existing_subtitle"
                 return
 
             self._raise_if_cancelled()
             self._perform_transcription()
 
         except TranscriptionCancelled:
+            status = "canceled"
             logger.info("转录任务已取消")
             self._emit_canceled()
         except Exception as e:
+            status = "failed"
             logger.exception("转录过程中发生错误: %s", str(e))
             self.error.emit(str(e))
             self.progress.emit(100, self.tr("转录失败"))
         finally:
-            self._cleanup_runtime_cache()
+            with self._timed_step("cleanup_runtime_cache"):
+                self._cleanup_runtime_cache()
+            self._log_timing_summary(status, time.perf_counter() - task_started)
 
     def cancel(self, force: bool = False):
         """Request cancellation; force terminates the worker if it cannot stop itself."""
         self._cancel_requested = True
         self.requestInterruption()
         if force and self.isRunning():
+            if self._uses_native_qwen_runtime():
+                logger.warning("跳过强制终止 Qwen 转录线程，等待隔离 worker 退出")
+                return
             logger.warning("强制终止转录线程")
             self.terminate()
             self.wait(1000)
@@ -73,6 +106,15 @@ class TranscriptThread(QThread):
             self._cleanup_temp_workspace()
             self._cleanup_runtime_cache()
             self._emit_canceled()
+
+    def _uses_native_qwen_runtime(self) -> bool:
+        config = self.task.transcribe_config
+        if not config or not config.transcribe_model:
+            return False
+        return config.transcribe_model in {
+            TranscribeModelEnum.QWEN_LOCAL_ASR,
+            TranscribeModelEnum.MIMO_ASR_API,
+        }
 
     def _raise_if_cancelled(self):
         if self._cancel_requested or self.isInterruptionRequested():
@@ -85,12 +127,77 @@ class TranscriptThread(QThread):
         self.progress.emit(100, self.tr("已停止"))
         self.canceled.emit()
 
+    @contextmanager
+    def _timed_step(
+        self,
+        name: str,
+        *,
+        console_start: str | None = None,
+        console_success: str | None = None,
+        console_failure: str | None = None,
+    ) -> Iterator[None]:
+        started = time.perf_counter()
+        logger.info("转录步骤开始: %s", name)
+        if console_start:
+            logger.info(console_start, extra={"console": True})
+        try:
+            yield
+        except BaseException:
+            elapsed = time.perf_counter() - started
+            self._step_timings.append((name, elapsed, "failed"))
+            logger.info("转录步骤失败: %s，用时 %.2fs", name, elapsed)
+            if console_failure:
+                logger.info(
+                    "%s，用时 %.2fs",
+                    console_failure,
+                    elapsed,
+                    extra={"console": True},
+                )
+            raise
+        else:
+            elapsed = time.perf_counter() - started
+            self._step_timings.append((name, elapsed, "success"))
+            logger.info("转录步骤完成: %s，用时 %.2fs", name, elapsed)
+            if console_success:
+                logger.info(
+                    "%s，用时 %.2fs",
+                    console_success,
+                    elapsed,
+                    extra={"console": True},
+                )
+
+    def _log_timing_summary(self, status: str, total_elapsed: float):
+        summary = ", ".join(
+            f"{name}={elapsed:.2f}s/{step_status}"
+            for name, elapsed, step_status in self._step_timings
+        )
+        logger.info(
+            "转录任务耗时汇总: status=%s, total=%.2fs, steps=[%s]",
+            status,
+            total_elapsed,
+            summary,
+        )
+        status_text = {
+            "success": "转录任务完成",
+            "failed": "转录任务失败",
+            "canceled": "转录任务已取消",
+            "skipped_existing_subtitle": "转录任务跳过",
+        }.get(status, f"转录任务结束({status})")
+        logger.info(
+            "%s，总用时 %.2fs",
+            status_text,
+            total_elapsed,
+            extra={"console": True},
+        )
+
     def _cleanup_runtime_cache(self):
         config = self.task.transcribe_config
         if not config or not config.transcribe_model:
             return
+        if config.transcribe_model == TranscribeModelEnum.QWEN_LOCAL_ASR:
+            logger.info("跳过 Qwen Local 主进程缓存清理：模型运行在隔离 worker 中")
+            return
         if config.transcribe_model in {
-            TranscribeModelEnum.QWEN_LOCAL_ASR,
             TranscribeModelEnum.MIMO_ASR_API,
         }:
             clear_qwen_model_cache()
@@ -150,50 +257,75 @@ class TranscriptThread(QThread):
         video_path = Path(self.task.file_path)
 
         self.progress.emit(5, self.tr("转换音频中"))
-        logger.info("开始转换音频")
 
-        temp_workspace_path = tempfile.mkdtemp(
-            prefix=".videocaptioner-",
-            dir=str(video_path.parent),
-        )
-        self._temp_workspace_path = temp_workspace_path
-        temp_audio_path = str(Path(temp_workspace_path) / "source.wav")
-        self._temp_audio_path = temp_audio_path
+        with self._timed_step("create_temp_workspace"):
+            temp_workspace_path = tempfile.mkdtemp(
+                prefix=".videocaptioner-",
+                dir=str(video_path.parent),
+            )
+            self._temp_workspace_path = temp_workspace_path
+            temp_audio_path = str(Path(temp_workspace_path) / "source.wav")
+            self._temp_audio_path = temp_audio_path
+            logger.info(
+                "转录临时工作目录: workspace=%s, audio=%s",
+                temp_workspace_path,
+                temp_audio_path,
+            )
         previous_runtime_temp_dir = self.task.transcribe_config.runtime_temp_dir
         self.task.transcribe_config.runtime_temp_dir = temp_workspace_path
 
         try:
             # 转换音频文件
             # 获取选中的音轨索引（如果有）
-            audio_track_index = self.task.selected_audio_track_index
-            is_success = video2audio(
-                str(video_path),
-                output=temp_audio_path,
-                audio_track_index=audio_track_index,
-            )
+            with self._timed_step(
+                "convert_video_to_audio",
+                console_start="开始转换音频",
+                console_success="音频转换完成",
+                console_failure="音频转换失败",
+            ):
+                audio_track_index = self.task.selected_audio_track_index
+                logger.info(
+                    "开始转换音频: input=%s, output=%s, audio_track_index=%s",
+                    video_path,
+                    temp_audio_path,
+                    audio_track_index,
+                )
+                is_success = video2audio(
+                    str(video_path),
+                    output=temp_audio_path,
+                    audio_track_index=audio_track_index,
+                )
             self._raise_if_cancelled()
             if not is_success:
                 logger.error("音频转换失败")
                 raise RuntimeError(self.tr("音频转换失败"))
 
             self.progress.emit(20, self.tr("语音转录中"))
-            logger.info("开始语音转录")
 
             # 进行转录
-            asr_data = transcribe(
-                temp_audio_path,
-                self.task.transcribe_config,
-                callback=self.progress_callback,
-            )
+            with self._timed_step(
+                "run_asr_transcription",
+                console_start="开始语音转录",
+                console_success="语音转录完成",
+                console_failure="语音转录失败",
+            ):
+                asr_data = transcribe(
+                    temp_audio_path,
+                    self.task.transcribe_config,
+                    callback=self.progress_callback,
+                )
+                logger.info("语音转录返回: segments=%s", len(asr_data.segments))
             self._raise_if_cancelled()
-            self._save_asr_data(asr_data)
+            with self._timed_step("save_subtitle_outputs"):
+                self._save_asr_data(asr_data)
 
             self.progress.emit(100, self.tr("转录完成"))
             self.finished.emit(self.task)
         finally:
             self.task.transcribe_config.runtime_temp_dir = previous_runtime_temp_dir
-            self._cleanup_temp_audio()
-            self._cleanup_temp_workspace()
+            with self._timed_step("cleanup_temp_files"):
+                self._cleanup_temp_audio()
+                self._cleanup_temp_workspace()
 
     def _save_asr_data(self, asr_data):
         assert self.task.transcribe_config is not None

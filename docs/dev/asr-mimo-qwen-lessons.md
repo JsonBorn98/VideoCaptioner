@@ -69,9 +69,19 @@ every VideoCaptioner user.
 
 Operational notes:
 
-- The GUI may run from a `uv tool` environment, which is different from the
-  repository `uv run` environment. Install `qwen-asr` into the environment that
-  launches the GUI.
+- The GUI may run from a release bundle or from the repository `uv run`
+  environment. Use the managed Qwen runtime under `runtimes/qwen` instead of
+  assuming `qwen-asr` is installed in the main Python environment.
+- Runtime installation must control the PyTorch backend explicitly. Plain
+  `uv pip install qwen-asr` resolves `torch` from the default index and can
+  install CPU PyTorch even when the user clicked a CUDA path.
+- For CUDA runtime installs, pass `--torch-backend cu128` while installing the
+  whole `qwen-asr` dependency graph, then reinstall `torch` last with
+  `--reinstall-package torch --torch-backend cu128 torch`. This handles both
+  fresh installs and repair of an existing runtime polluted by CPU PyTorch.
+- On Windows, prefer `UV_LINK_MODE=copy` for GUI-driven runtime installs.
+  Hardlink/cache operations can fail with access denied when files are locked
+  by AV/indexers or stale Python processes.
 - `Qwen/Qwen3-ASR-1.7B` plus `Qwen/Qwen3-ForcedAligner-0.6B` can run close to a
   16 GB VRAM limit. `Qwen/Qwen3-ASR-0.6B` is the safer default for long jobs.
 - `dtype=auto` should prefer CUDA half precision when available. Expose
@@ -80,6 +90,9 @@ Operational notes:
   chunk transcripts are truncated.
 - Limit inference concurrency to one. Loading both ASR and aligner models is
   already memory-heavy.
+- Run local Qwen inference in a worker subprocess, not in the PyQt GUI process.
+  This isolates torch/CUDA native libraries and prevents GUI cleanup from
+  touching Qwen model cache in the main process.
 
 ## Timestamp Lessons
 
@@ -146,6 +159,10 @@ Long local ASR jobs need cancellation:
 
 Logging should avoid duplicate console lines. VideoCaptioner loggers should set
 `propagate = False` after attaching their own handlers.
+
+Runtime install progress should be throttled before it reaches Qt widgets.
+Large `uv` installs can emit many lines; write full output to `app.log` and only
+send summarized progress to the UI.
 
 ## Testing Checklist
 

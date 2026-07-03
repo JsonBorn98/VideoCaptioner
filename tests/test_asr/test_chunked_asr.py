@@ -427,6 +427,27 @@ class TestErrorHandling:
         finally:
             Path(audio_input).unlink()
 
+    def test_asr_failure_stops_submitting_remaining_chunks(self):
+        """首个 chunk 失败后不再继续启动后续 chunk"""
+        audio_input = create_test_audio_file(1000)
+        try:
+            MockASR.global_run_count = 0
+            chunked = ChunkedASR(
+                asr_class=MockASR,
+                audio_path=audio_input,
+                asr_kwargs={"fail_on_run": True},
+                chunk_length=300,
+                chunk_overlap=0,
+                chunk_concurrency=1,
+            )
+
+            with pytest.raises(RuntimeError, match="Mock ASR failed"):
+                chunked.run()
+
+            assert MockASR.global_run_count == 1
+        finally:
+            Path(audio_input).unlink()
+
 
 # ============================================================================
 # 测试进度回调
