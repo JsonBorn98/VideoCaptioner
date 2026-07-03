@@ -20,7 +20,7 @@ subtitle styles.
 
 ## CI and releases
 
-`.github/workflows/build-desktop.yml` builds on:
+`.github/workflows/build-desktop.yml` builds desktop bundles on:
 
 - `windows-latest`
 - `macos-15-intel`
@@ -34,6 +34,24 @@ Each job runs a real packaged-app smoke test:
 - creates both soft-subtitle and hard-subtitle videos
 - validates output duration with bundled ffprobe
 
-On `v*` tags, desktop zip files are uploaded to the GitHub Release. This fork
-does not publish to PyPI; source package artifacts are produced by CI only for
-verification and short-lived workflow downloads.
+Pull requests and branch pushes are artifact-only checks. They upload short-lived
+workflow artifacts, but they do not publish a GitHub Release.
+
+Release publishing is tag based. Use one of these paths:
+
+```bash
+git tag v1.4.3
+git push origin v1.4.3
+```
+
+Pushing a `vMAJOR.MINOR.PATCH` tag builds Windows and macOS bundles, creates the
+GitHub Release if it does not already exist, and uploads all desktop zip files.
+The same publishing path also works when a GitHub Release is published from the
+GitHub UI for an existing `v*` tag.
+
+For a manual re-upload, run the **Build Desktop Apps** workflow from GitHub
+Actions and set `release_tag` to an existing `v*` tag. Leave `release_tag` empty
+for an artifact-only manual build.
+
+This fork does not publish to PyPI; source package artifacts are produced by CI
+only for verification and short-lived workflow downloads.

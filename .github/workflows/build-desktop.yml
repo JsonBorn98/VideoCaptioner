@@ -1,4 +1,5 @@
 name: Build Desktop Apps
+run-name: Build Desktop Apps (${{ github.event_name }}:${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }})
 
 on:
   pull_request:
@@ -17,18 +18,80 @@ on:
       - main
     tags:
       - "v*"
+  release:
+    types:
+      - published
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional existing v* tag to publish GitHub Release assets. Leave empty for an artifact-only build."
+        required: false
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: desktop-${{ github.ref }}
+  group: desktop-${{ inputs.release_tag || github.event.release.tag_name || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  release-metadata:
+    name: Release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      publish_release: ${{ steps.meta.outputs.publish_release }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+    steps:
+      - name: Resolve release context
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          checkout_ref="${REF}"
+          publish_release="false"
+          release_tag=""
+
+          if [[ "${EVENT_NAME}" == "release" ]]; then
+            release_tag="${RELEASE_TAG}"
+            checkout_ref="refs/tags/${release_tag}"
+            publish_release="true"
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_RELEASE_TAG}" ]]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+            checkout_ref="refs/tags/${release_tag}"
+            publish_release="true"
+          elif [[ "${REF}" == refs/tags/v* ]]; then
+            release_tag="${REF_NAME}"
+            checkout_ref="${REF}"
+            publish_release="true"
+          fi
+
+          if [[ "${publish_release}" == "true" && ! "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must use semantic form vMAJOR.MINOR.PATCH, got '${release_tag}'."
+            exit 1
+          fi
+
+          {
+            echo "checkout_ref=${checkout_ref}"
+            echo "publish_release=${publish_release}"
+            echo "release_tag=${release_tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "checkout_ref=${checkout_ref}"
+          echo "publish_release=${publish_release}"
+          echo "release_tag=${release_tag:-<none>}"
+
   desktop:
     name: ${{ matrix.name }}
+    needs: release-metadata
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -43,6 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.release-metadata.outputs.checkout_ref }}
           fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v8.1.0
@@ -70,13 +134,44 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - release-metadata
+      - desktop
+    if: needs.release-metadata.outputs.publish_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          find release-assets -maxdepth 2 -type f -print | sort
+          test -n "$(find release-assets -maxdepth 1 -type f -name '*.zip' -print -quit)"
+
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-metadata.outputs.release_tag }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "$TAG" --generate-notes
-          gh release upload "$TAG" artifacts/*.zip --clobber
+          set -euo pipefail
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Using existing GitHub Release ${TAG}"
+          else
+            gh release create "${TAG}" --title "${TAG}" --generate-notes --verify-tag
+          fi
+
+          gh release upload "${TAG}" release-assets/*.zip --clobber
