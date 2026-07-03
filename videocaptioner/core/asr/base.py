@@ -139,7 +139,8 @@ class BaseASR:
 
         # Cache only after the raw response can be converted successfully.
         # This avoids persisting partial API results when post-processing fails.
-        self._cache.set(cache_key, resp_data, expire=86400 * 2)
+        if self._should_cache_response(resp_data, segments):
+            self._cache.set(cache_key, resp_data, expire=86400 * 2)
         logger.info(
             "ASR backend 完成: class=%s, total=%.2fs, segments=%s",
             self.__class__.__name__,
@@ -147,6 +148,10 @@ class BaseASR:
             len(segments),
         )
         return ASRData(segments)
+
+    def _should_cache_response(self, resp_data: dict, segments: list[ASRDataSeg]) -> bool:
+        """Return whether a successful raw ASR response should be cached."""
+        return True
 
     def _get_key(self) -> str:
         """Get cache key for this ASR request.

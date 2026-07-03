@@ -239,7 +239,10 @@ class MiMoASR(BaseASR):
 
         text = str(resp_data.get("text", "")).strip()
         if not text:
-            raise ValueError("MiMo ASR response missing transcription text.")
+            logger.warning(
+                "MiMo ASR response returned empty text; treating this chunk as silence"
+            )
+            return []
 
         if self.need_word_time_stamp:
             raise RuntimeError(
@@ -322,6 +325,11 @@ class MiMoASR(BaseASR):
             )
 
         return result
+
+    def _should_cache_response(self, resp_data: dict, segments: list[ASRDataSeg]) -> bool:
+        if not str(resp_data.get("text", "")).strip() and not segments:
+            return False
+        return True
 
     def _get_key(self) -> str:
         return (

@@ -89,6 +89,19 @@ def test_mimo_asr_requires_real_timestamps_when_requested():
         asr._make_segments({"text": "plain text", "seconds": 1})
 
 
+def test_mimo_asr_treats_empty_text_response_as_silence_chunk():
+    asr = MiMoASR(
+        audio_input=b"fake mp3",
+        api_key="sk-test",
+        need_word_time_stamp=True,
+    )
+
+    segments = asr._make_segments({"text": "", "seconds": 300})
+
+    assert segments == []
+    assert asr._should_cache_response({"text": ""}, segments) is False
+
+
 def test_timestamp_items_to_segments_accepts_objects_and_dicts():
     item = SimpleNamespace(text="hello", start_time=1.2, end_time=1.5)
 
@@ -192,6 +205,18 @@ def test_qwen_local_asr_requires_timestamps_when_requested():
 
     with pytest.raises(RuntimeError, match="timestamps"):
         asr._make_segments({"text": "plain text without timestamps", "time_stamps": []})
+
+
+def test_qwen_local_asr_treats_empty_text_response_as_silence_chunk():
+    asr = QwenLocalASR(
+        audio_input=b"fake mp3",
+        need_word_time_stamp=True,
+    )
+
+    segments = asr._make_segments({"text": "", "time_stamps": []})
+
+    assert segments == []
+    assert asr._should_cache_response({"text": ""}, segments) is False
 
 
 def test_qwen_local_asr_splits_plain_text_when_timestamps_not_requested():

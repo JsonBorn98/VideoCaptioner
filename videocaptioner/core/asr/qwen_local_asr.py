@@ -305,7 +305,10 @@ class QwenLocalASR(BaseASR):
 
         text = str(resp_data.get("text", "")).strip()
         if not text:
-            raise ValueError("Qwen ASR response missing transcription text.")
+            logger.warning(
+                "Qwen ASR response returned empty text; treating this chunk as silence"
+            )
+            return []
 
         if self.need_word_time_stamp:
             raise RuntimeError(
@@ -326,3 +329,8 @@ class QwenLocalASR(BaseASR):
             f"v2-{self.crc32_hex}-{self.asr_model}-{self.aligner_model}-{self.language}-"
             f"{self.device}-{self.dtype}-{self.max_new_tokens}-{self.need_word_time_stamp}"
         )
+
+    def _should_cache_response(self, resp_data: dict, segments: list[ASRDataSeg]) -> bool:
+        if not str(resp_data.get("text", "")).strip() and not segments:
+            return False
+        return True
