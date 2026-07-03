@@ -6,20 +6,20 @@
 
 文档已自动部署到 GitHub Pages：
 
-**[https://weifeng2333.github.io/VideoCaptioner/](https://weifeng2333.github.io/VideoCaptioner/)**
+**[https://jsonborn98.github.io/VideoCaptioner/](https://jsonborn98.github.io/VideoCaptioner/)**
 
 ## 🚀 本地开发
 
 ### 安装依赖
 
 ```bash
-npm install
+bun install
 ```
 
 ### 启动开发服务器
 
 ```bash
-npm run docs:dev
+bun run docs:dev
 ```
 
 访问 http://localhost:5173 查看文档
@@ -27,7 +27,7 @@ npm run docs:dev
 ### 构建文档
 
 ```bash
-npm run docs:build
+bun run docs:build
 ```
 
 构建产物位于 `docs/.vitepress/dist/`
@@ -35,7 +35,7 @@ npm run docs:build
 ### 预览构建结果
 
 ```bash
-npm run docs:preview
+bun run docs:preview
 ```
 
 ## 📁 目录结构
@@ -153,7 +153,7 @@ head:
 1. **Google Search Console**
    - 访问 https://search.google.com/search-console
    - 添加网站并验证
-   - 提交 sitemap: `https://weifeng2333.github.io/VideoCaptioner/sitemap.xml`
+   - 提交 sitemap: `https://jsonborn98.github.io/VideoCaptioner/sitemap.xml`
 
 2. **Bing Webmaster Tools**
    - 访问 https://www.bing.com/webmasters
@@ -207,7 +207,7 @@ head:
 确保已安装依赖：
 
 ```bash
-npm install
+bun install
 ```
 
 ### 如何添加自定义样式？

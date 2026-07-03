@@ -55,13 +55,12 @@
 - **最大输出 Tokens**：默认 2048；如果分块文本被截断再调大
 - **分块重叠秒数**：默认 10 秒，范围 0-60 秒
 
-依赖：
+依赖安装：
 
-```bash
-uv pip install -U qwen-asr
-```
+- 桌面 Release：打开 **设置 → 转录配置 → Qwen 组件管理**，先点击 **安装 / 修复运行时**，再下载 ASR / ForcedAligner 模型。
+- 源码开发：执行 `uv sync --python 3.12 --extra qwen`，然后用 `uv run videocaptioner doctor --profile qwen` 检查运行时和模型状态。
 
-如果通过 `videocaptioner gui` 启动桌面程序，请确认依赖安装到了启动 GUI 的同一个 Python/uv tool 环境中。
+Qwen runtime 会安装到用户数据目录下的独立 `runtimes/qwen` 环境，避免把 PyTorch / qwen-asr 混入主程序包。
 
 性能建议：
 

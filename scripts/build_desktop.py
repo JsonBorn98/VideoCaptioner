@@ -97,6 +97,25 @@ def prepare_ffmpeg() -> None:
         print(f"Bundled {dst.relative_to(ROOT)}")
 
 
+def prepare_uv() -> None:
+    """Bundle uv so packaged users can install optional runtimes such as Qwen."""
+    runtime_bin = RUNTIME_DIR / "resource" / "bin"
+    runtime_bin.mkdir(parents=True, exist_ok=True)
+    uv = shutil.which("uv")
+    if not uv:
+        raise RuntimeError("uv executable not found on PATH; install uv before building desktop bundles")
+
+    src = Path(uv)
+    dst = runtime_bin / src.name
+    if dst.exists():
+        dst.chmod(dst.stat().st_mode | stat.S_IWUSR)
+    shutil.copy2(src, dst)
+    if platform.system() != "Windows":
+        mode = dst.stat().st_mode
+        dst.chmod(mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    print(f"Bundled {dst.relative_to(ROOT)}")
+
+
 def build_pyinstaller() -> None:
     env = os.environ.copy()
     env["VIDEOCAPTIONER_DESKTOP_RUNTIME_DIR"] = str(RUNTIME_DIR)
@@ -148,6 +167,7 @@ def verify_bundle() -> None:
         data_root / "resource" / "subtitle_style" / "ass-default.json",
         data_root / "resource" / "bin" / ("ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"),
         data_root / "resource" / "bin" / ("ffprobe.exe" if platform.system() == "Windows" else "ffprobe"),
+        data_root / "resource" / "bin" / ("uv.exe" if platform.system() == "Windows" else "uv"),
     ]
     missing = [str(path.relative_to(ROOT)) for path in required if not path.exists()]
     if missing:
@@ -175,6 +195,7 @@ def main() -> int:
         clean()
     ensure_version_file(version)
     prepare_ffmpeg()
+    prepare_uv()
     build_pyinstaller()
     verify_bundle()
     if not args.no_archive:

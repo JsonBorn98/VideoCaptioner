@@ -3,10 +3,13 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 :: VideoCaptioner Installer & Launcher for Windows
-:: Usage: Download and run this script, or run from project directory
+:: Usage: run from a source checkout. Set VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS=true
+:: to allow this script to install Git, uv, or FFmpeg with winget.
 
 :: Configuration
-set "REPO_URL=https://github.com/WEIFENG2333/VideoCaptioner.git"
+if not defined VIDEOCAPTIONER_REPO_URL set "VIDEOCAPTIONER_REPO_URL=https://github.com/JsonBorn98/VideoCaptioner.git"
+set "REPO_URL=%VIDEOCAPTIONER_REPO_URL%"
+if not defined VIDEOCAPTIONER_PYTHON_VERSION set "VIDEOCAPTIONER_PYTHON_VERSION=3.12"
 if not defined VIDEOCAPTIONER_HOME set "INSTALL_DIR=%USERPROFILE%\VideoCaptioner"
 if defined VIDEOCAPTIONER_HOME set "INSTALL_DIR=%VIDEOCAPTIONER_HOME%"
 
@@ -17,7 +20,7 @@ echo ==================================
 echo.
 
 :: Check if running from project directory (current dir)
-if exist "pyproject.toml" if exist "pyproject.toml" if exist "videocaptioner" (
+if exist "pyproject.toml" if exist "videocaptioner" (
     set "INSTALL_DIR=!CD!"
     echo [INFO] Running from project directory: !INSTALL_DIR!
     goto :after_detect
@@ -71,6 +74,12 @@ where git >nul 2>&1
 if !errorlevel! equ 0 exit /b 0
 
 echo [INFO] Git not found, installing...
+if /I not "%VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS%"=="true" (
+    echo [ERROR] Git is required. Install Git or rerun with VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS=true.
+    echo   winget install --id Git.Git -e --source winget
+    pause
+    exit /b 1
+)
 
 where winget >nul 2>&1
 if !errorlevel! equ 0 (
@@ -97,6 +106,12 @@ if !errorlevel! equ 0 (
 )
 
 echo [INFO] Installing uv package manager...
+if /I not "%VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS%"=="true" (
+    echo [ERROR] uv is required. Install uv or rerun with VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS=true.
+    echo   powershell -ExecutionPolicy ByPass -NoProfile -Command "irm https://astral.sh/uv/install.ps1 ^| iex"
+    pause
+    exit /b 1
+)
 
 :: Try PowerShell installation
 powershell -ExecutionPolicy ByPass -NoProfile -Command "irm https://astral.sh/uv/install.ps1 | iex"
@@ -122,6 +137,11 @@ if !errorlevel! equ 0 (
 )
 
 echo [INFO] Installing FFmpeg (required for video synthesis)...
+if /I not "%VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS%"=="true" (
+    echo [WARN] FFmpeg is not installed. The app can start, but video synthesis and media probing will fail.
+    echo   winget install --id Gyan.FFmpeg -e --source winget
+    exit /b 0
+)
 
 where winget >nul 2>&1
 if !errorlevel! equ 0 (
@@ -157,7 +177,7 @@ exit /b 0
 
 :install_dependencies
 echo [INFO] Installing dependencies with uv...
-uv sync
+uv sync --python "%VIDEOCAPTIONER_PYTHON_VERSION%"
 if !errorlevel! neq 0 (
     echo [ERROR] Failed to install dependencies
     pause
@@ -168,9 +188,12 @@ exit /b 0
 
 :run_app
 echo.
+echo [INFO] Running startup diagnostics...
+uv run --python "%VIDEOCAPTIONER_PYTHON_VERSION%" videocaptioner doctor --profile gui
+echo.
 echo [INFO] Starting VideoCaptioner...
 echo.
-uv run videocaptioner
+uv run --python "%VIDEOCAPTIONER_PYTHON_VERSION%" videocaptioner
 if !errorlevel! neq 0 (
     echo.
     echo Application exited with error.

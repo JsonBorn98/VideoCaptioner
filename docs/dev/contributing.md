@@ -11,7 +11,15 @@
 ```bash
 git clone https://github.com/YOUR_USERNAME/VideoCaptioner.git
 cd VideoCaptioner
-pip install -r requirements.txt
+uv sync --python 3.12
+uv run videocaptioner doctor --profile gui
+```
+
+如需开发 Qwen 本地 ASR：
+
+```bash
+uv sync --python 3.12 --extra qwen
+uv run videocaptioner doctor --profile qwen
 ```
 
 ## 代码规范
@@ -44,4 +52,4 @@ uv run ruff check --select I --fix .
 - [架构设计](/dev/architecture)
 - [API 文档](/dev/api)
 
-更多信息请参考 [GitHub Issues](https://github.com/WEIFENG2333/VideoCaptioner/issues)。
+更多信息请参考 [GitHub Issues](https://github.com/JsonBorn98/VideoCaptioner/issues)。

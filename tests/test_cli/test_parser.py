@@ -46,6 +46,32 @@ class TestMainParser:
         assert "config" in out
         assert "doctor" in out
 
+    def test_doctor_accepts_qwen_profile(self, tmp_path, monkeypatch, capsys):
+        import videocaptioner.config as app_config
+        import videocaptioner.core.asr.qwen_runtime_manager as qwen_manager
+
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "Qwen3-ASR-0.6B").mkdir()
+        monkeypatch.setattr(app_config, "MODEL_PATH", model_dir)
+        monkeypatch.setattr(
+            qwen_manager,
+            "inspect_qwen_runtime",
+            lambda: qwen_manager.QwenRuntimeStatus(
+                runtime_dir=tmp_path / "runtimes" / "qwen",
+                python_executable=tmp_path / "runtimes" / "qwen" / "Scripts" / "python.exe",
+                site_packages=(),
+                has_venv=True,
+                importable=True,
+                uv_executable="uv",
+            ),
+        )
+
+        assert main(["doctor", "--profile", "qwen"]) == EXIT.SUCCESS
+        out = capsys.readouterr().out
+        assert "qwen.runtime" in out
+        assert "qwen.models" in out
+
     def test_gui_command_reports_missing_gui_dependencies(self, monkeypatch):
         import builtins
 

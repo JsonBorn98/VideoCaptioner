@@ -11,6 +11,10 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -22,7 +26,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -31,13 +35,48 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint
+        if: matrix.python-version == '3.12'
         run: uv run ruff check videocaptioner/
 
       - name: Type check CLI
+        if: matrix.python-version == '3.12'
         run: uv run pyright videocaptioner/cli/
 
       - name: Unit tests
-        run: uv run pytest tests/test_cli tests/test_dubbing -q
+        run: >
+          uv run pytest
+          tests/test_cli
+          tests/test_dubbing
+          tests/test_asr/test_mimo_qwen_asr.py
+          tests/test_asr/test_qwen_runtime_manager.py
+          -q
 
       - name: Build package
+        if: matrix.python-version == '3.12'
         run: uv build
+
+      - name: Upload package artifact
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-package
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install docs dependencies
+        run: bun install
+        working-directory: docs
+
+      - name: Build docs
+        run: bun run docs:build
+        working-directory: docs

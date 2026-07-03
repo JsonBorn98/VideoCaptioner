@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional, Union
 
 from videocaptioner.config import MODEL_PATH
+from videocaptioner.core.asr.qwen_runtime_manager import ensure_qwen_runtime_on_path
 from videocaptioner.core.utils.text_utils import is_mainly_cjk
 
 from .asr_data import ASRDataSeg
@@ -313,11 +314,13 @@ def timestamp_items_to_segments(items: Any) -> list[ASRDataSeg]:
 
 
 def _require_qwen_asr() -> Any:
+    ensure_qwen_runtime_on_path()
     try:
         import qwen_asr
     except ImportError as exc:
         raise RuntimeError(
-            "Qwen ASR 后端需要安装 qwen-asr。请在当前环境执行: uv pip install -U qwen-asr"
+            "Qwen ASR 后端需要安装 qwen-asr。桌面版请在“Qwen 组件管理”中安装运行时；"
+            "源码开发环境请执行: uv sync --extra qwen"
         ) from exc
     return qwen_asr
 

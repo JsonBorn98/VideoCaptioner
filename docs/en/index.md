@@ -16,7 +16,7 @@ head:
       content: Free & open-source AI subtitle tool powered by Whisper & LLM. Supports 99 languages with intelligent segmentation, professional translation, and one-click processing. Perfect for content creators on YouTube, Bilibili, and other platforms.
   - - meta
     - property: og:url
-      content: https://weifeng2333.github.io/VideoCaptioner/en/
+      content: https://jsonborn98.github.io/VideoCaptioner/en/
   - - meta
     - property: og:locale
       content: en_US
@@ -49,7 +49,7 @@ hero:
       link: /en/guide/getting-started
     - theme: alt
       text: GitHub Repository
-      link: https://github.com/WEIFENG2333/VideoCaptioner
+      link: https://github.com/JsonBorn98/VideoCaptioner
 
 features:
   - icon: ⚡
@@ -102,14 +102,14 @@ features:
 ```bash [Windows]
 # Download and run the installer directly
 # Or run from source
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
+git clone https://github.com/JsonBorn98/VideoCaptioner.git
 cd VideoCaptioner
 run.bat
 ```
 
 ```bash [macOS/Linux]
 # Use automatic installation script
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
+git clone https://github.com/JsonBorn98/VideoCaptioner.git
 cd VideoCaptioner
 chmod +x run.sh
 ./run.sh
@@ -164,3 +164,4 @@ Ready to begin? Check out the [Getting Started Guide](/en/guide/getting-started)
   --vp-home-hero-name-background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 </style>
+

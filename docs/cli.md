@@ -2,8 +2,13 @@
 
 ## 安装
 
+普通用户请下载 GitHub Release 桌面包。本 fork 不发布 PyPI 包，`pip install videocaptioner` 不再作为推荐安装方式。
+
+源码开发环境：
+
 ```bash
-pip install videocaptioner          # CLI + GUI 桌面版
+uv sync --python 3.12
+uv run videocaptioner --help
 ```
 
 免费功能（转录、必应/谷歌翻译）无需任何配置，安装后直接使用。

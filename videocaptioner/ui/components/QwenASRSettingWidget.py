@@ -25,6 +25,7 @@ from videocaptioner.core.asr.qwen_runtime import (
     QWEN_ALIGNER_MODEL_OPTIONS,
     QWEN_ASR_MODEL_OPTIONS,
 )
+from videocaptioner.core.asr.qwen_runtime_manager import inspect_qwen_runtime, qwen_runtime_dir
 from videocaptioner.core.constant import INFOBAR_DURATION_ERROR, INFOBAR_DURATION_SUCCESS
 from videocaptioner.core.entities import TranscribeLanguageEnum
 from videocaptioner.core.utils.platform_utils import open_folder
@@ -32,6 +33,7 @@ from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
 from videocaptioner.ui.components.SpinBoxSettingCard import SpinBoxSettingCard
 from videocaptioner.ui.thread.modelscope_download_thread import ModelscopeDownloadThread
+from videocaptioner.ui.thread.qwen_runtime_install_thread import QwenRuntimeInstallThread
 
 QWEN_DOWNLOAD_MODELS = [
     {
@@ -68,22 +70,37 @@ def is_qwen_model_downloaded(model: dict) -> bool:
 class QwenModelDownloadDialog(MessageBoxBase):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.widget.setMinimumWidth(560)
+        self.widget.setMinimumWidth(620)
         self.download_thread = None
+        self.runtime_thread = None
         self._download_failed = False
         self._setup_ui()
 
     def _setup_ui(self):
         title_layout = QHBoxLayout()
-        title = SubtitleLabel(self.tr("Qwen 模型管理"), self)
+        title = SubtitleLabel(self.tr("Qwen 组件管理"), self)
         open_folder_btn = HyperlinkButton("", self.tr("打开模型文件夹"), parent=self)
         open_folder_btn.setIcon(FIF.FOLDER)
         open_folder_btn.clicked.connect(
             lambda: open_folder(str(Path(cfg.qwen_model_dir.value or str(MODEL_PATH))))
         )
+        open_runtime_btn = HyperlinkButton("", self.tr("打开运行时文件夹"), parent=self)
+        open_runtime_btn.setIcon(FIF.FOLDER)
+        open_runtime_btn.clicked.connect(self._open_runtime_folder)
         title_layout.addWidget(title)
         title_layout.addStretch(1)
+        title_layout.addWidget(open_runtime_btn)
         title_layout.addWidget(open_folder_btn)
+
+        runtime_title = BodyLabel(self.tr("Qwen 运行时"), self)
+        self.runtime_status_label = BodyLabel("", self)
+        self.install_runtime_button = PushButton(self.tr("安装 / 修复运行时"), self)
+        self.install_runtime_button.clicked.connect(self.start_runtime_install)
+
+        runtime_layout = QHBoxLayout()
+        runtime_layout.addWidget(runtime_title)
+        runtime_layout.addStretch(1)
+        runtime_layout.addWidget(self.install_runtime_button)
 
         self.model_combo = ComboBox(self)
         self.model_combo.setMinimumWidth(420)
@@ -103,12 +120,60 @@ class QwenModelDownloadDialog(MessageBoxBase):
 
         self.viewLayout.addLayout(title_layout)
         self.viewLayout.addSpacing(8)
+        self.viewLayout.addLayout(runtime_layout)
+        self.viewLayout.addWidget(self.runtime_status_label)
+        self.viewLayout.addSpacing(8)
         self.viewLayout.addWidget(self.model_combo)
         self.viewLayout.addWidget(self.status_label)
         self.viewLayout.addWidget(self.progress_bar)
         self.viewLayout.addWidget(self.download_button)
         self.yesButton.hide()
         self.cancelButton.setText(self.tr("关闭"))
+        self._refresh_runtime_status()
+
+    def _open_runtime_folder(self):
+        runtime_dir = qwen_runtime_dir()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        open_folder(str(runtime_dir))
+
+    def _refresh_runtime_status(self):
+        status = inspect_qwen_runtime()
+        if status.ready:
+            text = self.tr("运行时已就绪：") + str(status.runtime_dir)
+        else:
+            text = self.tr("运行时未就绪：") + status.message
+        self.runtime_status_label.setText(text)
+
+    def start_runtime_install(self):
+        self.install_runtime_button.setEnabled(False)
+        self.runtime_status_label.setText(self.tr("正在安装 Qwen 运行时..."))
+        self.runtime_thread = QwenRuntimeInstallThread()
+        self.runtime_thread.progress.connect(self.runtime_status_label.setText)
+        self.runtime_thread.error.connect(self._on_runtime_error)
+        self.runtime_thread.installed.connect(self._on_runtime_installed)
+        self.runtime_thread.start()
+
+    def _on_runtime_error(self, error):
+        self.install_runtime_button.setEnabled(True)
+        self._refresh_runtime_status()
+        InfoBar.error(
+            self.tr("运行时安装失败"),
+            str(error),
+            duration=INFOBAR_DURATION_ERROR,
+            position=InfoBarPosition.BOTTOM,
+            parent=self.window(),
+        )
+
+    def _on_runtime_installed(self, runtime_dir):
+        self.install_runtime_button.setEnabled(True)
+        self._refresh_runtime_status()
+        InfoBar.success(
+            self.tr("运行时已安装"),
+            self.tr("Qwen 运行时已安装到：") + str(runtime_dir),
+            duration=INFOBAR_DURATION_SUCCESS,
+            position=InfoBarPosition.BOTTOM,
+            parent=self.window(),
+        )
 
     def start_download(self):
         model = self.model_combo.currentData()
@@ -195,10 +260,10 @@ class QwenASRSettingWidget(QWidget):
 
         self.manage_model_card = HyperlinkCard(
             "",
-            self.tr("管理模型"),
+            self.tr("管理组件"),
             FIF.DOWNLOAD,
-            self.tr("模型管理"),
-            self.tr("下载或更新 Qwen3 ASR / ForcedAligner 模型"),
+            self.tr("Qwen 组件管理"),
+            self.tr("安装 Qwen 运行时，下载或更新 Qwen3 ASR / ForcedAligner 模型"),
             self.setting_group,
         )
 

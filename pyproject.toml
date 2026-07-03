@@ -46,9 +46,9 @@ gui = []
 qwen = ["qwen-asr"]
 
 [project.urls]
-Homepage = "https://github.com/WEIFENG2333/VideoCaptioner"
-Repository = "https://github.com/WEIFENG2333/VideoCaptioner"
-Issues = "https://github.com/WEIFENG2333/VideoCaptioner/issues"
+Homepage = "https://github.com/JsonBorn98/VideoCaptioner"
+Repository = "https://github.com/JsonBorn98/VideoCaptioner"
+Issues = "https://github.com/JsonBorn98/VideoCaptioner/issues"
 
 [project.scripts]
 videocaptioner = "videocaptioner.cli.main:main"

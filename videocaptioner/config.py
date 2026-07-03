@@ -14,10 +14,10 @@ YEAR = 2026
 APP_NAME = "VideoCaptioner"
 AUTHOR = "Weifeng"
 
-HELP_URL = "https://github.com/WEIFENG2333/VideoCaptioner"
-GITHUB_REPO_URL = "https://github.com/WEIFENG2333/VideoCaptioner"
-RELEASE_URL = "https://github.com/WEIFENG2333/VideoCaptioner/releases/latest"
-FEEDBACK_URL = "https://github.com/WEIFENG2333/VideoCaptioner/issues"
+HELP_URL = "https://github.com/JsonBorn98/VideoCaptioner"
+GITHUB_REPO_URL = "https://github.com/JsonBorn98/VideoCaptioner"
+RELEASE_URL = "https://github.com/JsonBorn98/VideoCaptioner/releases/latest"
+FEEDBACK_URL = "https://github.com/JsonBorn98/VideoCaptioner/issues"
 
 # Detect whether running from source tree or pip-installed
 _PACKAGE_DIR = Path(__file__).parent
@@ -70,6 +70,7 @@ LLM_LOG_FILE = LOG_PATH / "llm_requests.jsonl"
 SETTINGS_PATH = APPDATA_PATH / "settings.json"
 CACHE_PATH = APPDATA_PATH / "cache"
 MODEL_PATH = APPDATA_PATH / "models"
+RUNTIME_PATH = APPDATA_PATH / "runtimes"
 
 FASTER_WHISPER_PATH = BIN_PATH / "Faster-Whisper-XXL"
 
@@ -91,7 +92,7 @@ def _copy_missing_tree(src: Path, dst: Path) -> None:
 
 
 # Create data directories
-for p in [APPDATA_PATH, CACHE_PATH, LOG_PATH, WORK_PATH, MODEL_PATH, BIN_PATH]:
+for p in [APPDATA_PATH, CACHE_PATH, LOG_PATH, WORK_PATH, MODEL_PATH, RUNTIME_PATH, BIN_PATH]:
     p.mkdir(parents=True, exist_ok=True)
 
 if not _IS_DEV:

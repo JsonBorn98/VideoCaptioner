@@ -1,12 +1,14 @@
 #!/bin/bash
 # VideoCaptioner Installer & Launcher for macOS/Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/WEIFENG2333/VideoCaptioner/main/scripts/run.sh | bash
+# Usage: run from a source checkout. Set VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS=true
+# to allow this script to install Git, uv, or FFmpeg with the system package manager.
 
 set -e
 
 # Configuration
-REPO_URL="https://github.com/WEIFENG2333/VideoCaptioner.git"
+REPO_URL="${VIDEOCAPTIONER_REPO_URL:-https://github.com/JsonBorn98/VideoCaptioner.git}"
 INSTALL_DIR="${VIDEOCAPTIONER_HOME:-$HOME/VideoCaptioner}"
+PYTHON_VERSION="${VIDEOCAPTIONER_PYTHON_VERSION:-3.12}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -61,6 +63,10 @@ install_git() {
     fi
 
     print_info "Git not found, installing..."
+    if [ "${VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS:-false}" != "true" ]; then
+        print_error "Git is required. Install Git or rerun with VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS=true."
+        exit 1
+    fi
 
     if [[ "$OSTYPE" == "darwin"* ]]; then
         # macOS: xcode-select triggers git installation
@@ -93,6 +99,11 @@ install_uv() {
     fi
 
     print_info "Installing uv package manager..."
+    if [ "${VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS:-false}" != "true" ]; then
+        print_error "uv is required. Install uv or rerun with VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS=true."
+        print_info "Install command: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
 
     if command -v curl &> /dev/null; then
         curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -122,6 +133,11 @@ install_ffmpeg() {
     fi
 
     print_info "Installing FFmpeg (required for video synthesis)..."
+    if [ "${VIDEOCAPTIONER_INSTALL_SYSTEM_DEPS:-false}" != "true" ]; then
+        print_warning "FFmpeg is not installed. The app can start, but video synthesis and media probing will fail."
+        print_info "Install FFmpeg with your package manager, then rerun 'uv run videocaptioner doctor --profile gui'."
+        return 0
+    fi
 
     if [[ "$OSTYPE" == "darwin"* ]]; then
         if ! command -v brew &> /dev/null; then
@@ -180,7 +196,7 @@ setup_repository() {
 # Install dependencies with uv
 install_dependencies() {
     print_info "Installing dependencies with uv..."
-    uv sync
+    uv sync --python "$PYTHON_VERSION"
     print_success "Dependencies installed"
 }
 
@@ -189,7 +205,10 @@ run_app() {
     print_info "Starting VideoCaptioner..."
     echo ""
     cd "$INSTALL_DIR"
-    uv run videocaptioner
+    print_info "Running startup diagnostics..."
+    uv run --python "$PYTHON_VERSION" videocaptioner doctor --profile gui || true
+    echo ""
+    uv run --python "$PYTHON_VERSION" videocaptioner
 }
 
 # Main

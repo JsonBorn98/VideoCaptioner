@@ -11,7 +11,7 @@ export default defineConfig({
 
   // 多语言替代链接配置
   transformHead({ pageData }) {
-    const canonicalUrl = `https://weifeng2333.github.io/VideoCaptioner/${pageData.relativePath}`
+    const canonicalUrl = `https://jsonborn98.github.io/VideoCaptioner/${pageData.relativePath}`
       .replace(/index\.md$/, '')
       .replace(/\.md$/, '')
 
@@ -22,7 +22,7 @@ export default defineConfig({
     // 中英文页面互相引用
     if (!pageData.relativePath.startsWith('en/')) {
       // 中文页面指向英文版本
-      const enPath = `https://weifeng2333.github.io/VideoCaptioner/en/${pageData.relativePath}`
+      const enPath = `https://jsonborn98.github.io/VideoCaptioner/en/${pageData.relativePath}`
         .replace(/index\.md$/, '')
         .replace(/\.md$/, '')
       head.push(
@@ -32,7 +32,7 @@ export default defineConfig({
       )
     } else {
       // 英文页面指向中文版本
-      const zhPath = `https://weifeng2333.github.io/VideoCaptioner/${pageData.relativePath.replace('en/', '')}`
+      const zhPath = `https://jsonborn98.github.io/VideoCaptioner/${pageData.relativePath.replace('en/', '')}`
         .replace(/index\.md$/, '')
         .replace(/\.md$/, '')
       head.push(
@@ -75,8 +75,8 @@ export default defineConfig({
     ['meta', { property: 'og:title', content: 'VideoCaptioner - 基于LLM的智能视频字幕处理工具' }],
     ['meta', { property: 'og:description', content: '免费开源的AI视频字幕处理助手。支持Whisper语音识别、LLM智能断句与翻译、多语言字幕生成。适用于YouTube、B站等平台，支持99种语言。' }],
     ['meta', { property: 'og:site_name', content: 'VideoCaptioner' }],
-    ['meta', { property: 'og:url', content: 'https://weifeng2333.github.io/VideoCaptioner/' }],
-    ['meta', { property: 'og:image', content: 'https://weifeng2333.github.io/VideoCaptioner/logo.png' }],
+    ['meta', { property: 'og:url', content: 'https://jsonborn98.github.io/VideoCaptioner/' }],
+    ['meta', { property: 'og:image', content: 'https://jsonborn98.github.io/VideoCaptioner/logo.png' }],
     ['meta', { property: 'og:image:width', content: '1200' }],
     ['meta', { property: 'og:image:height', content: '630' }],
     ['meta', { property: 'og:image:alt', content: 'VideoCaptioner Logo' }],
@@ -87,7 +87,7 @@ export default defineConfig({
     ['meta', { name: 'twitter:creator', content: '@WEIFENG' }],
     ['meta', { name: 'twitter:title', content: 'VideoCaptioner - AI-Powered Video Subtitle Tool' }],
     ['meta', { name: 'twitter:description', content: 'Free & open-source AI subtitle tool powered by Whisper & LLM. Supports 99 languages with intelligent segmentation and translation.' }],
-    ['meta', { name: 'twitter:image', content: 'https://weifeng2333.github.io/VideoCaptioner/logo.png' }],
+    ['meta', { name: 'twitter:image', content: 'https://jsonborn98.github.io/VideoCaptioner/logo.png' }],
     ['meta', { name: 'twitter:image:alt', content: 'VideoCaptioner - AI Video Subtitle Tool' }],
 
     // 百度站长验证（需要时取消注释）
@@ -102,7 +102,7 @@ export default defineConfig({
       '@graph': [
         {
           '@type': 'SoftwareApplication',
-          '@id': 'https://weifeng2333.github.io/VideoCaptioner/#software',
+          '@id': 'https://jsonborn98.github.io/VideoCaptioner/#software',
           name: 'VideoCaptioner',
           alternateName: ['卡卡字幕助手', 'Video Captioner', 'AI Subtitle Tool'],
           description: '基于大语言模型和Whisper的智能视频字幕处理工具，支持语音识别、智能断句、字幕优化和多语言翻译',
@@ -117,7 +117,7 @@ export default defineConfig({
           author: {
             '@type': 'Person',
             name: 'WEIFENG',
-            url: 'https://github.com/WEIFENG2333'
+            url: 'https://github.com/JsonBorn98'
           },
           aggregateRating: {
             '@type': 'AggregateRating',
@@ -127,9 +127,9 @@ export default defineConfig({
             worstRating: '1'
           },
           screenshot: 'https://h1.appinn.me/file/1731487405884_main.png',
-          url: 'https://weifeng2333.github.io/VideoCaptioner/',
-          downloadUrl: 'https://github.com/WEIFENG2333/VideoCaptioner/releases',
-          image: 'https://weifeng2333.github.io/VideoCaptioner/logo.png',
+          url: 'https://jsonborn98.github.io/VideoCaptioner/',
+          downloadUrl: 'https://github.com/JsonBorn98/VideoCaptioner/releases',
+          image: 'https://jsonborn98.github.io/VideoCaptioner/logo.png',
           keywords: 'video subtitles, AI subtitles, Whisper, LLM, speech recognition, subtitle translation, 视频字幕, 自动字幕',
           inLanguage: ['zh-CN', 'en-US'],
           featureList: [
@@ -143,33 +143,33 @@ export default defineConfig({
         },
         {
           '@type': 'WebSite',
-          '@id': 'https://weifeng2333.github.io/VideoCaptioner/#website',
-          url: 'https://weifeng2333.github.io/VideoCaptioner/',
+          '@id': 'https://jsonborn98.github.io/VideoCaptioner/#website',
+          url: 'https://jsonborn98.github.io/VideoCaptioner/',
           name: 'VideoCaptioner Documentation',
           description: 'VideoCaptioner 官方文档 - 视频字幕处理工具使用指南',
           publisher: {
-            '@id': 'https://weifeng2333.github.io/VideoCaptioner/#organization'
+            '@id': 'https://jsonborn98.github.io/VideoCaptioner/#organization'
           },
           inLanguage: ['zh-CN', 'en-US'],
           potentialAction: {
             '@type': 'SearchAction',
-            target: 'https://weifeng2333.github.io/VideoCaptioner/?q={search_term_string}',
+            target: 'https://jsonborn98.github.io/VideoCaptioner/?q={search_term_string}',
             'query-input': 'required name=search_term_string'
           }
         },
         {
           '@type': 'Organization',
-          '@id': 'https://weifeng2333.github.io/VideoCaptioner/#organization',
+          '@id': 'https://jsonborn98.github.io/VideoCaptioner/#organization',
           name: 'VideoCaptioner',
-          url: 'https://weifeng2333.github.io/VideoCaptioner/',
+          url: 'https://jsonborn98.github.io/VideoCaptioner/',
           logo: {
             '@type': 'ImageObject',
-            url: 'https://weifeng2333.github.io/VideoCaptioner/logo.png',
+            url: 'https://jsonborn98.github.io/VideoCaptioner/logo.png',
             width: 200,
             height: 200
           },
           sameAs: [
-            'https://github.com/WEIFENG2333/VideoCaptioner'
+            'https://github.com/JsonBorn98/VideoCaptioner'
           ]
         }
       ]
@@ -178,14 +178,14 @@ export default defineConfig({
 
   // Sitemap 生成配置
   sitemap: {
-    hostname: 'https://weifeng2333.github.io/VideoCaptioner/',
+    hostname: 'https://jsonborn98.github.io/VideoCaptioner/',
     transformItems(items) {
       // 为不同类型页面设置不同的优先级和更新频率
       return items.map(item => {
         const url = item.url
         // 首页最高优先级 (exact match for homepage)
-        if (url === 'https://weifeng2333.github.io/VideoCaptioner/' ||
-            url === 'https://weifeng2333.github.io/VideoCaptioner/en/') {
+        if (url === 'https://jsonborn98.github.io/VideoCaptioner/' ||
+            url === 'https://jsonborn98.github.io/VideoCaptioner/en/') {
           return { ...item, priority: 1.0, changefreq: 'daily' }
         }
         // 指南页面高优先级
@@ -232,7 +232,7 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/WEIFENG2333/VideoCaptioner' }
+      { icon: 'github', link: 'https://github.com/JsonBorn98/VideoCaptioner' }
     ]
   },
 
@@ -295,7 +295,7 @@ export default defineConfig({
         },
 
         editLink: {
-          pattern: 'https://github.com/WEIFENG2333/VideoCaptioner/edit/master/docs/:path',
+          pattern: 'https://github.com/JsonBorn98/VideoCaptioner/edit/master/docs/:path',
           text: '在 GitHub 上编辑此页'
         },
 
@@ -385,7 +385,7 @@ export default defineConfig({
         },
 
         editLink: {
-          pattern: 'https://github.com/WEIFENG2333/VideoCaptioner/edit/master/docs/:path',
+          pattern: 'https://github.com/JsonBorn98/VideoCaptioner/edit/master/docs/:path',
           text: 'Edit this page on GitHub'
         },
 
@@ -397,3 +397,4 @@ export default defineConfig({
     }
   }
 })
+

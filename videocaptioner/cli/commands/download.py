@@ -17,7 +17,7 @@ def run(args: Namespace, config: dict) -> int:
         import yt_dlp
     except ImportError:
         output.error("yt-dlp is not available")
-        output.hint("Install the official package with: pip install videocaptioner")
+        output.hint("Run 'uv sync --python 3.12' in a source checkout or use the desktop release bundle")
         return EXIT.DEPENDENCY_MISSING
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)

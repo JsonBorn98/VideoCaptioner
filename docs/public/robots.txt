@@ -3,4 +3,5 @@ User-agent: *
 Allow: /
 
 # Sitemaps
-Sitemap: https://weifeng2333.github.io/VideoCaptioner/sitemap.xml
+Sitemap: https://jsonborn98.github.io/VideoCaptioner/sitemap.xml
+

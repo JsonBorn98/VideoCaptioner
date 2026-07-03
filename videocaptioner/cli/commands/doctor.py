@@ -26,7 +26,11 @@ class Check:
 
 
 def run(args: Namespace, config: dict) -> int:
-    checks = _run_checks(config, check_api=bool(getattr(args, "check_api", False)))
+    checks = _run_checks(
+        config,
+        check_api=bool(getattr(args, "check_api", False)),
+        profile=getattr(args, "profile", "all"),
+    )
     if getattr(args, "json", False):
         print(json.dumps({"checks": [asdict(c) for c in checks]}, ensure_ascii=False, indent=2))
     else:
@@ -34,11 +38,21 @@ def run(args: Namespace, config: dict) -> int:
     return EXIT.DEPENDENCY_MISSING if any(c.status == "error" for c in checks) else EXIT.SUCCESS
 
 
-def _run_checks(config: dict, *, check_api: bool = False) -> list[Check]:
+def _run_checks(config: dict, *, check_api: bool = False, profile: str = "all") -> list[Check]:
+    profile = profile or "all"
     checks: list[Check] = []
     checks.append(_check_python())
+
+    if profile == "qwen":
+        checks.extend(_check_qwen_runtime())
+        return checks
+
     checks.append(_check_command("ffmpeg", "Required for audio extraction, timing fit, muxing, and hard subtitles."))
     checks.append(_check_command("ffprobe", "Required for media duration checks."))
+
+    if profile == "gui":
+        return checks
+
     checks.append(_check_ytdlp())
     checks.append(_check_config_file())
     checks.extend(_check_transcribe(config))
@@ -125,6 +139,39 @@ def _check_transcribe(config: dict) -> list[Check]:
         checks.append(Check("whisper_api.api_key", "error", "Whisper API key is missing", "Run 'videocaptioner config set whisper_api.api_key <key>'"))
     if asr == "whisper-cpp" and not any(shutil.which(n) for n in ["whisper-cpp", "whisper", "whisper-cpp-main"]):
         checks.append(Check("whisper-cpp", "error", "whisper.cpp binary not found", "Install whisper.cpp or choose --asr bijian/whisper-api"))
+    return checks
+
+
+def _check_qwen_runtime() -> list[Check]:
+    from videocaptioner.config import MODEL_PATH
+    from videocaptioner.core.asr.qwen_runtime_manager import inspect_qwen_runtime
+
+    status = inspect_qwen_runtime()
+    checks = [
+        Check(
+            "qwen.runtime",
+            "ok" if status.ready else "error",
+            status.message + f": {status.runtime_dir}",
+            "" if status.ready else "Open Qwen component manager in the desktop app and install the runtime",
+        )
+    ]
+    if status.uv_executable:
+        checks.append(Check("qwen.uv", "ok", status.uv_executable))
+    else:
+        checks.append(Check("qwen.uv", "error", "uv not found", "Use a desktop release bundle or install uv"))
+
+    model_dir = MODEL_PATH
+    if model_dir.exists() and any(model_dir.iterdir()):
+        checks.append(Check("qwen.models", "ok", str(model_dir)))
+    else:
+        checks.append(
+            Check(
+                "qwen.models",
+                "warn",
+                f"No Qwen models found under {model_dir}",
+                "Open Qwen component manager and download Qwen ASR / ForcedAligner models",
+            )
+        )
     return checks
 
 

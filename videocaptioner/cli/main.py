@@ -484,6 +484,12 @@ def _build_doctor_parser(subparsers) -> None:
         description="Check local tools, config, and common workflow readiness.",
     )
     _add_common_options(p)
+    p.add_argument(
+        "--profile",
+        choices=["all", "gui", "qwen"],
+        default="all",
+        help="Check a focused runtime profile",
+    )
     p.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p.add_argument("--check-api", action="store_true", help="Also perform lightweight provider API checks")
     p.set_defaults(func=_run_doctor)
@@ -653,7 +659,7 @@ def _run_gui(_args: argparse.Namespace) -> int:
         from videocaptioner.ui.main import main as gui_main
     except ImportError as exc:
         print(f"GUI dependencies are not available: {exc}")
-        print("Install the official package with: pip install videocaptioner")
+        print("Run 'uv sync --python 3.12' in a source checkout or use the desktop release bundle.")
         return EXIT.DEPENDENCY_MISSING
     gui_main()
     return EXIT.SUCCESS
