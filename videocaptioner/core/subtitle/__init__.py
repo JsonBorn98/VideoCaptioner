@@ -11,11 +11,15 @@ from .ass_utils import (
     wrap_ass_text,
 )
 from .font_utils import (
+    SUPPORTED_FONT_EXTENSIONS,
     FontType,
     clear_font_cache,
     get_ass_to_pil_ratio,
     get_builtin_fonts,
     get_font,
+    import_font_files,
+    is_supported_font_file,
+    iter_font_files,
 )
 from .rounded_renderer import render_preview, render_rounded_video
 from .style_manager import (
@@ -63,6 +67,10 @@ __all__ = [
     "get_font",
     "get_ass_to_pil_ratio",
     "get_builtin_fonts",
+    "import_font_files",
+    "is_supported_font_file",
+    "iter_font_files",
+    "SUPPORTED_FONT_EXTENSIONS",
     "clear_font_cache",
     "hex_to_rgba",
     "is_mainly_cjk",

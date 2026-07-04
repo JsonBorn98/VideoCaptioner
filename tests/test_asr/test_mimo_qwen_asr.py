@@ -7,6 +7,7 @@ import pytest
 import videocaptioner.core.asr.mimo_asr as mimo_asr_module
 import videocaptioner.core.asr.qwen_local_asr as qwen_local_module
 import videocaptioner.core.asr.qwen_runtime as qwen_runtime_module
+import videocaptioner.core.asr.qwen_worker as qwen_worker_module
 from videocaptioner.core.asr.mimo_asr import MiMoASR
 from videocaptioner.core.asr.qwen_local_asr import QwenLocalASR
 from videocaptioner.core.asr.qwen_runtime import timestamp_items_to_segments
@@ -40,7 +41,7 @@ def test_mimo_asr_uses_qwen_aligner_for_word_timestamps(monkeypatch):
             client_kwargs.update(kwargs)
             self.chat = SimpleNamespace(completions=completions)
 
-    def fake_align_with_qwen(**kwargs):
+    def fake_run_qwen_alignment_worker(**kwargs):
         align_calls.append(kwargs)
         return [
             {"text": "你", "start_time": 0.1, "end_time": 0.3},
@@ -48,7 +49,11 @@ def test_mimo_asr_uses_qwen_aligner_for_word_timestamps(monkeypatch):
         ]
 
     monkeypatch.setattr(mimo_asr_module, "OpenAI", FakeOpenAI)
-    monkeypatch.setattr(mimo_asr_module, "align_with_qwen", fake_align_with_qwen)
+    monkeypatch.setattr(
+        mimo_asr_module,
+        "run_qwen_alignment_worker",
+        fake_run_qwen_alignment_worker,
+    )
 
     asr = MiMoASR(
         audio_input=b"fake mp3",
@@ -78,15 +83,94 @@ def test_mimo_asr_uses_qwen_aligner_for_word_timestamps(monkeypatch):
     assert segments[1].end_time == 500
 
 
-def test_mimo_asr_requires_real_timestamps_when_requested():
+def test_mimo_asr_cleans_gateway_markup_before_alignment(monkeypatch):
+    completions = FakeCompletions()
+    completions.create = lambda **kwargs: SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="think> <chinese> Hello world. </chinese>"
+                )
+            )
+        ],
+        usage=SimpleNamespace(seconds=2.0),
+    )
+    align_calls = []
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=completions)
+
+    def fake_run_qwen_alignment_worker(**kwargs):
+        align_calls.append(kwargs)
+        return [
+            {"text": "Hello", "start_time": 0.1, "end_time": 0.3},
+            {"text": "world", "start_time": 0.3, "end_time": 0.5},
+        ]
+
+    monkeypatch.setattr(mimo_asr_module, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        mimo_asr_module,
+        "run_qwen_alignment_worker",
+        fake_run_qwen_alignment_worker,
+    )
+
+    asr = MiMoASR(
+        audio_input=b"fake mp3",
+        api_key="sk-test",
+        language="en",
+        aligner_device="cpu",
+        need_word_time_stamp=True,
+    )
+
+    response = asr._run()
+
+    assert response["text"] == "Hello world."
+    assert align_calls[0]["transcript"] == "Hello world."
+    assert asr._get_key().startswith("v3-")
+
+
+def test_mimo_asr_falls_back_to_estimated_segments_without_timestamps():
     asr = MiMoASR(
         audio_input=b"fake mp3",
         api_key="sk-test",
         need_word_time_stamp=True,
     )
 
-    with pytest.raises(RuntimeError, match="ForcedAligner"):
-        asr._make_segments({"text": "plain text", "seconds": 1})
+    segments = asr._make_segments(
+        {
+            "text": "plain text with enough words here. More text with enough words here.",
+            "seconds": 2,
+        }
+    )
+
+    assert segments[0].text.startswith("plain text")
+    assert "More text" in segments[-1].text
+    assert segments[-1].end_time == 2000
+    assert asr._should_cache_response({"text": "plain text"}, segments) is False
+
+
+def test_mimo_asr_falls_back_when_alignment_coverage_is_low():
+    asr = MiMoASR(
+        audio_input=b"fake mp3",
+        api_key="sk-test",
+        need_word_time_stamp=True,
+    )
+    text = " ".join(f"word{i}" for i in range(50))
+    response = {
+        "text": text,
+        "time_stamps": [
+            {"text": "word0", "start_time": 0.0, "end_time": 0.1},
+            {"text": "word1", "start_time": 0.1, "end_time": 0.2},
+        ],
+    }
+
+    segments = asr._make_segments(response)
+
+    assert len(segments) > 2
+    assert "word0" in segments[0].text
+    assert segments[-1].end_time > segments[0].start_time
+    assert asr._should_cache_response(response, segments) is False
 
 
 def test_mimo_asr_treats_empty_text_response_as_silence_chunk():
@@ -185,6 +269,52 @@ def test_qwen_worker_path_removes_pyqt_qt_bin():
     assert r"C:\Windows\System32" in cleaned
 
 
+def test_qwen_worker_supports_alignment_mode(monkeypatch, tmp_path):
+    calls = []
+    request_path = tmp_path / "request.json"
+    output_path = tmp_path / "output.json"
+    audio_path = tmp_path / "audio.mp3"
+    audio_path.write_bytes(b"fake mp3")
+    request_path.write_text(
+        """
+        {
+          "audio_path": "%s",
+          "transcript": "hello world",
+          "language": "en",
+          "aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
+          "model_dir": "C:/models",
+          "device": "cpu",
+          "dtype": "float32",
+          "temp_dir": "%s"
+        }
+        """
+        % (str(audio_path).replace("\\", "\\\\"), str(tmp_path).replace("\\", "\\\\")),
+        encoding="utf-8",
+    )
+
+    def fake_align_with_qwen(**kwargs):
+        calls.append(kwargs)
+        return [{"text": "hello", "start_time": 0.0, "end_time": 0.5}]
+
+    monkeypatch.setattr(qwen_worker_module, "align_with_qwen", fake_align_with_qwen)
+
+    exit_code = qwen_worker_module.main(
+        [
+            "--mode",
+            "align",
+            "--request",
+            str(request_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls[0]["transcript"] == "hello world"
+    assert calls[0]["device"] == "cpu"
+    assert '"time_stamps"' in output_path.read_text(encoding="utf-8")
+
+
 def test_qwen_cuda_device_fails_fast_with_cpu_torch(monkeypatch):
     fake_torch = SimpleNamespace(
         __version__="2.12.1+cpu",
@@ -255,6 +385,12 @@ def test_transcribe_factories_preserve_requested_word_timestamp_flag(tmp_path):
     assert mimo_chunked.asr_kwargs["need_word_time_stamp"] is True
     assert mimo_chunked.asr_kwargs["aligner_model_dir"] == "C:/models"
     assert mimo_chunked.chunk_overlap_ms == 12_000
+    assert mimo_chunked.chunk_length_ms == 180_000
+
+    config.need_word_time_stamp = False
+    mimo_text_only_chunked = _create_mimo_asr(str(audio_path), config)
+    assert mimo_text_only_chunked.chunk_length_ms == 300_000
+    config.need_word_time_stamp = True
 
     config.transcribe_model = TranscribeModelEnum.QWEN_LOCAL_ASR
     config.qwen_asr_model = "Qwen/Qwen3-ASR-1.7B"

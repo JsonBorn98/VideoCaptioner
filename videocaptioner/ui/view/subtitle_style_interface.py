@@ -20,10 +20,17 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
-from videocaptioner.config import ASSETS_PATH, SUBTITLE_STYLE_PATH
+from videocaptioner.config import ASSETS_PATH, FONTS_PATH, SUBTITLE_STYLE_PATH
 from videocaptioner.core.constant import INFOBAR_DURATION_SUCCESS, INFOBAR_DURATION_WARNING
 from videocaptioner.core.entities import SubtitleLayoutEnum, SubtitleRenderModeEnum
-from videocaptioner.core.subtitle import get_builtin_fonts, render_ass_preview, render_preview
+from videocaptioner.core.subtitle import (
+    SUPPORTED_FONT_EXTENSIONS,
+    clear_font_cache,
+    get_builtin_fonts,
+    import_font_files,
+    render_ass_preview,
+    render_preview,
+)
 from videocaptioner.core.subtitle.style_manager import StyleMode
 from videocaptioner.core.subtitle.styles import RoundedBgStyle
 from videocaptioner.core.utils.platform_utils import open_folder
@@ -174,6 +181,7 @@ class SubtitleStyleInterface(QWidget):
 
         # 创建设置组 - 通用
         self.layoutGroup = SettingCardGroup(self.tr("字幕排布"), self.settingsWidget)
+        self.fontManageGroup = SettingCardGroup(self.tr("字体管理"), self.settingsWidget)
 
         # ASS 样式设置组
         self.assPrimaryGroup = SettingCardGroup(
@@ -257,6 +265,28 @@ class SubtitleStyleInterface(QWidget):
             self.tr("字幕排布"),
             self.tr("设置主字幕和副字幕的显示方式"),
             texts=["译文在上", "原文在上", "仅译文", "仅原文"],
+        )
+
+        # 字体管理
+        self.importFontButton = PushSettingCard(
+            self.tr("导入字体"),
+            FIF.ADD,
+            self.tr("导入自定义字体"),
+            self.tr("支持多选 .ttf/.otf/.ttc/.otc"),
+        )
+
+        self.refreshFontButton = PushSettingCard(
+            self.tr("刷新"),
+            FIF.SYNC,
+            self.tr("刷新字体列表"),
+            self.tr("重新扫描自定义字体和系统字体"),
+        )
+
+        self.openFontFolderButton = PushSettingCard(
+            self.tr("打开文件夹"),
+            FIF.FOLDER,
+            self.tr("打开字体文件夹"),
+            self.tr("在文件管理器中查看已导入字体"),
         )
 
         # ASS 模式 - 垂直间距
@@ -473,6 +503,11 @@ class SubtitleStyleInterface(QWidget):
         self.layoutGroup.addSettingCard(self.layoutCard)
         self.layoutGroup.addSettingCard(self.assVerticalSpacingCard)
 
+        # 字体管理
+        self.fontManageGroup.addSettingCard(self.importFontButton)
+        self.fontManageGroup.addSettingCard(self.refreshFontButton)
+        self.fontManageGroup.addSettingCard(self.openFontFolderButton)
+
         # ASS 样式卡片
         self.assPrimaryGroup.addSettingCard(self.assPrimaryFontCard)
         self.assPrimaryGroup.addSettingCard(self.assPrimarySizeCard)
@@ -507,6 +542,7 @@ class SubtitleStyleInterface(QWidget):
 
         # 添加组到布局
         self.settingsLayout.addWidget(self.layoutGroup)
+        self.settingsLayout.addWidget(self.fontManageGroup)
         self.settingsLayout.addWidget(self.assPrimaryGroup)
         self.settingsLayout.addWidget(self.assSecondaryGroup)
         self.settingsLayout.addWidget(self.roundedBgGroup)
@@ -545,41 +581,7 @@ class SubtitleStyleInterface(QWidget):
         # 设置字幕样式
         self.styleNameComboBox.comboBox.setCurrentText(cfg.get(cfg.subtitle_style_name))
 
-        # 获取字体列表（内置字体 + 系统字体）
-        builtin_fonts = get_builtin_fonts()
-        builtin_font_names = [f["name"] for f in builtin_fonts]
-
-        fontDatabase = QFontDatabase()
-        fontFamilies = fontDatabase.families()
-
-        # 过滤系统字体：
-        # 1. 排除私有字体（以 . 开头）
-        # 2. 排除已有的内置字体
-        # 3. 只保留 PIL 能实际加载的字体（用于圆角背景渲染）
-        system_fonts = []
-        for font_name in fontFamilies:
-            if font_name.startswith(".") or font_name in builtin_font_names:
-                continue
-            # 测试 PIL 是否能加载此字体
-            try:
-                ImageFont.truetype(font_name, 12)  # 测试用小尺寸
-                system_fonts.append(font_name)
-            except (OSError, IOError):
-                # PIL 无法加载，跳过此字体
-                pass
-
-        # 合并字体列表：内置字体在最前面
-        all_fonts = builtin_font_names + sorted(system_fonts)
-
-        # ASS 模式字体
-        self.assPrimaryFontCard.addItems(all_fonts)
-        self.assSecondaryFontCard.addItems(all_fonts)
-        self.assPrimaryFontCard.comboBox.setMaxVisibleItems(12)
-        self.assSecondaryFontCard.comboBox.setMaxVisibleItems(12)
-
-        # 圆角背景模式字体
-        self.roundedFontCard.addItems(all_fonts)
-        self.roundedFontCard.comboBox.setMaxVisibleItems(12)
+        self._refreshFontLists(preserve_current=False)
 
         # 设置圆角背景模式的初始值
         self.roundedFontSizeCard.spinBox.setValue(cfg.get(cfg.rounded_bg_font_size))
@@ -609,6 +611,50 @@ class SubtitleStyleInterface(QWidget):
 
         # 根据当前渲染模式显示/隐藏设置组
         self._updateVisibleGroups()
+
+    def _availableFontNames(self) -> list[str]:
+        """获取可用于 ASS 和圆角背景渲染的字体名。"""
+        builtin_fonts = get_builtin_fonts()
+        builtin_font_names = [f["name"] for f in builtin_fonts]
+        builtin_name_set = set(builtin_font_names)
+
+        fontDatabase = QFontDatabase()
+        fontFamilies = fontDatabase.families()
+
+        # 过滤系统字体：
+        # 1. 排除私有字体（以 . 开头）
+        # 2. 排除已有的内置/自定义字体
+        # 3. 只保留 PIL 能实际加载的字体（用于圆角背景渲染）
+        system_fonts = []
+        for font_name in fontFamilies:
+            if font_name.startswith(".") or font_name in builtin_name_set:
+                continue
+            try:
+                ImageFont.truetype(font_name, 12)
+                system_fonts.append(font_name)
+            except (OSError, IOError):
+                pass
+
+        return builtin_font_names + sorted(system_fonts)
+
+    def _refreshFontLists(self, preserve_current: bool = True) -> None:
+        """刷新所有字体下拉框。"""
+        all_fonts = self._availableFontNames()
+        cards = [
+            self.assPrimaryFontCard,
+            self.assSecondaryFontCard,
+            self.roundedFontCard,
+        ]
+
+        for card in cards:
+            current_text = card.comboBox.currentText() if preserve_current else ""
+            card.comboBox.blockSignals(True)
+            card.clear()
+            card.addItems(all_fonts)
+            card.comboBox.setMaxVisibleItems(12)
+            if preserve_current and current_text in all_fonts:
+                card.setCurrentText(current_text)
+            card.comboBox.blockSignals(False)
 
     def connectSignals(self):
         """连接所有设置变更的信号到预览更新函数"""
@@ -683,6 +729,11 @@ class SubtitleStyleInterface(QWidget):
         self.orientationCard.currentTextChanged.connect(self.onOrientationChanged)
         self.previewImageCard.clicked.connect(self.selectPreviewImage)
 
+        # 字体管理
+        self.importFontButton.clicked.connect(self.importCustomFonts)
+        self.refreshFontButton.clicked.connect(self.on_refresh_fonts_clicked)
+        self.openFontFolderButton.clicked.connect(self.on_open_font_folder_clicked)
+
         # 连接样式切换信号
         self.styleNameComboBox.currentTextChanged.connect(self.loadStyle)
         self.newStyleButton.clicked.connect(self.createNewStyle)
@@ -700,6 +751,69 @@ class SubtitleStyleInterface(QWidget):
     def on_open_style_folder_clicked(self):
         """打开样式文件夹"""
         open_folder(str(SUBTITLE_STYLE_PATH))
+
+    def on_open_font_folder_clicked(self):
+        """打开字体文件夹。"""
+        FONTS_PATH.mkdir(parents=True, exist_ok=True)
+        open_folder(str(FONTS_PATH))
+
+    def on_refresh_fonts_clicked(self):
+        """刷新字体列表。"""
+        clear_font_cache()
+        self._refreshFontLists(preserve_current=True)
+        self.updatePreview()
+
+        InfoBar.success(
+            title=self.tr("成功"),
+            content=self.tr("已刷新字体列表"),
+            orient=Qt.Horizontal,  # type: ignore
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=INFOBAR_DURATION_SUCCESS,
+            parent=self,
+        )
+
+    def importCustomFonts(self):
+        """导入一个或多个自定义字体文件。"""
+        extensions = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_FONT_EXTENSIONS))
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            self.tr("选择字体文件"),
+            "",
+            self.tr("字体文件") + f" ({extensions})",
+        )
+        if not file_paths:
+            return
+
+        imported_fonts = import_font_files(file_paths)
+        self._refreshFontLists(preserve_current=True)
+
+        imported_names = sorted({font["name"] for font in imported_fonts})
+        if imported_names:
+            preview_names = "、".join(imported_names[:3])
+            if len(imported_names) > 3:
+                preview_names += self.tr(" 等")
+            InfoBar.success(
+                title=self.tr("成功"),
+                content=self.tr("已导入字体：") + preview_names,
+                orient=Qt.Horizontal,  # type: ignore
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+            self.updatePreview()
+            return
+
+        InfoBar.warning(
+            title=self.tr("警告"),
+            content=self.tr("没有导入可用字体，请选择 .ttf/.otf/.ttc/.otc 文件"),
+            orient=Qt.Horizontal,  # type: ignore
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=INFOBAR_DURATION_WARNING,
+            parent=self,
+        )
 
     def on_subtitle_layout_changed(self, layout: str):
         layout_enum = SubtitleLayoutEnum(layout)

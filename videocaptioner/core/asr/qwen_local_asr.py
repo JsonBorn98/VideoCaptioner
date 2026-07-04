@@ -183,6 +183,170 @@ def run_qwen_worker(
     return result
 
 
+def run_qwen_alignment_worker(
+    *,
+    audio_input: Union[str, bytes],
+    transcript: str,
+    language: str,
+    aligner_model: str,
+    model_dir: str = "",
+    device: str = "auto",
+    dtype: str = "auto",
+    temp_dir: str = "",
+    callback: Optional[Callable[[int, str], None]] = None,
+) -> list[dict[str, float | str]]:
+    """Run Qwen3-ForcedAligner in a child process.
+
+    MiMo ASR only returns transcript text. Keeping the aligner in the worker
+    avoids importing torch/CUDA DLLs in the PyQt process.
+    """
+    temp_root = Path(temp_dir).expanduser() if temp_dir else Path(tempfile.mkdtemp())
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    cleanup_temp_root = not temp_dir
+    audio_path: Path | None = None
+    if isinstance(audio_input, bytes):
+        audio_path = temp_root / "qwen-align-worker-input.mp3"
+        audio_path.write_bytes(audio_input)
+        worker_audio_path = str(audio_path)
+    else:
+        worker_audio_path = audio_input
+
+    request_path = temp_root / "qwen-align-worker-request.json"
+    output_path = temp_root / "qwen-align-worker-output.json"
+    stdout_path = temp_root / "qwen-align-worker-stdout.log"
+    stderr_path = temp_root / "qwen-align-worker-stderr.log"
+
+    request = {
+        "audio_path": worker_audio_path,
+        "transcript": transcript,
+        "language": language,
+        "aligner_model": aligner_model,
+        "model_dir": model_dir,
+        "device": device,
+        "dtype": dtype,
+        "temp_dir": str(temp_root),
+    }
+    request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+    output_path.unlink(missing_ok=True)
+
+    project_root = Path(__file__).resolve().parents[3]
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PATH"] = _without_qt_dll_paths(env.get("PATH", ""))
+    env["PYTHONPATH"] = (
+        str(project_root)
+        + os.pathsep
+        + env["PYTHONPATH"]
+        if env.get("PYTHONPATH")
+        else str(project_root)
+    )
+
+    creationflags = 0
+    start_new_session = False
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        start_new_session = True
+
+    command = [
+        sys.executable,
+        "-m",
+        "videocaptioner.core.asr.qwen_worker",
+        "--mode",
+        "align",
+        "--request",
+        str(request_path),
+        "--output",
+        str(output_path),
+    ]
+
+    worker_started = time.perf_counter()
+    logger.info(
+        "Qwen align worker 启动: command=%s, request=%s, output=%s, stdout=%s, stderr=%s",
+        " ".join(command),
+        request_path,
+        output_path,
+        stdout_path,
+        stderr_path,
+    )
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+        "w",
+        encoding="utf-8",
+    ) as stderr:
+        process = subprocess.Popen(
+            command,
+            cwd=str(project_root),
+            env=env,
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            creationflags=creationflags,
+            start_new_session=start_new_session,
+        )
+
+        last_heartbeat = 0.0
+        try:
+            while process.poll() is None:
+                now = time.monotonic()
+                if callback and now - last_heartbeat >= 2:
+                    last_heartbeat = now
+                    callback(90, "Qwen align worker is running")
+                time.sleep(0.25)
+        except BaseException:
+            _terminate_worker(process)
+            raise
+
+        return_code = process.wait()
+
+    worker_elapsed = time.perf_counter() - worker_started
+    logger.info(
+        "Qwen align worker 退出: return_code=%s, elapsed=%.2fs, output_exists=%s",
+        return_code,
+        worker_elapsed,
+        output_path.exists(),
+    )
+    _log_worker_streams(stdout_path, stderr_path, return_code)
+
+    try:
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        payload = {}
+        if return_code == 0:
+            raise QwenWorkerError("Qwen align worker finished without a valid result file.") from exc
+
+    if return_code != 0 or "error" in payload:
+        error = payload.get("error") or f"Qwen align worker exited with code {return_code}"
+        detail = payload.get("traceback") or _read_tail(stderr_path) or _read_tail(stdout_path)
+        if detail:
+            logger.info("Qwen align worker failure detail:\n%s", detail)
+        logger.error(
+            "Qwen align worker 失败: return_code=%s, elapsed=%.2fs, error=%s",
+            return_code,
+            worker_elapsed,
+            error,
+            extra={"suppress_console": True},
+        )
+        raise QwenWorkerError(str(error).strip())
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise QwenWorkerError("Qwen align worker returned an invalid result.")
+
+    time_stamps = result.get("time_stamps")
+    if not isinstance(time_stamps, list):
+        raise QwenWorkerError("Qwen align worker returned invalid timestamps.")
+
+    if audio_path:
+        audio_path.unlink(missing_ok=True)
+    if cleanup_temp_root:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    logger.info("Qwen align worker 完成: elapsed=%.2fs", worker_elapsed)
+    return time_stamps
+
+
 def _terminate_worker(process: subprocess.Popen) -> None:
     if process.poll() is not None:
         return

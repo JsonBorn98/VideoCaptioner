@@ -14,6 +14,9 @@ from videocaptioner.core.utils.logger import setup_logger
 
 logger = setup_logger("transcribe")
 
+MIMO_TEXT_ONLY_CHUNK_SECONDS = 60 * 5
+QWEN_FORCE_ALIGN_CHUNK_SECONDS = 60 * 3
+
 
 def transcribe(audio_path: str, config: TranscribeConfig, callback=None) -> ASRData:
     """Transcribe audio file using specified configuration.
@@ -180,10 +183,16 @@ def _create_mimo_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
     """Create MiMo ASR API instance with chunking support.
 
     MiMo API accepts base64 mp3/wav payloads up to 10 MB and does not return
-    native timestamps. Five-minute chunks keep payloads small and match the
-    Qwen3-ForcedAligner alignment window.
+    native timestamps. When word timestamps are requested, the local
+    Qwen3-ForcedAligner limits effective inputs to about three minutes, so the
+    outer MiMo chunks must also stay within that window.
     """
     chunk_overlap = _qwen_chunk_overlap(config)
+    chunk_length = (
+        QWEN_FORCE_ALIGN_CHUNK_SECONDS
+        if config.need_word_time_stamp
+        else MIMO_TEXT_ONLY_CHUNK_SECONDS
+    )
     asr_kwargs = {
         "use_cache": True,
         "need_word_time_stamp": config.need_word_time_stamp,
@@ -202,7 +211,7 @@ def _create_mimo_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
         asr_class=MiMoASR,
         audio_path=audio_path,
         asr_kwargs=asr_kwargs,
-        chunk_length=60 * 5,
+        chunk_length=chunk_length,
         chunk_overlap=chunk_overlap,
         chunk_concurrency=1,
     )

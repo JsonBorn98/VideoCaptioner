@@ -51,19 +51,20 @@ else:
 
 ASSETS_PATH = RESOURCE_PATH / "assets"
 TRANSLATIONS_PATH = RESOURCE_PATH / "translations"
+BUNDLED_FONTS_PATH = RESOURCE_PATH / "fonts"
+USER_FONTS_PATH = APPDATA_PATH / "resource" / "fonts"
 
 # Writable user data. Keep generated/downloaded files out of frozen bundles and
 # package directories so app upgrades are just replacing the program files.
 if _IS_DEV:
     BIN_PATH = RESOURCE_PATH / "bin"
     SUBTITLE_STYLE_PATH = RESOURCE_PATH / "subtitle_style"
-    FONTS_PATH = RESOURCE_PATH / "fonts"
 else:
     BIN_PATH = APPDATA_PATH / "bin"
     SUBTITLE_STYLE_PATH = APPDATA_PATH / "resource" / "subtitle_style"
-    FONTS_PATH = APPDATA_PATH / "resource" / "fonts"
 
 BUNDLED_BIN_PATH = RESOURCE_PATH / "bin"
+FONTS_PATH = USER_FONTS_PATH
 
 LOG_PATH = APPDATA_PATH / "logs"
 LLM_LOG_FILE = LOG_PATH / "llm_requests.jsonl"
@@ -82,6 +83,8 @@ def _copy_missing_tree(src: Path, dst: Path) -> None:
     """Copy bundled default files into the writable user directory."""
     if not src.exists():
         return
+    if src.resolve() == dst.resolve():
+        return
     dst.mkdir(parents=True, exist_ok=True)
     for item in src.iterdir():
         target = dst / item.name
@@ -92,12 +95,21 @@ def _copy_missing_tree(src: Path, dst: Path) -> None:
 
 
 # Create data directories
-for p in [APPDATA_PATH, CACHE_PATH, LOG_PATH, WORK_PATH, MODEL_PATH, RUNTIME_PATH, BIN_PATH]:
+for p in [
+    APPDATA_PATH,
+    CACHE_PATH,
+    LOG_PATH,
+    WORK_PATH,
+    MODEL_PATH,
+    RUNTIME_PATH,
+    BIN_PATH,
+    FONTS_PATH,
+]:
     p.mkdir(parents=True, exist_ok=True)
 
 if not _IS_DEV:
     _copy_missing_tree(RESOURCE_PATH / "subtitle_style", SUBTITLE_STYLE_PATH)
-    _copy_missing_tree(RESOURCE_PATH / "fonts", FONTS_PATH)
+_copy_missing_tree(BUNDLED_FONTS_PATH, FONTS_PATH)
 
 # Add bin paths to PATH. User-downloaded binaries take precedence over bundled
 # tools, while packaged ffmpeg/ffprobe still work out of the box.

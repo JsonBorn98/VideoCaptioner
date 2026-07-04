@@ -11,13 +11,16 @@ from videocaptioner.core.utils.text_utils import count_words, is_mainly_cjk
 from ..utils.logger import setup_logger
 from .asr_data import ASRDataSeg
 from .base import BaseASR
-from .qwen_runtime import align_with_qwen, timestamp_items_to_segments
+from .qwen_local_asr import run_qwen_alignment_worker
+from .qwen_runtime import timestamp_items_to_segments
 
 logger = setup_logger("mimo_asr")
 
 MAX_BASE64_AUDIO_SIZE = 10 * 1024 * 1024
 MAX_WORD_COUNT_CJK = 25
 MAX_WORD_COUNT_ENGLISH = 14
+MIN_ALIGNMENT_COVERAGE = 0.7
+MIN_ALIGNMENT_UNITS_FOR_COVERAGE = 20
 SUPPORTED_AUDIO_FORMATS = {"mp3", "wav"}
 MIME_TYPES = {
     "mp3": "audio/mpeg",
@@ -86,6 +89,25 @@ def _normalize_transcript_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text.strip())
     # Some ASR gateways return paragraph boundaries without spaces, e.g. "text.Next".
     return re.sub(r"([.!?。！？])(?=(?:[\"'“”‘’(\[]?[A-Z]))", r"\1 ", text)
+
+
+def _clean_mimo_transcript_text(text: str) -> str:
+    """Remove markup tokens sometimes returned by MiMo-compatible gateways."""
+    text = str(text or "")
+    text = re.sub(
+        r"(?i)<\s*/?\s*(?:chinese|english|transcript|text|think|thinking)\s*>",
+        " ",
+        text,
+    )
+    text = re.sub(r"(?i)\b(?:think|thinking)\s*>\s*", " ", text)
+    return _normalize_transcript_text(text)
+
+
+def _alignment_coverage(text: str, segments: list[ASRDataSeg]) -> tuple[int, int, float]:
+    expected_units = count_words(_clean_mimo_transcript_text(text))
+    aligned_units = sum(max(count_words(seg.text), 1) for seg in segments)
+    coverage = aligned_units / expected_units if expected_units else 1.0
+    return expected_units, aligned_units, coverage
 
 
 def _split_long_piece(text: str, max_word_count: int) -> list[str]:
@@ -183,6 +205,16 @@ def _make_timed_segments(text_segments: list[str], total_ms: int) -> list[ASRDat
     return segments
 
 
+def _make_estimated_segments(text: str, total_ms: int) -> list[ASRDataSeg]:
+    text_segments = _split_transcript_text(text)
+    if len(text_segments) > 1:
+        logger.info(
+            "MiMo ASR response is using estimated timestamps; split transcript into %s cues",
+            len(text_segments),
+        )
+    return _make_timed_segments(text_segments, total_ms)
+
+
 class MiMoASR(BaseASR):
     """Xiaomi MiMo ASR API backend.
 
@@ -233,21 +265,12 @@ class MiMoASR(BaseASR):
         )
 
     def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
-        aligned_segments = timestamp_items_to_segments(resp_data.get("time_stamps"))
-        if aligned_segments:
-            return aligned_segments
-
-        text = str(resp_data.get("text", "")).strip()
+        text = _clean_mimo_transcript_text(str(resp_data.get("text", "")))
         if not text:
             logger.warning(
                 "MiMo ASR response returned empty text; treating this chunk as silence"
             )
             return []
-
-        if self.need_word_time_stamp:
-            raise RuntimeError(
-                "MiMo ASR returned text but Qwen3-ForcedAligner did not return timestamps."
-            )
 
         seconds = resp_data.get("seconds")
         if isinstance(seconds, (int, float)) and seconds > 0:
@@ -255,13 +278,34 @@ class MiMoASR(BaseASR):
         else:
             end_time = max(int(self.audio_duration * 1000), 1)
 
-        text_segments = _split_transcript_text(text)
-        if len(text_segments) > 1:
-            logger.info(
-                "MiMo ASR response has no timestamps; split transcript into %s cues",
-                len(text_segments),
+        aligned_segments = timestamp_items_to_segments(resp_data.get("time_stamps"))
+        if aligned_segments:
+            if self.need_word_time_stamp:
+                expected_units, aligned_units, coverage = _alignment_coverage(
+                    text,
+                    aligned_segments,
+                )
+                if (
+                    expected_units >= MIN_ALIGNMENT_UNITS_FOR_COVERAGE
+                    and coverage < MIN_ALIGNMENT_COVERAGE
+                ):
+                    logger.warning(
+                        "MiMo ASR/Qwen alignment coverage is too low "
+                        "(%s/%s, %.1f%%); falling back to estimated cue timings",
+                        aligned_units,
+                        expected_units,
+                        coverage * 100,
+                    )
+                    return _make_estimated_segments(text, end_time)
+            return aligned_segments
+
+        if self.need_word_time_stamp:
+            logger.warning(
+                "MiMo ASR returned text but Qwen3-ForcedAligner did not return "
+                "timestamps; falling back to estimated cue timings"
             )
-        return _make_timed_segments(text_segments, end_time)
+
+        return _make_estimated_segments(text, end_time)
 
     def _run(
         self, callback: Optional[Callable[[int, str], None]] = None, **kwargs: Any
@@ -306,14 +350,14 @@ class MiMoASR(BaseASR):
         )
 
         result = {
-            "text": _extract_chat_text(response),
+            "text": _clean_mimo_transcript_text(_extract_chat_text(response)),
             "seconds": _extract_usage_seconds(response),
         }
 
         if self.need_word_time_stamp and result["text"]:
             if callback:
                 callback(90, "Aligning MiMo transcript with Qwen3-ForcedAligner")
-            result["time_stamps"] = align_with_qwen(
+            result["time_stamps"] = run_qwen_alignment_worker(
                 audio_input=self.audio_input or self.file_binary or b"",
                 transcript=str(result["text"]),
                 language=self.language,
@@ -322,6 +366,7 @@ class MiMoASR(BaseASR):
                 device=self.aligner_device,
                 dtype=self.aligner_dtype,
                 temp_dir=self.aligner_temp_dir,
+                callback=callback,
             )
 
         return result
@@ -329,11 +374,33 @@ class MiMoASR(BaseASR):
     def _should_cache_response(self, resp_data: dict, segments: list[ASRDataSeg]) -> bool:
         if not str(resp_data.get("text", "")).strip() and not segments:
             return False
+        if self.need_word_time_stamp and not resp_data.get("time_stamps"):
+            return False
+        if self.need_word_time_stamp and resp_data.get("time_stamps") and not segments:
+            return False
+        if self.need_word_time_stamp and resp_data.get("time_stamps") and segments:
+            aligned_segments = timestamp_items_to_segments(resp_data.get("time_stamps"))
+            expected_units, aligned_units, coverage = _alignment_coverage(
+                str(resp_data.get("text", "")),
+                aligned_segments,
+            )
+            if (
+                expected_units >= MIN_ALIGNMENT_UNITS_FOR_COVERAGE
+                and coverage < MIN_ALIGNMENT_COVERAGE
+            ):
+                logger.warning(
+                    "Skip MiMo ASR cache because alignment coverage is too low: "
+                    "%s/%s (%.1f%%)",
+                    aligned_units,
+                    expected_units,
+                    coverage * 100,
+                )
+                return False
         return True
 
     def _get_key(self) -> str:
         return (
-            f"v2-{self.crc32_hex}-{self.base_url}-{self.model}-{self.language}-"
+            f"v3-{self.crc32_hex}-{self.base_url}-{self.model}-{self.language}-"
             f"{self.aligner_model}-{self.aligner_device}-{self.aligner_dtype}-"
             f"{self.need_word_time_stamp}"
         )

@@ -84,7 +84,7 @@ class MimoASRSettingWidget(QWidget):
             cfg.qwen_chunk_overlap_seconds,
             FIF.ALIGNMENT,  # type: ignore
             self.tr("分块重叠秒数"),
-            self.tr("相邻 5 分钟音频块的重叠时长，减少切分点漏词"),
+            self.tr("相邻音频块的重叠时长，减少切分点漏词"),
             0,
             60,
             self.setting_group,
