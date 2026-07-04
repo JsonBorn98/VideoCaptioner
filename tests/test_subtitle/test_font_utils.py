@@ -62,3 +62,103 @@ def test_import_font_files_skips_unsupported_files(tmp_path):
     unsupported.write_text("hello", encoding="utf-8")
 
     assert font_utils.import_font_files([unsupported], font_dir=tmp_path / "fonts") == []
+
+
+def test_is_font_loadable_matches_imported_family_name(monkeypatch, tmp_path):
+    monkeypatch.setattr(font_utils, "FONTS_PATH", tmp_path)
+    monkeypatch.setattr(font_utils, "iter_system_font_files", lambda: ())
+    monkeypatch.setattr(font_utils, "_get_windows_registry_font_files", lambda _: ())
+    monkeypatch.setattr(font_utils, "_system_font_dirs", lambda: ())
+    font_utils.clear_font_cache()
+    font_utils.import_font_files([_resource_font("LXGWWenKai-Regular.ttf")])
+
+    assert font_utils.is_font_loadable("LXGW WenKai")
+    assert not font_utils.is_font_loadable("LXGW WenKai Screen")
+
+
+def test_system_font_files_are_loadable_by_family_name(monkeypatch, tmp_path):
+    monkeypatch.setattr(font_utils, "FONTS_PATH", tmp_path)
+    monkeypatch.setattr(
+        font_utils,
+        "iter_system_font_files",
+        lambda: (_resource_font("LXGWWenKai-Regular.ttf"),),
+    )
+    font_utils.clear_font_cache()
+
+    system_font_names = {font["name"] for font in font_utils.get_system_fonts()}
+
+    assert "LXGW WenKai" in system_font_names
+    assert font_utils.is_font_loadable("LXGW WenKai")
+    assert font_utils.get_font(12, "LXGW WenKai").getbbox("test")
+
+
+def test_loadability_uses_targeted_system_font_lookup(monkeypatch, tmp_path):
+    monkeypatch.setattr(font_utils, "FONTS_PATH", tmp_path)
+    monkeypatch.setattr(
+        font_utils,
+        "_get_windows_registry_font_files",
+        lambda _font_name: (),
+    )
+    monkeypatch.setattr(
+        font_utils,
+        "_system_font_dirs",
+        lambda: (_resource_font("LXGWWenKai-Regular.ttf").parent,),
+    )
+    font_utils.clear_font_cache()
+    monkeypatch.setattr(
+        font_utils,
+        "get_system_fonts",
+        lambda: pytest.fail("get_system_fonts should not run for one font lookup"),
+    )
+
+    assert font_utils.is_font_loadable("LXGW WenKai")
+    assert font_utils.get_font(12, "LXGW WenKai").getbbox("test")
+
+
+def test_localized_system_font_alias_loads_without_warning(monkeypatch, tmp_path):
+    monkeypatch.setattr(font_utils, "FONTS_PATH", tmp_path)
+    monkeypatch.setattr(
+        font_utils,
+        "_get_windows_registry_font_files",
+        lambda _font_name: (),
+    )
+    monkeypatch.setattr(
+        font_utils,
+        "_get_windows_registry_font_file_paths",
+        lambda: (_resource_font("LXGWWenKai-Regular.ttf"),),
+    )
+    monkeypatch.setattr(font_utils, "_system_font_dirs", lambda: ())
+    font_utils.clear_font_cache()
+    monkeypatch.setattr(
+        font_utils,
+        "get_system_fonts",
+        lambda: pytest.fail("get_system_fonts should not run for one font lookup"),
+    )
+    warnings = []
+    monkeypatch.setattr(
+        font_utils.logger,
+        "warning",
+        lambda message: warnings.append(message),
+    )
+
+    assert font_utils.is_font_loadable("霞鹜文楷")
+    assert font_utils.get_font(12, "霞鹜文楷").getbbox("test")
+    assert warnings == []
+
+
+def test_get_font_falls_back_to_builtin_file_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(font_utils, "FONTS_PATH", tmp_path)
+    monkeypatch.setattr(font_utils, "iter_system_font_files", lambda: ())
+    font_utils.import_font_files([_resource_font("LXGWWenKai-Regular.ttf")])
+    warnings = []
+
+    monkeypatch.setattr(
+        font_utils.logger,
+        "warning",
+        lambda message: warnings.append(message),
+    )
+
+    font_utils.get_font(12, "Missing Font")
+    font_utils.get_font(13, "Missing Font")
+
+    assert warnings == ["Cannot load font 'Missing Font', using fallback"]

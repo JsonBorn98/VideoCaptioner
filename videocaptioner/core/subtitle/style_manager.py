@@ -13,6 +13,14 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+ReferenceDimension = int | float | str | None
+DEFAULT_REFERENCE_WIDTH = 1280
+DEFAULT_REFERENCE_HEIGHT = 720
+REFERENCE_WIDTH_MIN = 320
+REFERENCE_WIDTH_MAX = 7680
+REFERENCE_HEIGHT_MIN = 180
+REFERENCE_HEIGHT_MAX = 4320
+
 
 class StyleMode(Enum):
     ASS = "ass"
@@ -47,6 +55,8 @@ class SubtitleStyle:
     # -- Common --
     font_name: str = "Noto Sans SC"
     font_size: int = 42
+    reference_width: int = DEFAULT_REFERENCE_WIDTH
+    reference_height: int = DEFAULT_REFERENCE_HEIGHT
 
     # -- ASS mode fields --
     primary_color: str = "#65ff5a"
@@ -110,6 +120,8 @@ class SubtitleStyle:
         return {
             "font_name": self.font_name,
             "font_size": self.font_size,
+            "reference_width": self.reference_width,
+            "reference_height": self.reference_height,
             "text_color": self.text_color,
             "bg_color": self.bg_color,
             "corner_radius": self.corner_radius,
@@ -122,7 +134,13 @@ class SubtitleStyle:
 
     def to_json_dict(self) -> dict:
         """Serialize to a JSON-friendly dict (for saving)."""
-        d: dict = {"name": self.name, "description": self.description, "mode": self.mode.value}
+        d: dict = {
+            "name": self.name,
+            "description": self.description,
+            "mode": self.mode.value,
+            "reference_width": self.reference_width,
+            "reference_height": self.reference_height,
+        }
         if self.mode == StyleMode.ROUNDED:
             d.update(self.to_rounded_dict())
         else:
@@ -155,6 +173,10 @@ class SubtitleStyle:
             mode = StyleMode.ASS
         sec_data = data.get("secondary")
         secondary = SecondaryStyle(**sec_data) if isinstance(sec_data, dict) else None
+        reference_width, reference_height = clamp_reference_resolution(
+            data.get("reference_width", DEFAULT_REFERENCE_WIDTH),
+            data.get("reference_height", DEFAULT_REFERENCE_HEIGHT),
+        )
 
         if mode == StyleMode.ROUNDED:
             return cls(
@@ -163,6 +185,8 @@ class SubtitleStyle:
                 mode=mode,
                 font_name=data.get("font_name", cls.font_name),
                 font_size=data.get("font_size", cls.font_size),
+                reference_width=reference_width,
+                reference_height=reference_height,
                 text_color=data.get("text_color", cls.text_color),
                 bg_color=data.get("bg_color", cls.bg_color),
                 corner_radius=data.get("corner_radius", cls.corner_radius),
@@ -179,6 +203,8 @@ class SubtitleStyle:
             mode=mode,
             font_name=data.get("font_name", cls.font_name),
             font_size=data.get("font_size", cls.font_size),
+            reference_width=reference_width,
+            reference_height=reference_height,
             primary_color=data.get("primary_color", cls.primary_color),
             outline_color=data.get("outline_color", cls.outline_color),
             outline_width=data.get("outline_width", cls.outline_width),
@@ -212,6 +238,37 @@ class SubtitleStyle:
 # ------------------------------------------------------------------ #
 # Module-level helpers
 # ------------------------------------------------------------------ #
+
+def clamp_reference_resolution(
+    width: ReferenceDimension,
+    height: ReferenceDimension,
+) -> tuple[int, int]:
+    """Clamp subtitle design reference resolution to supported bounds."""
+    if width is None:
+        width = DEFAULT_REFERENCE_WIDTH
+    if height is None:
+        height = DEFAULT_REFERENCE_HEIGHT
+
+    try:
+        reference_width = int(width)
+    except (TypeError, ValueError):
+        reference_width = DEFAULT_REFERENCE_WIDTH
+
+    try:
+        reference_height = int(height)
+    except (TypeError, ValueError):
+        reference_height = DEFAULT_REFERENCE_HEIGHT
+
+    reference_width = min(
+        max(reference_width, REFERENCE_WIDTH_MIN),
+        REFERENCE_WIDTH_MAX,
+    )
+    reference_height = min(
+        max(reference_height, REFERENCE_HEIGHT_MIN),
+        REFERENCE_HEIGHT_MAX,
+    )
+    return reference_width, reference_height
+
 
 def style_id_from_filename(filename: str) -> str:
     """Extract user-facing style ID from filename.

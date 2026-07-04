@@ -533,6 +533,8 @@ def add_subtitles_with_style(
     subtitle_layout: SubtitleLayoutEnum,
     ass_style: str = "",
     rounded_style: Optional[dict] = None,
+    reference_width: int = 1280,
+    reference_height: int = 720,
     crf: int = 23,
     preset: PresetType = "medium",
     progress_callback: Optional[Callable] = None,
@@ -548,6 +550,8 @@ def add_subtitles_with_style(
         subtitle_layout: 字幕布局
         ass_style: ASS 样式字符串 (仅 ASS_STYLE 模式使用)
         rounded_style: 圆角背景样式配置字典 (仅 ROUNDED_BG 模式使用)
+        reference_width: 样式设计基准宽度（当前保留用于配置传递）
+        reference_height: 样式设计基准高度
         crf: 视频质量
         preset: FFmpeg 编码预设
         progress_callback: 进度回调
@@ -555,11 +559,14 @@ def add_subtitles_with_style(
 
     if render_mode == SubtitleRenderModeEnum.ROUNDED_BG:
         # 圆角背景模式
+        rounded_style_config = dict(rounded_style or {})
+        rounded_style_config.setdefault("reference_width", reference_width)
+        rounded_style_config.setdefault("reference_height", reference_height)
         render_rounded_video(
             video_path=video_path,
             asr_data=asr_data,
             output_path=output_path,
-            rounded_style=rounded_style,
+            rounded_style=rounded_style_config,
             layout=subtitle_layout,
             crf=crf,
             preset=preset,
@@ -576,4 +583,5 @@ def add_subtitles_with_style(
             crf=crf,
             preset=preset,
             progress_callback=progress_callback,
+            reference_height=reference_height,
         )

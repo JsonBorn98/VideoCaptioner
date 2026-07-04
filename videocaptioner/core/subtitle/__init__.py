@@ -17,9 +17,12 @@ from .font_utils import (
     get_ass_to_pil_ratio,
     get_builtin_fonts,
     get_font,
+    get_system_fonts,
     import_font_files,
+    is_font_loadable,
     is_supported_font_file,
     iter_font_files,
+    iter_system_font_files,
 )
 from .rounded_renderer import render_preview, render_rounded_video
 from .style_manager import (
@@ -67,9 +70,12 @@ __all__ = [
     "get_font",
     "get_ass_to_pil_ratio",
     "get_builtin_fonts",
+    "get_system_fonts",
     "import_font_files",
+    "is_font_loadable",
     "is_supported_font_file",
     "iter_font_files",
+    "iter_system_font_files",
     "SUPPORTED_FONT_EXTENSIONS",
     "clear_font_cache",
     "hex_to_rgba",

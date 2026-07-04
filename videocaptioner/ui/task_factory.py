@@ -9,6 +9,7 @@ from videocaptioner.core.entities import (
     FullProcessTask,
     LLMServiceEnum,
     SubtitleConfig,
+    SubtitleRenderModeEnum,
     SubtitleTask,
     SynthesisConfig,
     SynthesisTask,
@@ -34,17 +35,37 @@ class TaskFactory:
         """获取 ASS 字幕样式内容 (via style_manager, JSON-first with .txt fallback)"""
         from videocaptioner.core.subtitle.style_manager import load_style
 
-        style = load_style(style_name)
+        style = load_style(style_name, mode="ass")
         if style is not None:
             return style.to_ass_string()
         return ""
 
     @staticmethod
-    def get_rounded_style() -> dict:
+    def get_style_reference(style_name: str, render_mode: SubtitleRenderModeEnum) -> tuple[int, int]:
+        """获取当前样式的设计基准分辨率。"""
+        from videocaptioner.core.subtitle.style_manager import load_style
+
+        mode = "rounded" if render_mode == SubtitleRenderModeEnum.ROUNDED_BG else "ass"
+        style = load_style(style_name, mode=mode)
+        if style is not None:
+            return style.reference_width, style.reference_height
+
+        return (
+            cfg.subtitle_style_reference_width.value,
+            cfg.subtitle_style_reference_height.value,
+        )
+
+    @staticmethod
+    def get_rounded_style(
+        reference_width: Optional[int] = None,
+        reference_height: Optional[int] = None,
+    ) -> dict:
         """获取圆角背景样式配置 (from UI cfg overrides)"""
         return {
             "font_name": cfg.rounded_bg_font_name.value,
             "font_size": cfg.rounded_bg_font_size.value,
+            "reference_width": reference_width or cfg.subtitle_style_reference_width.value,
+            "reference_height": reference_height or cfg.subtitle_style_reference_height.value,
             "bg_color": cfg.rounded_bg_color.value,
             "text_color": cfg.rounded_bg_text_color.value,
             "corner_radius": cfg.rounded_bg_corner_radius.value,
@@ -248,6 +269,17 @@ class TaskFactory:
 
         # 只有启用样式时才传入样式配置
         use_style = cfg.use_subtitle_style.value
+        reference_width, reference_height = (
+            TaskFactory.get_style_reference(
+                cfg.subtitle_style_name.value,
+                cfg.subtitle_render_mode.value,
+            )
+            if use_style
+            else (
+                cfg.subtitle_style_reference_width.value,
+                cfg.subtitle_style_reference_height.value,
+            )
+        )
         config = SynthesisConfig(
             need_video=cfg.need_video.value,
             soft_subtitle=cfg.soft_subtitle.value,
@@ -255,7 +287,13 @@ class TaskFactory:
             video_quality=cfg.video_quality.value,
             subtitle_layout=cfg.subtitle_layout.value,
             ass_style=TaskFactory.get_ass_style(cfg.subtitle_style_name.value) if use_style else "",
-            rounded_style=TaskFactory.get_rounded_style() if use_style else None,
+            rounded_style=(
+                TaskFactory.get_rounded_style(reference_width, reference_height)
+                if use_style
+                else None
+            ),
+            reference_width=reference_width,
+            reference_height=reference_height,
         )
 
         task = SynthesisTask(

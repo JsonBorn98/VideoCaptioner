@@ -781,6 +781,8 @@ class SynthesisConfig:
     # 字幕样式配置
     ass_style: str = ""  # ASS 样式字符串
     rounded_style: Optional[dict] = None  # 圆角背景样式配置
+    reference_width: int = 1280
+    reference_height: int = 720
 
     def print_config(self) -> str:
         """Print video synthesis configuration"""

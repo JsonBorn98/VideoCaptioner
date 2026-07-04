@@ -306,6 +306,12 @@ class Config(QConfig):
         EnumSerializer(SubtitleLayoutEnum),
     )
     subtitle_preview_image = ConfigItem("SubtitleStyle", "PreviewImage", "")
+    subtitle_style_reference_width = RangeConfigItem(
+        "SubtitleStyle", "ReferenceWidth", 1280, RangeValidator(320, 7680)
+    )
+    subtitle_style_reference_height = RangeConfigItem(
+        "SubtitleStyle", "ReferenceHeight", 720, RangeValidator(180, 4320)
+    )
 
     # 字幕渲染模式
     subtitle_render_mode = OptionsConfigItem(

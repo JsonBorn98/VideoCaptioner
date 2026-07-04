@@ -12,7 +12,7 @@ class LineEditSettingCard(SettingCard):
 
     def __init__(
         self,
-        configItem: ConfigItem,
+        configItem: Optional[ConfigItem],
         icon,
         title: str,
         content: Optional[str] = None,
@@ -28,17 +28,26 @@ class LineEditSettingCard(SettingCard):
         self.hBoxLayout.addWidget(self.lineEdit, 1, Qt.AlignRight)  # type: ignore
         self.hBoxLayout.addSpacing(16)
 
-        self.lineEdit.setMinimumWidth(280)
+        self.lineEdit.setMinimumWidth(160)
 
-        self.setValue(qconfig.get(configItem))
+        if configItem is not None:
+            self.setValue(qconfig.get(configItem))
 
         self.lineEdit.textChanged.connect(self.__onTextChanged)
-        configItem.valueChanged.connect(self.setValue)
+        if configItem is not None:
+            configItem.valueChanged.connect(self.setValue)
 
     def __onTextChanged(self, text: str):
         self.setValue(text)
         self.textChanged.emit(text)
 
     def setValue(self, value: str):
-        qconfig.set(self.configItem, value)
+        if self.configItem is not None:
+            qconfig.set(self.configItem, value)
         self.lineEdit.setText(value)
+
+    def setText(self, text: str):
+        self.setValue(text)
+
+    def text(self) -> str:
+        return self.lineEdit.text()

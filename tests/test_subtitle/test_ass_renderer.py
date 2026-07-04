@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+from videocaptioner.core.entities import SubtitleLayoutEnum
 from videocaptioner.core.subtitle import ass_renderer
 
 
@@ -88,3 +90,43 @@ def test_get_video_resolution_handles_missing_stderr(monkeypatch):
     monkeypatch.setattr(ass_renderer.subprocess, "run", fake_run)
 
     assert ass_renderer._get_video_resolution("video.mp4") == (1920, 1080)
+
+
+@pytest.mark.parametrize(
+    ("video_height", "reference_height", "expected_scale"),
+    [
+        (1440, 720, 2.0),
+        (2160, 1080, 2.0),
+    ],
+)
+def test_render_ass_video_scales_from_reference_height(
+    monkeypatch,
+    video_height,
+    reference_height,
+    expected_scale,
+):
+    captured = {}
+
+    def fake_scale(style_str, scale_factor):
+        captured["scale_factor"] = scale_factor
+        raise RuntimeError("stop after scale")
+
+    monkeypatch.setattr(
+        ass_renderer,
+        "_get_video_resolution",
+        lambda _: (3840, video_height),
+    )
+    monkeypatch.setattr(ass_renderer, "_scale_ass_style", fake_scale)
+
+    asr_data = ASRData([ASRDataSeg("hello", 0, 1000)])
+    with pytest.raises(RuntimeError, match="stop after scale"):
+        ass_renderer.render_ass_video(
+            video_path="video.mp4",
+            asr_data=asr_data,
+            output_path="output.mp4",
+            style_str=MINIMAL_ASS_STYLE,
+            layout=SubtitleLayoutEnum.ONLY_ORIGINAL,
+            reference_height=reference_height,
+        )
+
+    assert captured["scale_factor"] == expected_scale

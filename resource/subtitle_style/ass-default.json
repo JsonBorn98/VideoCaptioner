@@ -2,6 +2,8 @@
   "name": "default",
   "description": "",
   "mode": "ass",
+  "reference_width": 1920,
+  "reference_height": 1080,
   "font_name": "Noto Sans SC",
   "font_size": 40,
   "primary_color": "#ffffff",

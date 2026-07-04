@@ -14,7 +14,7 @@ class EditComboBoxSettingCard(SettingCard):
 
     def __init__(
         self,
-        configItem: ConfigItem,
+        configItem: Optional[ConfigItem],
         icon: Union[str, QIcon],
         title: str,
         content: Optional[str] = None,
@@ -39,18 +39,21 @@ class EditComboBoxSettingCard(SettingCard):
         self.hBoxLayout.addSpacing(16)
 
         # 设置最小宽度
-        self.comboBox.setMinimumWidth(280)
+        self.comboBox.setMinimumWidth(160)
 
         # 设置初始值
-        self.setValue(qconfig.get(configItem))
+        if configItem is not None:
+            self.setValue(qconfig.get(configItem))
 
         # 连接信号
         self.comboBox.currentTextChanged.connect(self.__onTextChanged)
-        configItem.valueChanged.connect(self.setValue)
+        if configItem is not None:
+            configItem.valueChanged.connect(self.setValue)
 
     def _setupCompleter(self):
         """设置搜索自动完成功能"""
         if not self.items:
+            self.comboBox.setCompleter(QCompleter([], self))
             return
 
         completer = QCompleter(self.items, self)
@@ -65,8 +68,23 @@ class EditComboBoxSettingCard(SettingCard):
 
     def setValue(self, value: str):
         """设置值"""
-        qconfig.set(self.configItem, value)
+        if self.configItem is not None:
+            qconfig.set(self.configItem, value)
         self.comboBox.setText(value)
+
+    def setCurrentText(self, text: str):
+        """设置当前文本"""
+        self.setValue(text)
+
+    def currentText(self) -> str:
+        """返回当前文本"""
+        return self.comboBox.currentText()
+
+    def addItem(self, item: str):
+        """添加选项"""
+        self.comboBox.addItem(item)
+        self.items.append(item)
+        self._setupCompleter()
 
     def addItems(self, items: List[str]):
         """添加选项"""
@@ -81,4 +99,10 @@ class EditComboBoxSettingCard(SettingCard):
         self.items = items
         for item in items:
             self.comboBox.addItem(item)
+        self._setupCompleter()
+
+    def clear(self):
+        """清空所有选项"""
+        self.comboBox.clear()
+        self.items = []
         self._setupCompleter()

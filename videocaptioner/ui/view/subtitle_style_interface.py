@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from typing import Optional, Tuple
 
-from PIL import ImageFont
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFontDatabase
 from PyQt5.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
@@ -28,14 +27,22 @@ from videocaptioner.core.subtitle import (
     clear_font_cache,
     get_builtin_fonts,
     import_font_files,
+    is_font_loadable,
     render_ass_preview,
     render_preview,
 )
-from videocaptioner.core.subtitle.style_manager import StyleMode
+from videocaptioner.core.subtitle.style_manager import (
+    DEFAULT_REFERENCE_HEIGHT,
+    DEFAULT_REFERENCE_WIDTH,
+    ReferenceDimension,
+    StyleMode,
+    clamp_reference_resolution,
+)
 from videocaptioner.core.subtitle.styles import RoundedBgStyle
 from videocaptioner.core.utils.platform_utils import open_folder
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
+from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
 from videocaptioner.ui.components.MySettingCard import (
     ColorSettingCard,
     ComboBoxSettingCard,
@@ -67,6 +74,16 @@ DEFAULT_BG_PORTRAIT = {
 }
 
 PREVIEW_DEBOUNCE_MS = 80
+FONT_WARNING_DEBOUNCE_MS = 1200
+
+REFERENCE_RESOLUTION_CUSTOM = "自定义"
+CUSTOM_FONT_LABEL = "自定义"
+REFERENCE_RESOLUTION_PRESETS = {
+    "720p (1280×720)": (1280, 720),
+    "1080p (1920×1080)": (1920, 1080),
+    "1440p (2560×1440)": (2560, 1440),
+    "4K (3840×2160)": (3840, 2160),
+}
 
 
 class AssPreviewThread(QThread):
@@ -81,6 +98,7 @@ class AssPreviewThread(QThread):
         bg_image_path: str,
         width: Optional[int] = None,
         height: Optional[int] = None,
+        reference_height: int = DEFAULT_REFERENCE_HEIGHT,
     ):
         super().__init__()
         self.preview_text = preview_text
@@ -88,6 +106,7 @@ class AssPreviewThread(QThread):
         self.height = height
         self.style_str = style_str
         self.bg_image_path = bg_image_path
+        self.reference_height = reference_height
 
     def run(self):
         preview_path = render_ass_preview(
@@ -96,6 +115,7 @@ class AssPreviewThread(QThread):
             bg_image_path=self.bg_image_path,
             width=self.width,
             height=self.height,
+            reference_height=self.reference_height,
         )
         self.previewReady.emit(preview_path)
 
@@ -112,6 +132,7 @@ class RoundedBgPreviewThread(QThread):
         width: Optional[int] = None,
         height: Optional[int] = None,
         bg_image_path: Optional[str] = None,
+        reference_height: int = DEFAULT_REFERENCE_HEIGHT,
     ):
         super().__init__()
         self.primary_text = preview_text[0]
@@ -120,6 +141,7 @@ class RoundedBgPreviewThread(QThread):
         self.height = height
         self.style = style
         self.bg_image_path = bg_image_path
+        self.reference_height = reference_height
 
     def run(self):
         preview_path = render_preview(
@@ -129,6 +151,7 @@ class RoundedBgPreviewThread(QThread):
             height=self.height,
             style=self.style,
             bg_image_path=self.bg_image_path,
+            reference_height=self.reference_height,
         )
         self.previewReady.emit(preview_path)
 
@@ -155,6 +178,9 @@ class SubtitleStyleInterface(QWidget):
 
         # 控制是否触发样式变更回调（加载样式时禁用）
         self._loading_style = False
+        self._syncing_reference_resolution = False
+        self._available_font_names: set[str] = set()
+        self._last_warned_unloadable_fonts: tuple[str, ...] = ()
 
         self.preview_thread: Optional[PreviewThread] = None
         self._preview_request_pending = False
@@ -163,6 +189,10 @@ class SubtitleStyleInterface(QWidget):
         self._preview_debounce_timer.setSingleShot(True)
         self._preview_debounce_timer.setInterval(PREVIEW_DEBOUNCE_MS)
         self._preview_debounce_timer.timeout.connect(self._startPreviewUpdate)
+        self._font_warning_timer = QTimer(self)
+        self._font_warning_timer.setSingleShot(True)
+        self._font_warning_timer.setInterval(FONT_WARNING_DEBOUNCE_MS)
+        self._font_warning_timer.timeout.connect(self._warnUnavailableFonts)
 
         # 设置初始值,加载样式
         self.__setValues()
@@ -173,7 +203,7 @@ class SubtitleStyleInterface(QWidget):
     def _initSettingsArea(self):
         """初始化左侧设置区域"""
         self.settingsScrollArea = ScrollArea()
-        self.settingsScrollArea.setFixedWidth(350)
+        self.settingsScrollArea.setFixedWidth(380)
         self.settingsWidget = QWidget()
         self.settingsLayout = QVBoxLayout(self.settingsWidget)
         self.settingsScrollArea.setWidget(self.settingsWidget)
@@ -181,6 +211,9 @@ class SubtitleStyleInterface(QWidget):
 
         # 创建设置组 - 通用
         self.layoutGroup = SettingCardGroup(self.tr("字幕排布"), self.settingsWidget)
+        self.referenceGroup = SettingCardGroup(
+            self.tr("样式基准分辨率"), self.settingsWidget
+        )
         self.fontManageGroup = SettingCardGroup(self.tr("字体管理"), self.settingsWidget)
 
         # ASS 样式设置组
@@ -267,12 +300,40 @@ class SubtitleStyleInterface(QWidget):
             texts=["译文在上", "原文在上", "仅译文", "仅原文"],
         )
 
+        # 样式基准分辨率
+        self.referencePresetCard = ComboBoxSettingCard(
+            FIF.LAYOUT,  # type: ignore
+            self.tr("预设"),
+            self.tr("选择设计基准"),
+            texts=[*REFERENCE_RESOLUTION_PRESETS.keys(), REFERENCE_RESOLUTION_CUSTOM],
+        )
+        self.referencePresetCard.comboBox.setMinimumWidth(170)
+        self.referencePresetCard.comboBox.setMaximumWidth(190)
+
+        self.referenceWidthCard = SpinBoxSettingCard(
+            FIF.LAYOUT,  # type: ignore
+            self.tr("基准宽度"),
+            self.tr("自定义宽度"),
+            minimum=320,
+            maximum=7680,
+            step=1,
+        )
+
+        self.referenceHeightCard = SpinBoxSettingCard(
+            FIF.LAYOUT,  # type: ignore
+            self.tr("基准高度"),
+            self.tr("自定义高度"),
+            minimum=180,
+            maximum=4320,
+            step=1,
+        )
+
         # 字体管理
         self.importFontButton = PushSettingCard(
-            self.tr("导入字体"),
+            self.tr("导入"),
             FIF.ADD,
-            self.tr("导入自定义字体"),
-            self.tr("支持多选 .ttf/.otf/.ttc/.otc"),
+            self.tr("导入字体文件..."),
+            self.tr("TTF/OTF/TTC/OTC"),
         )
 
         self.refreshFontButton = PushSettingCard(
@@ -286,7 +347,7 @@ class SubtitleStyleInterface(QWidget):
             self.tr("打开文件夹"),
             FIF.FOLDER,
             self.tr("打开字体文件夹"),
-            self.tr("在文件管理器中查看已导入字体"),
+            self.tr("管理已导入字体文件"),
         )
 
         # ASS 模式 - 垂直间距
@@ -302,7 +363,17 @@ class SubtitleStyleInterface(QWidget):
         self.assPrimaryFontCard = ComboBoxSettingCard(
             FIF.FONT,  # type: ignore
             self.tr("主字幕字体"),
-            self.tr("设置主字幕的字体"),
+            self.tr("从本机字体列表选择"),
+        )
+        self.assPrimaryFontCard.comboBox.setMinimumWidth(170)
+        self.assPrimaryFontCard.comboBox.setMaximumWidth(190)
+
+        self.assPrimaryCustomFontCard = LineEditSettingCard(
+            None,
+            FIF.FONT,  # type: ignore
+            self.tr("自定义主字幕字体"),
+            self.tr("输入字体 family name"),
+            placeholder=self.tr("例如 Noto Sans SC"),
         )
 
         self.assPrimarySizeCard = SpinBoxSettingCard(
@@ -349,7 +420,17 @@ class SubtitleStyleInterface(QWidget):
         self.assSecondaryFontCard = ComboBoxSettingCard(
             FIF.FONT,  # type: ignore
             self.tr("副字幕字体"),
-            self.tr("设置副字幕的字体"),
+            self.tr("从本机字体列表选择"),
+        )
+        self.assSecondaryFontCard.comboBox.setMinimumWidth(170)
+        self.assSecondaryFontCard.comboBox.setMaximumWidth(190)
+
+        self.assSecondaryCustomFontCard = LineEditSettingCard(
+            None,
+            FIF.FONT,  # type: ignore
+            self.tr("自定义副字幕字体"),
+            self.tr("输入字体 family name"),
+            placeholder=self.tr("例如 Arial"),
         )
 
         self.assSecondarySizeCard = SpinBoxSettingCard(
@@ -396,7 +477,17 @@ class SubtitleStyleInterface(QWidget):
         self.roundedFontCard = ComboBoxSettingCard(
             FIF.FONT,  # type: ignore
             self.tr("字体"),
-            self.tr("设置字幕字体"),
+            self.tr("从本机字体列表选择"),
+        )
+        self.roundedFontCard.comboBox.setMinimumWidth(170)
+        self.roundedFontCard.comboBox.setMaximumWidth(190)
+
+        self.roundedCustomFontCard = LineEditSettingCard(
+            None,
+            FIF.FONT,  # type: ignore
+            self.tr("自定义字体"),
+            self.tr("输入字体 family name"),
+            placeholder=self.tr("例如 Microsoft YaHei"),
         )
 
         self.roundedFontSizeCard = SpinBoxSettingCard(
@@ -503,6 +594,11 @@ class SubtitleStyleInterface(QWidget):
         self.layoutGroup.addSettingCard(self.layoutCard)
         self.layoutGroup.addSettingCard(self.assVerticalSpacingCard)
 
+        # 样式基准分辨率
+        self.referenceGroup.addSettingCard(self.referencePresetCard)
+        self.referenceGroup.addSettingCard(self.referenceWidthCard)
+        self.referenceGroup.addSettingCard(self.referenceHeightCard)
+
         # 字体管理
         self.fontManageGroup.addSettingCard(self.importFontButton)
         self.fontManageGroup.addSettingCard(self.refreshFontButton)
@@ -510,6 +606,7 @@ class SubtitleStyleInterface(QWidget):
 
         # ASS 样式卡片
         self.assPrimaryGroup.addSettingCard(self.assPrimaryFontCard)
+        self.assPrimaryGroup.addSettingCard(self.assPrimaryCustomFontCard)
         self.assPrimaryGroup.addSettingCard(self.assPrimarySizeCard)
         self.assPrimaryGroup.addSettingCard(self.assPrimarySpacingCard)
         self.assPrimaryGroup.addSettingCard(self.assPrimaryColorCard)
@@ -517,6 +614,7 @@ class SubtitleStyleInterface(QWidget):
         self.assPrimaryGroup.addSettingCard(self.assPrimaryOutlineSizeCard)
 
         self.assSecondaryGroup.addSettingCard(self.assSecondaryFontCard)
+        self.assSecondaryGroup.addSettingCard(self.assSecondaryCustomFontCard)
         self.assSecondaryGroup.addSettingCard(self.assSecondarySizeCard)
         self.assSecondaryGroup.addSettingCard(self.assSecondarySpacingCard)
         self.assSecondaryGroup.addSettingCard(self.assSecondaryColorCard)
@@ -525,6 +623,7 @@ class SubtitleStyleInterface(QWidget):
 
         # 圆角背景卡片
         self.roundedBgGroup.addSettingCard(self.roundedFontCard)
+        self.roundedBgGroup.addSettingCard(self.roundedCustomFontCard)
         self.roundedBgGroup.addSettingCard(self.roundedFontSizeCard)
         self.roundedBgGroup.addSettingCard(self.roundedTextColorCard)
         self.roundedBgGroup.addSettingCard(self.roundedBgColorCard)
@@ -542,6 +641,7 @@ class SubtitleStyleInterface(QWidget):
 
         # 添加组到布局
         self.settingsLayout.addWidget(self.layoutGroup)
+        self.settingsLayout.addWidget(self.referenceGroup)
         self.settingsLayout.addWidget(self.fontManageGroup)
         self.settingsLayout.addWidget(self.assPrimaryGroup)
         self.settingsLayout.addWidget(self.assSecondaryGroup)
@@ -577,6 +677,11 @@ class SubtitleStyleInterface(QWidget):
 
         # 设置字幕排布
         self.layoutCard.comboBox.setCurrentText(cfg.subtitle_layout.value.value)
+
+        self._setReferenceResolution(
+            cfg.subtitle_style_reference_width.value,
+            cfg.subtitle_style_reference_height.value,
+        )
 
         # 设置字幕样式
         self.styleNameComboBox.comboBox.setCurrentText(cfg.get(cfg.subtitle_style_name))
@@ -616,45 +721,216 @@ class SubtitleStyleInterface(QWidget):
         """获取可用于 ASS 和圆角背景渲染的字体名。"""
         builtin_fonts = get_builtin_fonts()
         builtin_font_names = [f["name"] for f in builtin_fonts]
-        builtin_name_set = set(builtin_font_names)
+        seen_names = set(builtin_font_names)
 
         fontDatabase = QFontDatabase()
         fontFamilies = fontDatabase.families()
 
-        # 过滤系统字体：
-        # 1. 排除私有字体（以 . 开头）
-        # 2. 排除已有的内置/自定义字体
-        # 3. 只保留 PIL 能实际加载的字体（用于圆角背景渲染）
+        # 启动时只读取 Qt 已缓存的系统字体名，避免解析全部系统字体文件导致 GUI 卡顿。
+        # 自定义/当前选中字体会在需要时通过渲染层做按名称的懒加载验证。
         system_fonts = []
         for font_name in fontFamilies:
-            if font_name.startswith(".") or font_name in builtin_name_set:
+            if font_name.startswith(".") or font_name in seen_names:
                 continue
-            try:
-                ImageFont.truetype(font_name, 12)
-                system_fonts.append(font_name)
-            except (OSError, IOError):
-                pass
+            system_fonts.append(font_name)
+            seen_names.add(font_name)
 
         return builtin_font_names + sorted(system_fonts)
 
     def _refreshFontLists(self, preserve_current: bool = True) -> None:
         """刷新所有字体下拉框。"""
         all_fonts = self._availableFontNames()
-        cards = [
-            self.assPrimaryFontCard,
-            self.assSecondaryFontCard,
-            self.roundedFontCard,
+        self._available_font_names = set(all_fonts)
+        font_items = [CUSTOM_FONT_LABEL, *all_fonts]
+
+        for combo_card, custom_card in self._fontControlPairs():
+            current_text = (
+                self._fontValue(combo_card, custom_card) if preserve_current else ""
+            )
+
+            combo_card.comboBox.blockSignals(True)
+            custom_card.lineEdit.blockSignals(True)
+            combo_card.clear()
+            combo_card.addItems(font_items)
+            combo_card.comboBox.setMaxVisibleItems(12)
+            self._setFontValue(combo_card, custom_card, current_text)
+            custom_card.lineEdit.blockSignals(False)
+            combo_card.comboBox.blockSignals(False)
+
+    def _fontControlPairs(self):
+        return [
+            (self.assPrimaryFontCard, self.assPrimaryCustomFontCard),
+            (self.assSecondaryFontCard, self.assSecondaryCustomFontCard),
+            (self.roundedFontCard, self.roundedCustomFontCard),
         ]
 
-        for card in cards:
-            current_text = card.comboBox.currentText() if preserve_current else ""
-            card.comboBox.blockSignals(True)
-            card.clear()
-            card.addItems(all_fonts)
-            card.comboBox.setMaxVisibleItems(12)
-            if preserve_current and current_text in all_fonts:
-                card.setCurrentText(current_text)
-            card.comboBox.blockSignals(False)
+    def _fontValue(self, combo_card, custom_card) -> str:
+        selected = combo_card.comboBox.currentText()
+        if selected == CUSTOM_FONT_LABEL:
+            return custom_card.text()
+        return selected
+
+    def _setFontValue(self, combo_card, custom_card, font_name: str) -> None:
+        font_name = font_name.strip()
+        if font_name and font_name in self._available_font_names:
+            combo_card.setCurrentText(font_name)
+            custom_card.setText(font_name)
+        else:
+            combo_card.setCurrentText(CUSTOM_FONT_LABEL)
+            custom_card.setText(font_name)
+        self._syncCustomFontVisibility(combo_card, custom_card)
+
+    def _syncCustomFontVisibility(self, combo_card, custom_card) -> None:
+        custom_card.setVisible(combo_card.comboBox.currentText() == CUSTOM_FONT_LABEL)
+
+    def _onAssFontChanged(self, combo_card, custom_card) -> None:
+        self._syncCustomFontVisibility(combo_card, custom_card)
+        self.onAssSettingChanged()
+        self._scheduleFontWarning()
+
+    def _onRoundedFontChanged(self, combo_card, custom_card) -> None:
+        self._syncCustomFontVisibility(combo_card, custom_card)
+        self.onRoundedBgSettingChanged()
+        self._scheduleFontWarning()
+
+    def _currentReferenceResolution(self) -> tuple[int, int]:
+        """返回当前 UI 中的样式基准分辨率。"""
+        return clamp_reference_resolution(
+            self.referenceWidthCard.spinBox.value(),
+            self.referenceHeightCard.spinBox.value(),
+        )
+
+    def _referencePresetFor(self, width: int, height: int) -> str:
+        for label, preset_size in REFERENCE_RESOLUTION_PRESETS.items():
+            if preset_size == (width, height):
+                return label
+        return REFERENCE_RESOLUTION_CUSTOM
+
+    def _setReferenceResolution(
+        self,
+        width: ReferenceDimension,
+        height: ReferenceDimension,
+    ) -> None:
+        """同步基准分辨率控件，不触发保存。"""
+        width, height = clamp_reference_resolution(width, height)
+        preset = self._referencePresetFor(width, height)
+        cfg.set(cfg.subtitle_style_reference_width, width)
+        cfg.set(cfg.subtitle_style_reference_height, height)
+
+        self._syncing_reference_resolution = True
+        try:
+            self.referencePresetCard.comboBox.blockSignals(True)
+            self.referenceWidthCard.spinBox.blockSignals(True)
+            self.referenceHeightCard.spinBox.blockSignals(True)
+
+            self.referencePresetCard.setCurrentText(preset)
+            self.referenceWidthCard.spinBox.setValue(width)
+            self.referenceHeightCard.spinBox.setValue(height)
+            self._syncReferenceCustomVisibility()
+        finally:
+            self.referencePresetCard.comboBox.blockSignals(False)
+            self.referenceWidthCard.spinBox.blockSignals(False)
+            self.referenceHeightCard.spinBox.blockSignals(False)
+            self._syncing_reference_resolution = False
+
+    def onReferencePresetChanged(self, text: str) -> None:
+        """基准分辨率预设改变。"""
+        if self._syncing_reference_resolution:
+            return
+
+        if text in REFERENCE_RESOLUTION_PRESETS:
+            width, height = REFERENCE_RESOLUTION_PRESETS[text]
+            self._setReferenceResolution(width, height)
+            self._onReferenceResolutionChanged()
+        elif text == REFERENCE_RESOLUTION_CUSTOM:
+            self._syncReferenceCustomVisibility()
+            self._onReferenceResolutionChanged()
+
+    def onReferenceSizeChanged(self) -> None:
+        """自定义基准分辨率宽高改变。"""
+        if self._syncing_reference_resolution:
+            return
+
+        width, height = self._currentReferenceResolution()
+        preset = self._referencePresetFor(width, height)
+        self.referencePresetCard.comboBox.blockSignals(True)
+        self.referencePresetCard.setCurrentText(preset)
+        self.referencePresetCard.comboBox.blockSignals(False)
+        self._syncReferenceCustomVisibility()
+        self._onReferenceResolutionChanged()
+
+    def _onReferenceResolutionChanged(self) -> None:
+        """保存并应用当前基准分辨率。"""
+        if self._loading_style:
+            return
+
+        width, height = self._currentReferenceResolution()
+        cfg.set(cfg.subtitle_style_reference_width, width)
+        cfg.set(cfg.subtitle_style_reference_height, height)
+
+        current_style = self.styleNameComboBox.comboBox.currentText()
+        self.saveStyle(current_style or "default")
+        self.updatePreview()
+
+    def _syncReferenceCustomVisibility(self) -> None:
+        is_custom = self.referencePresetCard.comboBox.currentText() == REFERENCE_RESOLUTION_CUSTOM
+        self.referenceWidthCard.setVisible(is_custom)
+        self.referenceHeightCard.setVisible(is_custom)
+
+    def _fontNamesForCurrentMode(self) -> list[str]:
+        if self._getCurrentRenderMode() == SubtitleRenderModeEnum.ROUNDED_BG:
+            return [self._fontValue(self.roundedFontCard, self.roundedCustomFontCard)]
+        return [
+            self._fontValue(self.assPrimaryFontCard, self.assPrimaryCustomFontCard),
+            self._fontValue(
+                self.assSecondaryFontCard,
+                self.assSecondaryCustomFontCard,
+            ),
+        ]
+
+    def _unavailableFontNamesForCurrentMode(self) -> tuple[str, ...]:
+        if not self._available_font_names:
+            self._available_font_names = set(self._availableFontNames())
+
+        unavailable: list[str] = []
+        for font_name in self._fontNamesForCurrentMode():
+            font_name = font_name.strip()
+            if (
+                font_name
+                and font_name not in self._available_font_names
+                and not is_font_loadable(font_name)
+            ):
+                unavailable.append(font_name)
+
+        return tuple(dict.fromkeys(unavailable))
+
+    def _scheduleFontWarning(self) -> None:
+        if self._loading_style:
+            return
+        self._font_warning_timer.start()
+
+    def _warnUnavailableFonts(self) -> None:
+        unavailable = self._unavailableFontNamesForCurrentMode()
+        if not unavailable or unavailable == self._last_warned_unloadable_fonts:
+            return
+
+        self._last_warned_unloadable_fonts = unavailable
+        font_names = "、".join(unavailable[:3])
+        if len(unavailable) > 3:
+            font_names += self.tr(" 等")
+        InfoBar.warning(
+            title=self.tr("字体提示"),
+            content=(
+                self.tr("未能加载字体：")
+                + font_names
+                + self.tr("。导出时可能回退到默认字体。若需要稳定导出，请导入字体文件。")
+            ),
+            orient=Qt.Horizontal,  # type: ignore
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=INFOBAR_DURATION_WARNING,
+            parent=self,
+        )
 
     def connectSignals(self):
         """连接所有设置变更的信号到预览更新函数"""
@@ -674,8 +950,30 @@ class SubtitleStyleInterface(QWidget):
             self.onAssSettingChanged
         )
 
+        # 样式基准分辨率
+        self.referencePresetCard.currentTextChanged.connect(
+            self.onReferencePresetChanged
+        )
+        self.referenceWidthCard.spinBox.valueChanged.connect(
+            lambda _: self.onReferenceSizeChanged()
+        )
+        self.referenceHeightCard.spinBox.valueChanged.connect(
+            lambda _: self.onReferenceSizeChanged()
+        )
+
         # ASS 模式 - 主字幕样式
-        self.assPrimaryFontCard.currentTextChanged.connect(self.onAssSettingChanged)
+        self.assPrimaryFontCard.currentTextChanged.connect(
+            lambda _: self._onAssFontChanged(
+                self.assPrimaryFontCard,
+                self.assPrimaryCustomFontCard,
+            )
+        )
+        self.assPrimaryCustomFontCard.textChanged.connect(
+            lambda _: self._onAssFontChanged(
+                self.assPrimaryFontCard,
+                self.assPrimaryCustomFontCard,
+            )
+        )
         self.assPrimarySizeCard.spinBox.valueChanged.connect(self.onAssSettingChanged)
         self.assPrimarySpacingCard.spinBox.valueChanged.connect(
             self.onAssSettingChanged
@@ -687,7 +985,18 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 副字幕样式
-        self.assSecondaryFontCard.currentTextChanged.connect(self.onAssSettingChanged)
+        self.assSecondaryFontCard.currentTextChanged.connect(
+            lambda _: self._onAssFontChanged(
+                self.assSecondaryFontCard,
+                self.assSecondaryCustomFontCard,
+            )
+        )
+        self.assSecondaryCustomFontCard.textChanged.connect(
+            lambda _: self._onAssFontChanged(
+                self.assSecondaryFontCard,
+                self.assSecondaryCustomFontCard,
+            )
+        )
         self.assSecondarySizeCard.spinBox.valueChanged.connect(self.onAssSettingChanged)
         self.assSecondarySpacingCard.spinBox.valueChanged.connect(
             self.onAssSettingChanged
@@ -699,7 +1008,18 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # 圆角背景样式信号
-        self.roundedFontCard.currentTextChanged.connect(self.onRoundedBgSettingChanged)
+        self.roundedFontCard.currentTextChanged.connect(
+            lambda _: self._onRoundedFontChanged(
+                self.roundedFontCard,
+                self.roundedCustomFontCard,
+            )
+        )
+        self.roundedCustomFontCard.textChanged.connect(
+            lambda _: self._onRoundedFontChanged(
+                self.roundedFontCard,
+                self.roundedCustomFontCard,
+            )
+        )
         self.roundedFontSizeCard.spinBox.valueChanged.connect(
             self.onRoundedBgSettingChanged
         )
@@ -790,6 +1110,20 @@ class SubtitleStyleInterface(QWidget):
 
         imported_names = sorted({font["name"] for font in imported_fonts})
         if imported_names:
+            first_imported = imported_fonts[0]["name"]
+            if self._getCurrentRenderMode() == SubtitleRenderModeEnum.ROUNDED_BG:
+                self._setFontValue(
+                    self.roundedFontCard,
+                    self.roundedCustomFontCard,
+                    first_imported,
+                )
+            else:
+                self._setFontValue(
+                    self.assPrimaryFontCard,
+                    self.assPrimaryCustomFontCard,
+                    first_imported,
+                )
+
             preview_names = "、".join(imported_names[:3])
             if len(imported_names) > 3:
                 preview_names += self.tr(" 等")
@@ -850,7 +1184,10 @@ class SubtitleStyleInterface(QWidget):
             return
 
         # 保存圆角背景配置
-        cfg.set(cfg.rounded_bg_font_name, self.roundedFontCard.comboBox.currentText())
+        cfg.set(
+            cfg.rounded_bg_font_name,
+            self._fontValue(self.roundedFontCard, self.roundedCustomFontCard),
+        )
         cfg.set(cfg.rounded_bg_font_size, self.roundedFontSizeCard.spinBox.value())
         cfg.set(
             cfg.rounded_bg_corner_radius, self.roundedCornerRadiusCard.spinBox.value()
@@ -996,14 +1333,17 @@ class SubtitleStyleInterface(QWidget):
             self.updatePreview()
 
     def generateAssStyles(self) -> str:
-        """生成 ASS 样式字符串（固定720P分辨率）"""
+        """生成以当前基准分辨率为设计尺寸的 ASS 样式字符串。"""
         style_format = "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding"
 
         # 垂直间距
         vertical_spacing = self.assVerticalSpacingCard.spinBox.value()
 
         # 主字幕样式
-        primary_font = self.assPrimaryFontCard.comboBox.currentText()
+        primary_font = self._fontValue(
+            self.assPrimaryFontCard,
+            self.assPrimaryCustomFontCard,
+        )
         primary_size = self.assPrimarySizeCard.spinBox.value()
 
         # 颜色转换为 ASS 格式 (AABBGGRR)
@@ -1015,7 +1355,10 @@ class SubtitleStyleInterface(QWidget):
         primary_outline_size = self.assPrimaryOutlineSizeCard.spinBox.value()
 
         # 副字幕样式
-        secondary_font = self.assSecondaryFontCard.comboBox.currentText()
+        secondary_font = self._fontValue(
+            self.assSecondaryFontCard,
+            self.assSecondaryCustomFontCard,
+        )
         secondary_size = self.assSecondarySizeCard.spinBox.value()
 
         secondary_color_hex = self.assSecondaryColorCard.colorPicker.color.name()
@@ -1092,15 +1435,21 @@ class SubtitleStyleInterface(QWidget):
 
         # 根据渲染模式创建不同的预览线程（不传入尺寸，由渲染层自动从图片获取）
         render_mode = self._getCurrentRenderMode()
+        reference_width, reference_height = self._currentReferenceResolution()
 
         if render_mode == SubtitleRenderModeEnum.ROUNDED_BG:
-            # 圆角背景模式（样式720P基准，由渲染层自动缩放）
+            # 圆角背景模式（样式按当前基准分辨率设计，由渲染层自动缩放）
             bg_color = self.roundedBgColorCard.colorPicker.color
             bg_color_hex = f"#{bg_color.red():02x}{bg_color.green():02x}{bg_color.blue():02x}{bg_color.alpha():02x}"
 
             style = RoundedBgStyle(
-                font_name=self.roundedFontCard.comboBox.currentText(),
+                font_name=self._fontValue(
+                    self.roundedFontCard,
+                    self.roundedCustomFontCard,
+                ),
                 font_size=self.roundedFontSizeCard.spinBox.value(),
+                reference_width=reference_width,
+                reference_height=reference_height,
                 bg_color=bg_color_hex,
                 text_color=self.roundedTextColorCard.colorPicker.color.name(),
                 corner_radius=self.roundedCornerRadiusCard.spinBox.value(),
@@ -1115,14 +1464,16 @@ class SubtitleStyleInterface(QWidget):
                 preview_text=(main_text, sub_text),
                 style=style,
                 bg_image_path=str(path),
+                reference_height=reference_height,
             )
 
-        # ASS 样式模式（样式720P基准，由渲染层自动缩放）
+        # ASS 样式模式（样式按当前基准分辨率设计，由渲染层自动缩放）
         style_str = self.generateAssStyles()
         return AssPreviewThread(
             preview_text=(main_text, sub_text),
             style_str=style_str,
             bg_image_path=str(path),
+            reference_height=reference_height,
         )
 
     def _onPreviewThreadFinished(self):
@@ -1164,6 +1515,7 @@ class SubtitleStyleInterface(QWidget):
     def closeEvent(self, event):
         """关闭界面前等待当前预览线程结束，避免运行中的 QThread 被销毁。"""
         self._preview_debounce_timer.stop()
+        self._font_warning_timer.stop()
         self._preview_request_pending = False
         if self.preview_thread is not None and self.preview_thread.isRunning():
             self.preview_thread.wait()
@@ -1198,6 +1550,7 @@ class SubtitleStyleInterface(QWidget):
         cfg.set(cfg.subtitle_style_name, style_name)
         self._loading_style = False
         self.updatePreview()
+        self._scheduleFontWarning()
 
         InfoBar.success(
             title=self.tr("成功"),
@@ -1216,7 +1569,12 @@ class SubtitleStyleInterface(QWidget):
         style = SubtitleStyle.from_file(style_path)
 
         # Primary style
-        self.assPrimaryFontCard.setCurrentText(style.font_name)
+        self._setReferenceResolution(style.reference_width, style.reference_height)
+        self._setFontValue(
+            self.assPrimaryFontCard,
+            self.assPrimaryCustomFontCard,
+            style.font_name,
+        )
         self.assPrimarySizeCard.spinBox.setValue(style.font_size)
         self.assVerticalSpacingCard.spinBox.setValue(style.margin_bottom)
         self.assPrimaryColorCard.setColor(QColor(style.primary_color))
@@ -1227,7 +1585,11 @@ class SubtitleStyleInterface(QWidget):
         # Secondary style
         sec = style.secondary
         if sec:
-            self.assSecondaryFontCard.setCurrentText(sec.font_name)
+            self._setFontValue(
+                self.assSecondaryFontCard,
+                self.assSecondaryCustomFontCard,
+                sec.font_name,
+            )
             self.assSecondarySizeCard.spinBox.setValue(sec.font_size)
             self.assSecondaryColorCard.setColor(QColor(sec.color))
             self.assSecondaryOutlineColorCard.setColor(QColor(sec.outline_color))
@@ -1239,8 +1601,17 @@ class SubtitleStyleInterface(QWidget):
         with open(style_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        self._setReferenceResolution(
+            data.get("reference_width", DEFAULT_REFERENCE_WIDTH),
+            data.get("reference_height", DEFAULT_REFERENCE_HEIGHT),
+        )
+
         if "font_name" in data:
-            self.roundedFontCard.setCurrentText(data["font_name"])
+            self._setFontValue(
+                self.roundedFontCard,
+                self.roundedCustomFontCard,
+                data["font_name"],
+            )
         if "font_size" in data:
             self.roundedFontSizeCard.spinBox.setValue(data["font_size"])
         if "text_color" in data:
@@ -1318,11 +1689,17 @@ class SubtitleStyleInterface(QWidget):
             SubtitleStyle,
             style_id_from_filename,
         )
+        reference_width, reference_height = self._currentReferenceResolution()
         style = SubtitleStyle(
             name=style_id_from_filename(style_path.name),
             mode=StyleMode.ASS,
-            font_name=self.assPrimaryFontCard.comboBox.currentText(),
+            font_name=self._fontValue(
+                self.assPrimaryFontCard,
+                self.assPrimaryCustomFontCard,
+            ),
             font_size=self.assPrimarySizeCard.spinBox.value(),
+            reference_width=reference_width,
+            reference_height=reference_height,
             primary_color=self.assPrimaryColorCard.colorPicker.color.name(),
             outline_color=self.assPrimaryOutlineColorCard.colorPicker.color.name(),
             outline_width=self.assPrimaryOutlineSizeCard.spinBox.value(),
@@ -1330,7 +1707,10 @@ class SubtitleStyleInterface(QWidget):
             spacing=self.assPrimarySpacingCard.spinBox.value(),
             margin_bottom=self.assVerticalSpacingCard.spinBox.value(),
             secondary=SecondaryStyle(
-                font_name=self.assSecondaryFontCard.comboBox.currentText(),
+                font_name=self._fontValue(
+                    self.assSecondaryFontCard,
+                    self.assSecondaryCustomFontCard,
+                ),
                 font_size=self.assSecondarySizeCard.spinBox.value(),
                 color=self.assSecondaryColorCard.colorPicker.color.name(),
                 outline_color=self.assSecondaryOutlineColorCard.colorPicker.color.name(),
@@ -1347,11 +1727,17 @@ class SubtitleStyleInterface(QWidget):
         bg_color_hex = f"#{bg_color.red():02x}{bg_color.green():02x}{bg_color.blue():02x}{bg_color.alpha():02x}"
 
         from videocaptioner.core.subtitle.style_manager import style_id_from_filename
+        reference_width, reference_height = self._currentReferenceResolution()
         data = {
             "name": style_id_from_filename(style_path.name),
             "description": "",
             "mode": "rounded",
-            "font_name": self.roundedFontCard.comboBox.currentText(),
+            "reference_width": reference_width,
+            "reference_height": reference_height,
+            "font_name": self._fontValue(
+                self.roundedFontCard,
+                self.roundedCustomFontCard,
+            ),
             "font_size": self.roundedFontSizeCard.spinBox.value(),
             "text_color": self.roundedTextColorCard.colorPicker.color.name(),
             "bg_color": bg_color_hex,

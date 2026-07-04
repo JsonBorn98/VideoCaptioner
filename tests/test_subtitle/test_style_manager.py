@@ -1,6 +1,12 @@
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import SubtitleLayoutEnum
-from videocaptioner.core.subtitle.style_manager import SecondaryStyle, SubtitleStyle
+from videocaptioner.core.subtitle.style_manager import (
+    DEFAULT_REFERENCE_HEIGHT,
+    DEFAULT_REFERENCE_WIDTH,
+    SecondaryStyle,
+    StyleMode,
+    SubtitleStyle,
+)
 
 
 def _style_field_counts(ass_text: str) -> tuple[int, list[int]]:
@@ -57,3 +63,67 @@ def test_asr_data_to_ass_places_wrap_style_in_script_info():
     assert "WrapStyle: 1" in ass_text.split("[V4+ Styles]", 1)[0]
     assert format_count == 23
     assert style_counts == [format_count, format_count]
+
+
+def test_ass_style_defaults_reference_resolution_for_legacy_json():
+    style = SubtitleStyle.from_json(
+        {
+            "name": "legacy",
+            "mode": "ass",
+            "font_name": "Arial",
+            "font_size": 40,
+        }
+    )
+
+    assert style.reference_width == DEFAULT_REFERENCE_WIDTH
+    assert style.reference_height == DEFAULT_REFERENCE_HEIGHT
+
+
+def test_ass_style_serializes_reference_resolution():
+    style = SubtitleStyle(
+        name="hd",
+        mode=StyleMode.ASS,
+        reference_width=1920,
+        reference_height=1080,
+    )
+
+    data = style.to_json_dict()
+
+    assert data["reference_width"] == 1920
+    assert data["reference_height"] == 1080
+
+
+def test_rounded_style_serializes_and_loads_reference_resolution():
+    style = SubtitleStyle.from_json(
+        {
+            "name": "rounded-hd",
+            "mode": "rounded",
+            "reference_width": 2560,
+            "reference_height": 1440,
+            "font_name": "Noto Sans SC",
+            "font_size": 28,
+        }
+    )
+
+    data = style.to_json_dict()
+    rounded = style.to_rounded_dict()
+
+    assert style.reference_width == 2560
+    assert style.reference_height == 1440
+    assert data["reference_width"] == 2560
+    assert data["reference_height"] == 1440
+    assert rounded["reference_width"] == 2560
+    assert rounded["reference_height"] == 1440
+
+
+def test_reference_resolution_is_clamped_when_loading_json():
+    style = SubtitleStyle.from_json(
+        {
+            "mode": "ass",
+            "reference_width": 1,
+            "reference_height": 0,
+        }
+    )
+
+    assert style.reference_width == 320
+    assert style.reference_height == 180

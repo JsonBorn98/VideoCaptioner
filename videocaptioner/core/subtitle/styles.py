@@ -11,6 +11,8 @@ class RoundedBgStyle:
 
     font_name: str = ""
     font_size: int = 52
+    reference_width: int = 1280
+    reference_height: int = 720
 
     # 颜色配置（支持 hex 格式，如 #RRGGBB 或 #RRGGBBAA）
     bg_color: str = "#191919C8"  # 背景颜色

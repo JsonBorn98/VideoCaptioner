@@ -21,6 +21,17 @@ if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
 
 logger = setup_logger("subtitle.rounded")
+ReferenceHeight = int | float | str | None
+
+
+def _normalize_reference_height(reference_height: ReferenceHeight) -> int:
+    """Keep reference-height based scaling from dividing by zero."""
+    if reference_height is None:
+        return 720
+    try:
+        return max(1, int(reference_height))
+    except (TypeError, ValueError):
+        return 720
 
 
 def _get_video_info(video_path: str) -> Tuple[int, int, float]:
@@ -90,8 +101,8 @@ def render_text_block(
         line_sizes.append((text_width, bbox[3] - bbox[1]))
         line_offsets.append(bbox[1])  # 记录垂直偏移，用于居中对齐
 
-    max_width = max(w for w, h in line_sizes)
-    line_height = max(h for w, h in line_sizes)
+    max_width = max(line_width for line_width, _ in line_sizes)
+    line_height = max(line_height for _, line_height in line_sizes)
     total_height = line_height * len(texts) + style.line_spacing * (len(texts) - 1)
 
     # 绘制共享背景
@@ -109,8 +120,8 @@ def render_text_block(
     # 绘制文本（补偿字体垂直偏移）
     y = bg_top + style.padding_v
     for i, text in enumerate(texts):
-        w, h = line_sizes[i]
-        x = center_x - w // 2
+        line_width, _ = line_sizes[i]
+        x = center_x - line_width // 2
         y_offset = line_offsets[i]
         text_y = y - y_offset  # 补偿垂直偏移，使文本视觉居中
 
@@ -204,7 +215,7 @@ def render_preview(
     height: Optional[int] = None,
     style: Optional[RoundedBgStyle] = None,
     bg_image_path: Optional[str] = None,
-    reference_height: int = 720,
+    reference_height: Optional[int] = None,
 ) -> str:
     """
     渲染圆角背景字幕预览图
@@ -214,9 +225,9 @@ def render_preview(
         secondary_text: 副字幕文本
         width: 图片宽度（None=从bg_image_path自动获取）
         height: 图片高度（None=从bg_image_path自动获取）
-        style: 圆角背景样式（包含reference_height，会根据height自动缩放）
+        style: 圆角背景样式
         bg_image_path: 背景图片路径
-        reference_height: 参考高度（固定720P）
+        reference_height: 样式设计基准高度，None 时使用 style.reference_height
     Returns:
         生成的预览图路径
     """
@@ -240,7 +251,10 @@ def render_preview(
     # 确保 width 和 height 不为 None（类型收窄）
     assert width is not None and height is not None
 
-    # 从样式中获取参考高度，根据图片高度自动缩放样式
+    # 根据图片高度和样式基准高度自动缩放样式
+    if reference_height is None:
+        reference_height = style.reference_height
+    reference_height = _normalize_reference_height(reference_height)
     scale_factor = height / reference_height
 
     if scale_factor != 1.0:
@@ -291,7 +305,7 @@ def render_rounded_video(
         crf: 视频质量参数
         preset: FFmpeg编码预设
         progress_callback: 进度回调 (progress: int, message: str)
-        reference_height: 参考高度（固定720P）
+        reference_height: 样式设计基准高度
     """
     # 检查字幕数据
     if not asr_data or not asr_data.segments:
@@ -318,10 +332,13 @@ def render_rounded_video(
     width, height, video_duration = _get_video_info(video_path)
 
     # 构建并缩放样式
-    style_config = rounded_style or {}
+    style_config = dict(rounded_style or {})
+    if "reference_height" in style_config:
+        reference_height = style_config["reference_height"]
     style_config["layout"] = layout
     style = RoundedBgStyle(**style_config)
 
+    reference_height = _normalize_reference_height(reference_height)
     scale_factor = height / reference_height
     if scale_factor != 1.0:
         style = replace(

@@ -1,7 +1,9 @@
 """Font discovery and loading utilities"""
 
 import filecmp
+import os
 import shutil
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union
@@ -16,6 +18,8 @@ FontType = Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]
 SUPPORTED_FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".otc"}
 
 logger = setup_logger("subtitle.font")
+_warned_unloadable_fonts: set[str] = set()
+_warned_default_fallback = False
 
 
 def is_supported_font_file(font_path: Path) -> bool:
@@ -41,33 +45,201 @@ def iter_font_files(font_dir: Optional[Path] = None) -> tuple[Path, ...]:
     )
 
 
-def _extract_font_family_name(font: TTFont) -> Optional[str]:
-    """Extract family name from a loaded font face."""
+def _system_font_dirs() -> tuple[Path, ...]:
+    font_dirs: list[Path] = []
+
+    windir = os.environ.get("WINDIR")
+    if windir:
+        font_dirs.append(Path(windir) / "Fonts")
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        font_dirs.append(Path(local_app_data) / "Microsoft" / "Windows" / "Fonts")
+
+    home = Path.home()
+    font_dirs.extend(
+        [
+            home / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts",
+            home / "Library" / "Fonts",
+            Path("/Library/Fonts"),
+            Path("/System/Library/Fonts"),
+            home / ".fonts",
+            home / ".local" / "share" / "fonts",
+            Path("/usr/share/fonts"),
+            Path("/usr/local/share/fonts"),
+        ]
+    )
+
+    seen_dirs: set[str] = set()
+    unique_dirs: list[Path] = []
+    for font_dir in font_dirs:
+        try:
+            dir_key = str(font_dir.resolve()).lower()
+        except OSError:
+            dir_key = str(font_dir).lower()
+        if dir_key in seen_dirs:
+            continue
+        seen_dirs.add(dir_key)
+        unique_dirs.append(font_dir)
+
+    return tuple(unique_dirs)
+
+
+def _iter_existing_font_files(font_dirs: Iterable[Path]) -> tuple[Path, ...]:
+    """List supported font files from existing directories."""
+    font_files: list[Path] = []
+    seen_paths: set[str] = set()
+    for font_dir in font_dirs:
+        if not font_dir.exists():
+            continue
+
+        try:
+            candidates = font_dir.rglob("*")
+            for font_file in candidates:
+                if not font_file.is_file() or not is_supported_font_file(font_file):
+                    continue
+
+                path_key = str(font_file.resolve()).lower()
+                if path_key in seen_paths:
+                    continue
+
+                seen_paths.add(path_key)
+                font_files.append(font_file)
+        except OSError as e:
+            logger.debug(f"Failed to scan system font directory {font_dir}: {e}")
+
+    return tuple(sorted(font_files, key=lambda p: str(p).lower()))
+
+
+def _dedupe_font_file_paths(font_files: Iterable[Path]) -> tuple[Path, ...]:
+    unique_files: list[Path] = []
+    seen_paths: set[str] = set()
+    for font_file in font_files:
+        try:
+            path_key = str(font_file.resolve()).casefold()
+        except OSError:
+            path_key = str(font_file).casefold()
+        if path_key in seen_paths:
+            continue
+
+        seen_paths.add(path_key)
+        unique_files.append(font_file)
+
+    return tuple(unique_files)
+
+
+def iter_system_font_files() -> tuple[Path, ...]:
+    """List supported font files from common system font directories."""
+    return _iter_existing_font_files(_system_font_dirs())
+
+
+def _normalized_font_name(font_name: str) -> str:
+    return " ".join(font_name.casefold().split())
+
+
+def _compact_font_name(font_name: str) -> str:
+    return "".join(ch for ch in font_name.casefold() if ch.isalnum())
+
+
+def _dedupe_font_names(font_names: Iterable[str]) -> list[str]:
+    names: list[str] = []
+    seen_names: set[str] = set()
+    for font_name in font_names:
+        name = font_name.split(",")[0].strip()
+        if not name:
+            continue
+
+        name_key = _normalized_font_name(name)
+        if name_key in seen_names:
+            continue
+
+        seen_names.add(name_key)
+        names.append(name)
+    return names
+
+
+def _extract_font_names(font: TTFont, name_ids: Iterable[int]) -> list[str]:
+    """Extract unique names from a font name table, preferring Windows records."""
     name_table = font.get("name")
     if not name_table:
-        return None
+        return []
 
-    # nameID 16: Typographic Family (preferred)
-    # nameID 1: Font Family (fallback)
-    for name_id in [16, 1]:
-        for record in name_table.names:
-            if record.nameID == name_id and record.platformID == 3:
+    names: list[str] = []
+    requested_ids = list(name_ids)
+    for name_id in requested_ids:
+        for prefer_windows in [True, False]:
+            for record in name_table.names:
+                if record.nameID != name_id:
+                    continue
+                if prefer_windows and record.platformID != 3:
+                    continue
+                if not prefer_windows and record.platformID == 3:
+                    continue
                 try:
-                    family_name = record.toUnicode()
-                    return family_name.split(",")[0].strip()
+                    names.append(record.toUnicode())
                 except Exception:
                     continue
 
-    for name_id in [16, 1]:
-        for record in name_table.names:
-            if record.nameID == name_id:
-                try:
-                    family_name = record.toUnicode()
-                    return family_name.split(",")[0].strip()
-                except Exception:
-                    continue
+    return _dedupe_font_names(names)
 
-    return None
+
+def _is_regular_font_style(style_names: Iterable[str]) -> bool:
+    names = [_normalized_font_name(name) for name in style_names if name.strip()]
+    if not names:
+        return True
+
+    non_regular_tokens = (
+        "bold",
+        "italic",
+        "oblique",
+        "light",
+        "medium",
+        "semilight",
+        "semi light",
+        "semibold",
+        "semi bold",
+        "black",
+        "heavy",
+        "thin",
+        "condensed",
+        "expanded",
+        "narrow",
+        "demi",
+        "粗",
+        "斜",
+        "细",
+        "中",
+        "窄",
+    )
+    if any(token in name for name in names for token in non_regular_tokens):
+        return False
+
+    regular_names = {"regular", "normal", "book", "roman", "常规", "标准"}
+    return any(name in regular_names for name in names)
+
+
+def _extract_font_face_names(font: TTFont) -> list[str]:
+    family_names = _extract_font_names(font, [16, 1])
+    full_names = _extract_font_names(font, [4])
+    postscript_names = _extract_font_names(font, [6])
+    style_names = _extract_font_names(font, [17]) or _extract_font_names(font, [2])
+
+    if not family_names and not full_names and not postscript_names:
+        return []
+
+    primary_name = (family_names or full_names or postscript_names)[0]
+    if not _is_regular_font_style(style_names) and full_names:
+        primary_name = full_names[0]
+
+    return _dedupe_font_names(
+        [primary_name, *family_names, *full_names, *postscript_names]
+    )
+
+
+def _extract_font_family_name(font: TTFont) -> Optional[str]:
+    """Extract family name from a loaded font face."""
+    names = _extract_font_face_names(font)
+    return names[0] if names else None
 
 
 def _get_font_family_name(font_path: Path, font_index: int = 0) -> Optional[str]:
@@ -92,13 +264,14 @@ def _get_font_faces(font_path: Path) -> list[Dict[str, str]]:
         try:
             collection = TTCollection(str(font_path))
             for index, font in enumerate(collection.fonts):
-                family_name = _extract_font_family_name(font)
-                if family_name:
+                font_names = _extract_font_face_names(font)
+                if font_names:
                     faces.append(
                         {
-                            "name": family_name,
+                            "name": font_names[0],
                             "path": str(font_path),
                             "index": str(index),
+                            "aliases": "\n".join(font_names),
                         }
                     )
         except Exception as e:
@@ -109,10 +282,268 @@ def _get_font_faces(font_path: Path) -> list[Dict[str, str]]:
                     font.close()
         return faces
 
-    family_name = _get_font_family_name(font_path)
-    if family_name:
-        faces.append({"name": family_name, "path": str(font_path), "index": "0"})
+    try:
+        font = TTFont(str(font_path))
+        try:
+            font_names = _extract_font_face_names(font)
+        finally:
+            font.close()
+    except Exception as e:
+        logger.debug(f"Failed to parse font {font_path.name}: {e}")
+        font_names = []
+
+    if font_names:
+        faces.append(
+            {
+                "name": font_names[0],
+                "path": str(font_path),
+                "index": "0",
+                "aliases": "\n".join(font_names),
+            }
+        )
     return faces
+
+
+def _load_font_face(face: Dict[str, str], size: int) -> FontType:
+    return ImageFont.truetype(
+        face["path"],
+        size,
+        index=int(face.get("index", "0")),
+    )
+
+
+def _font_face_names(face: Dict[str, str]) -> tuple[str, ...]:
+    return tuple(_dedupe_font_names([face["name"], *face.get("aliases", "").splitlines()]))
+
+
+def _font_face_matches_name(face: Dict[str, str], font_name: str) -> bool:
+    expected_name = _normalized_font_name(font_name)
+    return any(_normalized_font_name(name) == expected_name for name in _font_face_names(face))
+
+
+def _find_font_face(
+    font_name: str,
+    font_faces: Iterable[Dict[str, str]],
+) -> Optional[Dict[str, str]]:
+    for font_face in font_faces:
+        if _font_face_matches_name(font_face, font_name):
+            return font_face
+    return None
+
+
+def _clean_windows_registry_font_name(font_name: str) -> str:
+    for suffix in [
+        "(truetype)",
+        "(opentype)",
+        "(true type)",
+        "(open type)",
+        "truetype",
+        "opentype",
+    ]:
+        if font_name.casefold().endswith(suffix):
+            font_name = font_name[: -len(suffix)]
+            break
+    return font_name.strip()
+
+
+def _resolve_windows_font_path(font_file_name: str) -> Optional[Path]:
+    font_path = Path(font_file_name)
+    if font_path.is_absolute() and font_path.is_file():
+        return font_path
+
+    for font_dir in _system_font_dirs():
+        candidate = font_dir / font_file_name
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
+def _font_registry_name_matches(registry_name: str, font_name: str) -> bool:
+    registry_name = _clean_windows_registry_font_name(registry_name)
+    return (
+        _normalized_font_name(registry_name) == _normalized_font_name(font_name)
+        or _compact_font_name(registry_name) == _compact_font_name(font_name)
+    )
+
+
+@lru_cache(maxsize=1)
+def _get_windows_registry_font_entries() -> tuple[tuple[str, Path], ...]:
+    if sys.platform != "win32":
+        return ()
+
+    try:
+        import winreg
+    except ImportError:
+        return ()
+
+    registry_roots = [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]
+    registry_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+    font_entries: list[tuple[str, Path]] = []
+    seen_entries: set[tuple[str, str]] = set()
+
+    for root in registry_roots:
+        try:
+            key = winreg.OpenKey(root, registry_path)
+        except OSError:
+            continue
+
+        with key:
+            value_count = winreg.QueryInfoKey(key)[1]
+            for index in range(value_count):
+                try:
+                    registry_name, font_file_name, _ = winreg.EnumValue(key, index)
+                except OSError:
+                    continue
+
+                font_path = _resolve_windows_font_path(str(font_file_name))
+                if font_path is None or not is_supported_font_file(font_path):
+                    continue
+
+                clean_name = _clean_windows_registry_font_name(registry_name)
+                entry_key = (clean_name.casefold(), str(font_path).casefold())
+                if entry_key in seen_entries:
+                    continue
+
+                seen_entries.add(entry_key)
+                font_entries.append((clean_name, font_path))
+
+    return tuple(font_entries)
+
+
+@lru_cache(maxsize=1)
+def _get_windows_registry_font_file_paths() -> tuple[Path, ...]:
+    font_files: list[Path] = []
+    seen_paths: set[str] = set()
+    for _, font_path in _get_windows_registry_font_entries():
+        path_key = str(font_path).casefold()
+        if path_key in seen_paths:
+            continue
+
+        seen_paths.add(path_key)
+        font_files.append(font_path)
+
+    return tuple(font_files)
+
+
+@lru_cache(maxsize=128)
+def _get_windows_registry_font_files(font_name: str) -> tuple[Path, ...]:
+    font_files: list[Path] = []
+    seen_paths: set[str] = set()
+    for registry_name, font_path in _get_windows_registry_font_entries():
+        if not _font_registry_name_matches(registry_name, font_name):
+            continue
+
+        path_key = str(font_path).casefold()
+        if path_key in seen_paths:
+            continue
+
+        seen_paths.add(path_key)
+        font_files.append(font_path)
+
+    return tuple(font_files)
+
+
+def _font_file_name_matches(font_path: Path, font_name: str) -> bool:
+    target_name = _compact_font_name(font_name)
+    file_name = _compact_font_name(font_path.stem)
+    return len(target_name) >= 4 and (
+        target_name in file_name or file_name in target_name
+    )
+
+
+def _may_need_localized_name_scan(font_name: str) -> bool:
+    return any(ord(char) > 127 for char in font_name)
+
+
+def _localized_name_scan_font_dirs() -> tuple[Path, ...]:
+    local_dirs: list[Path] = [FONTS_PATH]
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        local_dirs.append(Path(local_app_data) / "Microsoft" / "Windows" / "Fonts")
+
+    home = Path.home()
+    local_dirs.extend(
+        [
+            home / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts",
+            home / "Library" / "Fonts",
+            home / ".fonts",
+            home / ".local" / "share" / "fonts",
+        ]
+    )
+
+    return _dedupe_font_file_paths(local_dirs)
+
+
+def _iter_localized_name_scan_font_files() -> Iterable[Path]:
+    seen_paths: set[str] = set()
+    font_file_groups = [
+        lambda: _iter_existing_font_files(_localized_name_scan_font_dirs()),
+        _get_windows_registry_font_file_paths,
+        iter_system_font_files,
+    ]
+
+    for font_file_group in font_file_groups:
+        for font_file in font_file_group():
+            try:
+                path_key = str(font_file.resolve()).casefold()
+            except OSError:
+                path_key = str(font_file).casefold()
+            if path_key in seen_paths:
+                continue
+
+            seen_paths.add(path_key)
+            yield font_file
+
+
+@lru_cache(maxsize=128)
+def _get_system_font_files_for_name(font_name: str) -> tuple[Path, ...]:
+    """Return likely system font files for one font name without parsing all fonts."""
+    registry_matches = _get_windows_registry_font_files(font_name)
+    if registry_matches:
+        return registry_matches
+
+    matches = []
+    seen_paths: set[str] = set()
+    for font_dir in _system_font_dirs():
+        if not font_dir.exists():
+            continue
+
+        try:
+            candidates = font_dir.rglob("*")
+            for font_file in candidates:
+                if not font_file.is_file() or not is_supported_font_file(font_file):
+                    continue
+                if not _font_file_name_matches(font_file, font_name):
+                    continue
+
+                path_key = str(font_file.resolve()).casefold()
+                if path_key in seen_paths:
+                    continue
+
+                seen_paths.add(path_key)
+                matches.append(font_file)
+        except OSError as e:
+            logger.debug(f"Failed to search system font directory {font_dir}: {e}")
+
+    return tuple(matches)
+
+
+@lru_cache(maxsize=128)
+def _resolve_system_font_face(font_name: str) -> Optional[Dict[str, str]]:
+    for font_file in _get_system_font_files_for_name(font_name):
+        for face in _get_font_faces(font_file):
+            if _font_face_matches_name(face, font_name):
+                return face
+
+    if _may_need_localized_name_scan(font_name):
+        for font_file in _iter_localized_name_scan_font_files():
+            for face in _get_font_faces(font_file):
+                if _font_face_matches_name(face, font_name):
+                    return face
+
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -137,6 +568,66 @@ def get_builtin_fonts() -> tuple[Dict[str, str], ...]:
             logger.debug(f"Built-in font: {font_file.name} -> {face['name']}")
 
     return tuple(builtin_fonts)
+
+
+@lru_cache(maxsize=1)
+def get_system_fonts() -> tuple[Dict[str, str], ...]:
+    """Get system fonts by parsing installed font files."""
+    system_fonts = []
+    seen_names = set()
+
+    for font_file in iter_system_font_files():
+        for face in _get_font_faces(font_file):
+            if face["name"].startswith("."):
+                continue
+
+            name_key = _normalized_font_name(face["name"])
+            if name_key in seen_names:
+                continue
+
+            seen_names.add(name_key)
+            system_fonts.append(face)
+            logger.debug(f"System font: {font_file.name} -> {face['name']}")
+
+    return tuple(sorted(system_fonts, key=lambda face: face["name"].casefold()))
+
+
+@lru_cache(maxsize=128)
+def is_font_loadable(font_name: str) -> bool:
+    """Return whether a font name can be loaded without falling back."""
+    font_name = font_name.strip()
+    if not font_name:
+        return False
+
+    for font_face in [
+        _find_font_face(font_name, get_builtin_fonts()),
+        _resolve_system_font_face(font_name),
+    ]:
+        if font_face is not None:
+            try:
+                _load_font_face(font_face, 12)
+                return True
+            except Exception:
+                return False
+
+    try:
+        ImageFont.truetype(font_name, 12)
+        return True
+    except (OSError, IOError):
+        return False
+
+
+def _warn_unloadable_font_once(font_name: str) -> None:
+    if font_name not in _warned_unloadable_fonts:
+        logger.warning(f"Cannot load font '{font_name}', using fallback")
+        _warned_unloadable_fonts.add(font_name)
+
+
+def _warn_default_fallback_once() -> None:
+    global _warned_default_fallback
+    if not _warned_default_fallback:
+        logger.warning("All fallback fonts failed, using default")
+        _warned_default_fallback = True
 
 
 def _same_file_content(source: Path, destination: Path) -> bool:
@@ -204,40 +695,45 @@ def import_font_files(
 def get_font(size: int, font_name: str = "") -> FontType:
     """Get font object (built-in fonts first, then system fonts)"""
     if font_name:
-        builtin_fonts = get_builtin_fonts()
-        for builtin in builtin_fonts:
-            if builtin["name"] == font_name:
-                try:
-                    font = ImageFont.truetype(
-                        builtin["path"],
-                        size,
-                        index=int(builtin.get("index", "0")),
-                    )
-                    logger.debug(f"Loaded built-in font: '{font_name}'")
-                    return font
-                except Exception as e:
-                    logger.warning(f"Failed to load built-in font: {e}")
-                    break
+        for source_name, font_face in [
+            ("built-in", _find_font_face(font_name, get_builtin_fonts())),
+            ("system", _resolve_system_font_face(font_name)),
+        ]:
+            if font_face is None:
+                continue
+            try:
+                font = _load_font_face(font_face, size)
+                logger.debug(
+                    f"Loaded {source_name} font: '{font_name}' from {font_face['path']}"
+                )
+                return font
+            except Exception as e:
+                logger.warning(f"Failed to load {source_name} font: {e}")
 
         try:
             font = ImageFont.truetype(font_name, size)
             logger.debug(f"Loaded system font: '{font_name}'")
             return font
         except (OSError, IOError):
-            logger.warning(f"Cannot load font '{font_name}', using fallback")
+            _warn_unloadable_font_once(font_name)
 
-    fallback_fonts = [f["name"] for f in get_builtin_fonts()]
-    fallback_fonts.extend(
-        [
-            "PingFang SC",
-            "Hiragino Sans GB",
-            "Microsoft YaHei",
-            "SimHei",
-            "Arial Unicode MS",
-            "Arial",
-            "Helvetica",
-        ]
-    )
+    for builtin in get_builtin_fonts():
+        try:
+            font = _load_font_face(builtin, size)
+            logger.debug(f"Using built-in fallback font: '{builtin['name']}'")
+            return font
+        except Exception:
+            continue
+
+    fallback_fonts = [
+        "PingFang SC",
+        "Hiragino Sans GB",
+        "Microsoft YaHei",
+        "SimHei",
+        "Arial Unicode MS",
+        "Arial",
+        "Helvetica",
+    ]
 
     for fallback in fallback_fonts:
         try:
@@ -247,7 +743,7 @@ def get_font(size: int, font_name: str = "") -> FontType:
         except Exception:
             continue
 
-    logger.warning("All fallback fonts failed, using default")
+    _warn_default_fallback_once()
     return ImageFont.load_default()
 
 
@@ -265,17 +761,21 @@ def get_ass_to_pil_ratio(font_name: str) -> float:
     Returns:
         Conversion ratio (typically 1.4-1.5 for CJK fonts)
     """
+    font_face = _find_font_face(font_name, get_builtin_fonts()) or _resolve_system_font_face(
+        font_name
+    )
     font_path = None
     font_index = 0
-    for builtin in get_builtin_fonts():
-        if builtin["name"] == font_name:
-            font_path = Path(builtin["path"])
-            font_index = int(builtin.get("index", "0"))
-            break
+    if font_face is not None:
+        font_path = Path(font_face["path"])
+        font_index = int(font_face.get("index", "0"))
 
     if not font_path:
         candidates = [
-            font_file for font_file in iter_font_files() if font_name in font_file.stem
+            font_file
+            for font_file in (*iter_font_files(), *iter_system_font_files())
+            if _normalized_font_name(font_name)
+            in _normalized_font_name(font_file.stem)
         ]
         if candidates:
             font_path = candidates[0]
@@ -303,7 +803,22 @@ def get_ass_to_pil_ratio(font_name: str) -> float:
 
 def clear_font_cache():
     """Clear font cache"""
-    get_builtin_fonts.cache_clear()
-    get_font.cache_clear()
-    get_ass_to_pil_ratio.cache_clear()
+    global _warned_default_fallback
+    for cached_func in [
+        get_builtin_fonts,
+        get_system_fonts,
+        _get_windows_registry_font_entries,
+        _get_windows_registry_font_file_paths,
+        _get_windows_registry_font_files,
+        _get_system_font_files_for_name,
+        _resolve_system_font_face,
+        is_font_loadable,
+        get_font,
+        get_ass_to_pil_ratio,
+    ]:
+        cache_clear = getattr(cached_func, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+    _warned_unloadable_fonts.clear()
+    _warned_default_fallback = False
     logger.debug("Font cache cleared")
