@@ -1028,8 +1028,8 @@ class SubtitleStyleInterface(QWidget):
         secondary_outline_size = self.assSecondaryOutlineSizeCard.spinBox.value()
 
         # 生成样式字符串
-        primary_style = f"Style: Default,{primary_font},{primary_size},{primary_color},&H000000FF,{primary_outline_color},&H00000000,-1,0,0,0,100,100,{primary_spacing},0,1,{primary_outline_size},0,2,10,10,{vertical_spacing},1,\\q1"
-        secondary_style = f"Style: Secondary,{secondary_font},{secondary_size},{secondary_color},&H000000FF,{secondary_outline_color},&H00000000,-1,0,0,0,100,100,{secondary_spacing},0,1,{secondary_outline_size},0,2,10,10,{vertical_spacing},1,\\q1"
+        primary_style = f"Style: Default,{primary_font},{primary_size},{primary_color},&H000000FF,{primary_outline_color},&H00000000,-1,0,0,0,100,100,{primary_spacing},0,1,{primary_outline_size},0,2,10,10,{vertical_spacing},1"
+        secondary_style = f"Style: Secondary,{secondary_font},{secondary_size},{secondary_color},&H000000FF,{secondary_outline_color},&H00000000,-1,0,0,0,100,100,{secondary_spacing},0,1,{secondary_outline_size},0,2,10,10,{vertical_spacing},1"
 
         return f"[V4+ Styles]\n{style_format}\n{primary_style}\n{secondary_style}"
 

@@ -72,7 +72,7 @@ class SubtitleStyle:
     # ------------------------------------------------------------------ #
 
     def to_ass_string(self) -> str:
-        """Render as ASS V4+ Styles section (for FFmpeg)."""
+        """Render as a valid ASS V4+ Styles section."""
         primary = _hex_to_ass(self.primary_color)
         outline = _hex_to_ass(self.outline_color)
         bold_flag = -1 if self.bold else 0
@@ -95,13 +95,13 @@ class SubtitleStyle:
             f"Style: Default,{self.font_name},{self.font_size},"
             f"{primary},&H000000FF,{outline},&H00000000,"
             f"{bold_flag},0,0,0,100,100,{self.spacing},0,1,"
-            f"{self.outline_width},0,2,10,10,{self.margin_bottom},1,\\q1"
+            f"{self.outline_width},0,2,10,10,{self.margin_bottom},1"
         )
         secondary_line = (
             f"Style: Secondary,{sec.font_name},{sec.font_size},"
             f"{sec_color},&H000000FF,{sec_outline},&H00000000,"
             f"{bold_flag},0,0,0,100,100,{sec.spacing},0,1,"
-            f"{sec.outline_width},0,2,10,10,{self.margin_bottom},1,\\q1"
+            f"{sec.outline_width},0,2,10,10,{self.margin_bottom},1"
         )
         return f"{header}\n{default_line}\n{secondary_line}"
 
