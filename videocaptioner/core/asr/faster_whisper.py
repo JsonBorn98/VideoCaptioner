@@ -199,7 +199,9 @@ class FasterWhisperASR(BaseASR):
 
         return cmd
 
-    def _make_segments(self, resp_data: str) -> List[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: str, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
         asr_data = ASRData.from_srt(resp_data)
 
         # 幻觉文本关键词列表

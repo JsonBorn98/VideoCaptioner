@@ -16,6 +16,33 @@ from .asr_data import ASRData, ASRDataSeg
 logger = setup_logger("asr")
 
 
+class ASRResultDegradedError(RuntimeError):
+    """ASR returned an anomalous or degraded result.
+
+    Raised by MiMoASR (hallucinated transcript or low alignment coverage) so
+    that ChunkedASR can intercept it and retry with smaller audio sub-chunks.
+    When retries are exhausted, ``_allow_degraded=True`` is forwarded to let
+    the backend fall back to estimated cue timings instead of raising.
+
+    Attributes:
+        reason: Short human-readable description of the anomaly.
+        text_density: Word/char count per second, when known.
+        coverage: Alignment coverage ratio (0..1), when known.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        text_density: float | None = None,
+        coverage: float | None = None,
+    ):
+        self.reason = reason
+        self.text_density = text_density
+        self.coverage = coverage
+        super().__init__(reason)
+
+
 class BaseASR:
     """Base class for ASR (Automatic Speech Recognition) implementations.
 
@@ -128,8 +155,9 @@ class BaseASR:
             time.perf_counter() - step_started,
         )
 
+        allow_degraded = bool(kwargs.get("_allow_degraded", False))
         step_started = time.perf_counter()
-        segments = self._make_segments(resp_data)
+        segments = self._make_segments(resp_data, _allow_degraded=allow_degraded)
         logger.info(
             "ASR backend 响应解析完成: class=%s, elapsed=%.2fs, segments=%s",
             self.__class__.__name__,
@@ -139,7 +167,13 @@ class BaseASR:
 
         # Cache only after the raw response can be converted successfully.
         # This avoids persisting partial API results when post-processing fails.
-        if self._should_cache_response(resp_data, segments):
+        # Also respect self.use_cache so retry paths (which set use_cache=False)
+        # never write degraded/partial results into the cache.
+        if (
+            self.use_cache
+            and is_cache_enabled()
+            and self._should_cache_response(resp_data, segments)
+        ):
             self._cache.set(cache_key, resp_data, expire=86400 * 2)
         logger.info(
             "ASR backend 完成: class=%s, total=%.2fs, segments=%s",
@@ -164,11 +198,15 @@ class BaseASR:
         """
         return self.crc32_hex
 
-    def _make_segments(self, resp_data: dict) -> list[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> list[ASRDataSeg]:
         """Convert ASR response to segment list.
 
         Args:
             resp_data: Raw response from ASR service
+            _allow_degraded: When True, fall back to estimated timings instead
+                of raising ASRResultDegradedError on anomalous results.
 
         Returns:
             List of ASRDataSeg objects

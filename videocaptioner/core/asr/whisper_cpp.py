@@ -68,7 +68,9 @@ class WhisperCppASR(BaseASR):
 
         self.process = None
 
-    def _make_segments(self, resp_data: str) -> List[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: str, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
         asr_data = ASRData.from_srt(resp_data)
         # 过滤掉纯音乐标记
         filtered_segments = []

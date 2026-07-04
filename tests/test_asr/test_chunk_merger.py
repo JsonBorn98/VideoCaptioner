@@ -464,6 +464,43 @@ class TestWordLevelMerging:
         assert "quick" in actual
         assert "over" in actual
 
+    def test_english_word_level_punctuation_and_case_drift(self, merger):
+        """英文词级：两次识别的标点/大小写漂移不应破坏精确匹配
+
+        MiMo 对同一段重叠音频的两次转录经常只在标点和大小写上不同
+        （"So," vs "so"）；归一化匹配后仍应找到对齐，而不是退化为
+        时间边界切分（后者会导致重叠内容重复或丢失）。
+        """
+        chunk1 = ASRData(
+            create_word_level_segments(
+                "we said okay, So, that's what I want here.",
+                start_time=0,
+                is_chinese=False,
+            )
+        )
+
+        # 第二次识别：同样的词，但每个重叠词的标点/大小写都不同
+        chunk2 = ASRData(
+            create_word_level_segments(
+                'okay so, That\'s What, "I" want, here and then some',
+                start_time=600,
+                is_chinese=False,
+            )
+        )
+
+        result = merger.merge_chunks(
+            chunks=[chunk1, chunk2],
+            chunk_offsets=[0, 600],
+            overlap_duration=2500,
+        )
+
+        actual = " ".join(s.text for s in result.segments).lower()
+        assert "we" in actual
+        assert "some" in actual
+        # 找到了文本对齐 → 重叠区域内容不重复也不丢失
+        assert actual.count("okay") == 1
+        assert actual.count("want") == 1
+
 
 # ============================================================================
 # Mixed Chinese-English (中英混合场景)

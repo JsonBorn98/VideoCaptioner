@@ -13,8 +13,8 @@ from typing import Callable, List, Optional, Tuple
 from pydub import AudioSegment
 
 from ..utils.logger import setup_logger
-from .asr_data import ASRData
-from .base import BaseASR
+from .asr_data import ASRData, ASRDataSeg
+from .base import ASRResultDegradedError, BaseASR
 from .chunk_merger import ChunkMerger
 
 logger = setup_logger("chunked_asr")
@@ -24,6 +24,12 @@ MS_PER_SECOND = 1000
 DEFAULT_CHUNK_LENGTH_SEC = 60 * 10  # 10 minutes
 DEFAULT_CHUNK_OVERLAP_SEC = 10  # 10秒重叠
 DEFAULT_CHUNK_CONCURRENCY = 3  # 3个并发
+
+# 分层重试: ASR 返回异常文本或对齐覆盖率过低时，先同块重试，再拆子块。
+# 第 1 次重试: 同块重新请求（防偶发网关问题）。
+# 第 2、3 次重试: 拆成 2/3 个等长子块分别转录，子块更短更稳定。
+# 3 次仍失败: 以 _allow_degraded=True 降级为估算时间戳。
+SUBCHUNK_SPLITS = (2, 3)
 
 
 class ChunkedASR:
@@ -104,12 +110,18 @@ class ChunkedASR:
             time.perf_counter() - step_started,
         )
 
-        # 2. 如果只有一块，直接创建单个 ASR 实例转录
+        # 2. 如果只有一块，仍走重试逻辑（单 chunk 无需 ChunkMerger）
         if len(chunks) == 1:
             logger.debug("Audio shorter than chunk length, direct transcription")
-            single_asr = self.asr_class(self.audio_path, **self.asr_kwargs)
+            chunk_bytes, _ = chunks[0]
             step_started = time.perf_counter()
-            result = single_asr.run(callback)
+            result = self._transcribe_with_retry(
+                idx=0,
+                total_chunks=1,
+                chunk_bytes=chunk_bytes,
+                offset_ms=0,
+                callback=callback,
+            )
             logger.info(
                 "单块 ASR 完成: asr=%s, elapsed=%.2fs, total=%.2fs, segments=%s",
                 self.asr_class.__name__,
@@ -247,12 +259,13 @@ class ChunkedASR:
                         last_overall = overall
                         callback(overall, f"{idx+1}/{total_chunks}: {message}")
 
-            # 为当前 chunk 创建独立的 ASR 实例
-            # 使用 chunk_bytes 作为音频输入
-            chunk_asr = self.asr_class(chunk_bytes, **self.asr_kwargs)
-
-            # 调用 ASR 的 run() 方法转录
-            asr_data = chunk_asr.run(chunk_callback)
+            asr_data = self._transcribe_with_retry(
+                idx=idx,
+                total_chunks=total_chunks,
+                chunk_bytes=chunk_bytes,
+                offset_ms=offset_ms,
+                callback=chunk_callback,
+            )
 
             logger.info(
                 "分块转录完成: chunk=%s/%s, elapsed=%.2fs, segments=%s",
@@ -302,6 +315,154 @@ class ChunkedASR:
 
         logger.debug(f"All {total_chunks}  chunks transcription complete")
         return [r for r in results if r is not None]  # 过滤 None
+
+    def _run_single_asr(
+        self,
+        *,
+        audio_bytes: bytes,
+        callback: Optional[Callable[[int, str], None]],
+        allow_degraded: bool = False,
+        use_cache: bool = True,
+    ) -> ASRData:
+        """创建单个 ASR 实例运行，返回相对 chunk 起点的 ASRData。
+
+        返回的 segments 时间戳是相对该音频块起点的，**不含 chunk offset**。
+        主 chunk 路径的绝对偏移由 ``ChunkMerger._adjust_timestamps`` 统一添加；
+        子块路径的相对偏移在 ``_transcribe_with_retry`` 拼接时添加。
+
+        Args:
+            audio_bytes: 音频块字节数据。
+            callback: 进度回调。
+            allow_degraded: 为 True 时走降级路径（估算时间戳），不抛异常。
+            use_cache: 是否读写 ASR 缓存（重试时通常关闭）。
+        """
+        asr_kwargs = {**self.asr_kwargs, "use_cache": use_cache}
+        chunk_asr = self.asr_class(audio_bytes, **asr_kwargs)
+        return chunk_asr.run(callback, _allow_degraded=allow_degraded)
+
+    def _split_chunk_bytes(self, chunk_bytes: bytes, n: int) -> List[bytes]:
+        """把一个 chunk 的 mp3 bytes 拆成 n 个等长子块的 mp3 bytes。"""
+        audio = AudioSegment.from_file(io.BytesIO(chunk_bytes))
+        total_ms = len(audio)
+        sub_len = total_ms // n
+        sub_chunks: List[bytes] = []
+        for i in range(n):
+            start = i * sub_len
+            end = (i + 1) * sub_len if i < n - 1 else total_ms
+            buf = io.BytesIO()
+            audio[start:end].export(buf, format="mp3")
+            sub_chunks.append(buf.getvalue())
+        return sub_chunks
+
+    def _transcribe_with_retry(
+        self,
+        *,
+        idx: int,
+        total_chunks: int,
+        chunk_bytes: bytes,
+        offset_ms: int,
+        callback: Optional[Callable[[int, str], None]],
+    ) -> ASRData:
+        """分层重试: 首次 → 同块重试 → 拆 2 子块 → 拆 3 子块 → 降级。
+
+        首次尝试走正常缓存路径；ASRResultDegradedError 触发重试，重试时
+        关闭缓存（避免异常结果污染缓存）。子块结果在拼接时加上相对父 chunk
+        起点的偏移，最终 ASRData 的时间戳仍是相对 chunk 起点的，与主 chunk
+        路径一致——绝对偏移统一由 ``ChunkMerger`` 添加。
+        """
+        # 首次尝试: 走正常缓存路径
+        try:
+            return self._run_single_asr(
+                audio_bytes=chunk_bytes,
+                callback=callback,
+                use_cache=self.asr_kwargs.get("use_cache", False),
+            )
+        except ASRResultDegradedError as exc:
+            logger.info(
+                "chunk %s/%s 首次异常 (%s)，进入重试",
+                idx + 1,
+                total_chunks,
+                exc.reason,
+            )
+
+        # 第 1 次重试: 同块重新请求（防偶发网关问题），关闭缓存
+        try:
+            return self._run_single_asr(
+                audio_bytes=chunk_bytes,
+                callback=callback,
+                use_cache=False,
+            )
+        except ASRResultDegradedError as exc:
+            logger.info(
+                "chunk %s/%s 同块重试仍异常 (%s)，拆子块",
+                idx + 1,
+                total_chunks,
+                exc.reason,
+            )
+
+        # 第 2、3 次重试: 拆子块
+        chunk_audio = AudioSegment.from_file(io.BytesIO(chunk_bytes))
+        chunk_duration_ms = len(chunk_audio)
+        for attempt_num, n_splits in enumerate(SUBCHUNK_SPLITS, start=2):
+            sub_bytes_list = self._split_chunk_bytes(chunk_bytes, n_splits)
+            sub_duration_ms = chunk_duration_ms // n_splits
+            sub_results: List[ASRData] = []
+            all_ok = True
+            for j, sub_bytes in enumerate(sub_bytes_list):
+                try:
+                    sub_asr_data = self._run_single_asr(
+                        audio_bytes=sub_bytes,
+                        callback=callback,
+                        use_cache=False,
+                    )
+                    # 子块时间戳是相对子块起点的，加上相对父 chunk 起点的
+                    # 偏移 (j * sub_duration_ms)，使其与主 chunk 路径一样
+                    # 都是相对 chunk 起点的。绝对偏移仍由 ChunkMerger 添加。
+                    relative_offset = j * sub_duration_ms
+                    if relative_offset > 0:
+                        for seg in sub_asr_data.segments:
+                            seg.start_time += relative_offset
+                            seg.end_time += relative_offset
+                    sub_results.append(sub_asr_data)
+                except ASRResultDegradedError as exc:
+                    logger.info(
+                        "chunk %s/%s 第%s次重试: 拆 %s 子块 %s/%s 失败 (%s)",
+                        idx + 1,
+                        total_chunks,
+                        attempt_num,
+                        n_splits,
+                        j + 1,
+                        n_splits,
+                        exc.reason,
+                    )
+                    all_ok = False
+                    break
+            if all_ok:
+                merged_segments: List[ASRDataSeg] = []
+                for sub in sub_results:
+                    merged_segments.extend(sub.segments)
+                logger.info(
+                    "chunk %s/%s 拆 %s 子块重试成功，合并 %s segments",
+                    idx + 1,
+                    total_chunks,
+                    n_splits,
+                    len(merged_segments),
+                )
+                return ASRData(merged_segments)
+
+        # 全部重试失败: 降级估算时间戳（不缓存）
+        logger.warning(
+            "chunk %s/%s 重试 %s 次仍失败，降级为估算时间戳",
+            idx + 1,
+            total_chunks,
+            1 + len(SUBCHUNK_SPLITS),
+        )
+        return self._run_single_asr(
+            audio_bytes=chunk_bytes,
+            callback=callback,
+            allow_degraded=True,
+            use_cache=False,
+        )
 
     def _merge_results(
         self, chunk_results: List[ASRData], chunks: List[Tuple[bytes, int]]

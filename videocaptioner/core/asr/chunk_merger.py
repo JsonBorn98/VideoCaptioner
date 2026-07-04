@@ -4,17 +4,28 @@
 使用滑动窗口找到最佳对齐位置，在重叠区域中点切分。
 
 匹配策略:
-- 词级时间戳（字级）: 精确文本匹配
+- 词级时间戳（字级）: 归一化（忽略大小写/标点）后的精确文本匹配
 - 句子级时间戳（非字级）: difflib 模糊匹配（相似度 > 0.7）
 """
 
 import difflib
+import re
 from typing import List, Optional
 
 from ..utils.logger import setup_logger
 from .asr_data import ASRData, ASRDataSeg
 
 logger = setup_logger("chunk_merger")
+
+
+def _normalize_match_word(text: str) -> str:
+    """Normalize a word token for cross-chunk matching.
+
+    Two MiMo transcriptions of the same overlap audio routinely differ in
+    punctuation and capitalization ("So," vs "so"); word-level matching must
+    compare the spoken word, not its rendering.
+    """
+    return re.sub(r"[\W_]+", "", text.lower(), flags=re.UNICODE)
 
 
 class ChunkMerger:
@@ -139,7 +150,12 @@ class ChunkMerger:
 
         if best_match is None:
             # 未找到有效匹配，使用时间边界切分
-            logger.warning("未找到有效文本匹配，使用时间边界切分")
+            logger.warning(
+                "未找到有效文本匹配（边界≈%.1fs，左/右重叠词数=%s/%s），使用时间边界切分",
+                right[0].start_time / 1000,
+                len(left_overlap),
+                len(right_overlap),
+            )
             # 找到 left 中最后一个在 right[0].start_time 之前ended的 segment
             split_idx = left_len
             right_start = right[0].start_time
@@ -192,6 +208,13 @@ class ChunkMerger:
         left_len = len(left)
         right_len = len(right)
 
+        # 词级: 预先归一化（大小写/标点漂移不应破坏精确匹配）
+        if self._is_word_level:
+            left_words = [_normalize_match_word(seg.text) for seg in left]
+            right_words = [_normalize_match_word(seg.text) for seg in right]
+        else:
+            left_words = right_words = []
+
         best_score = 0.0
         best_result = None
 
@@ -207,29 +230,29 @@ class ChunkMerger:
             right_start = max(0, i - left_len)
             right_end = min(right_len, i)
 
-            # 提取重叠部分
-            left_slice = left[left_start:left_end]
-            right_slice = right[right_start:right_end]
-
-            if len(left_slice) != len(right_slice):
+            if (left_end - left_start) != (right_end - right_start):
                 raise RuntimeError(
-                    f"对齐Error: left[{left_start}:{left_end}]={len(left_slice)} "
-                    f"vs right[{right_start}:{right_end}]={len(right_slice)}"
+                    f"对齐Error: left[{left_start}:{left_end}] "
+                    f"vs right[{right_start}:{right_end}]"
                 )
 
-            # 计算匹配数（词级用精确匹配，句子级用模糊匹配）
+            # 计算匹配数（词级用归一化后的精确匹配，句子级用模糊匹配）
             if self._is_word_level:
-                # 词级: 精确匹配
                 matches = sum(
                     1
-                    for left_seg, right_seg in zip(left_slice, right_slice)
-                    if left_seg.text == right_seg.text
+                    for left_word, right_word in zip(
+                        left_words[left_start:left_end],
+                        right_words[right_start:right_end],
+                    )
+                    if left_word and left_word == right_word
                 )
             else:
                 # 句子级: 模糊匹配（difflib 相似度 > threshold）
                 matches = sum(
                     1
-                    for left_seg, right_seg in zip(left_slice, right_slice)
+                    for left_seg, right_seg in zip(
+                        left[left_start:left_end], right[right_start:right_end]
+                    )
                     if difflib.SequenceMatcher(
                         None, left_seg.text, right_seg.text
                     ).ratio()

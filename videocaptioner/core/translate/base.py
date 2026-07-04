@@ -3,7 +3,7 @@
 import atexit
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, cast
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import SubtitleProcessData
@@ -126,13 +126,23 @@ class BaseTranslator(ABC):
         try:
             cache_key = self._get_cache_key(chunk)
             try:
-                cached_result = self._cache.get(cache_key, default=None)
+                cached_result = cast(
+                    Optional[List[SubtitleProcessData]],
+                    self._cache.get(cache_key, default=None),
+                )
             except Exception:
                 # Graceful degradation: corrupted cache (e.g. old pickle from app→videocaptioner rename)
                 cached_result = None
                 self._cache.delete(cache_key)
-            if cached_result is not None:
+            if isinstance(cached_result, list):
                 return cached_result
+            if cached_result is not None:
+                # Unexpected cache value type — discard and retranslate.
+                logger.warning(
+                    "Translate cache returned unexpected type %s, discarding",
+                    type(cached_result).__name__,
+                )
+                self._cache.delete(cache_key)
 
             result = self._translate_chunk(chunk)
 

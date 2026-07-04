@@ -14,7 +14,7 @@ from typing import Any, Callable, List, Optional, Union
 
 from ..utils.logger import setup_logger
 from .asr_data import ASRDataSeg
-from .base import BaseASR
+from .base import ASRResultDegradedError, BaseASR
 from .qwen_runtime import timestamp_items_to_segments
 from .text_timing import make_timed_segments, split_transcript_text
 
@@ -462,7 +462,9 @@ class QwenLocalASR(BaseASR):
 
         return result
 
-    def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
         segments = timestamp_items_to_segments(resp_data.get("time_stamps"))
         if segments:
             return segments
@@ -475,9 +477,19 @@ class QwenLocalASR(BaseASR):
             return []
 
         if self.need_word_time_stamp:
-            raise RuntimeError(
-                "Qwen ASR was requested to return timestamps, but no timestamps were returned. "
-                "Check that Qwen3-ForcedAligner is available and the audio chunk is supported."
+            if _allow_degraded:
+                end_time = max(int(self.audio_duration * 1000), 1)
+                text_segments = split_transcript_text(text)
+                logger.warning(
+                    "Qwen ASR response has no timestamps; split transcript into "
+                    "%s estimated cues",
+                    len(text_segments),
+                )
+                return make_timed_segments(text_segments, end_time)
+            raise ASRResultDegradedError(
+                "Qwen ASR was requested to return timestamps, but no timestamps "
+                "were returned. Check that Qwen3-ForcedAligner is available and "
+                "the audio chunk is supported."
             )
 
         end_time = max(int(self.audio_duration * 1000), 1)

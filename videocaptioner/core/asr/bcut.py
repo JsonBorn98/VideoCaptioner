@@ -177,7 +177,9 @@ class BcutASR(BaseASR):
         callback(*ASRStatus.COMPLETED.callback_tuple())
         return json.loads(task_resp["result"])
 
-    def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
         if self.need_word_time_stamp:
             return [
                 ASRDataSeg(w["label"].strip(), w["start_time"], w["end_time"])

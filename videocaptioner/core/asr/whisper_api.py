@@ -61,7 +61,9 @@ class WhisperAPI(BaseASR):
         """Execute ASR via API."""
         return self._submit()
 
-    def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
         """Convert API response to segments."""
         if self.need_word_time_stamp and resp_data.get("words"):
             return [

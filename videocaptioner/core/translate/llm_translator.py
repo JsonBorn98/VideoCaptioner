@@ -99,25 +99,28 @@ class LLMTranslator(BaseTranslator):
 
     def _agent_loop(
         self, system_prompt: str, subtitle_dict: Dict[str, str]
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         """Agent loop翻译字幕块"""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(subtitle_dict, ensure_ascii=False)},
         ]
-        last_response_dict = None
         # llm 反馈循环
         for _ in range(self.MAX_STEPS):
             response = call_llm(messages=messages, model=self.model)
             response_dict = json_repair.loads(
                 response.choices[0].message.content.strip()
             )
-            last_response_dict = response_dict
+            if not isinstance(response_dict, dict):
+                response_dict = {}
             is_valid, error_message = self._validate_llm_response(
                 response_dict, subtitle_dict
             )
             if is_valid:
-                return response_dict
+                # Keep value structure intact: reflect mode stores nested
+                # dicts ({"native_translation": ...}) that the caller extracts
+                # via v.get("native_translation"). Only normalize keys to str.
+                return {str(k): v for k, v in response_dict.items()}
             else:
                 messages.append(
                     {
@@ -132,7 +135,10 @@ class LLMTranslator(BaseTranslator):
                     }
                 )
 
-        return last_response_dict
+        raise ValueError(
+            "LLM response did not produce a valid translation dictionary "
+            f"after {self.MAX_STEPS} attempts"
+        )
 
     def _validate_llm_response(
         self, response_dict: Any, subtitle_dict: Dict[str, str]

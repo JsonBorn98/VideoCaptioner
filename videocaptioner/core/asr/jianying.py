@@ -129,7 +129,9 @@ class JianYingASR(BaseASR):
 
         return resp_data
 
-    def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
         if self.need_word_time_stamp:
             return [
                 ASRDataSeg(w["text"].strip(), w["start_time"], w["end_time"])

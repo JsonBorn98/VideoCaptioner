@@ -55,7 +55,7 @@ class VoiceCloneManager:
         # 检查缓存（避免重复上传）
         cache_key = self._generate_cache_key(audio_path, text, model)
         cached_uri = self.cache.get(cache_key)
-        if cached_uri:
+        if isinstance(cached_uri, str) and cached_uri:
             logger.debug(f"Using cache的声音克隆 URI: {cached_uri}")
             return cached_uri
 

@@ -95,7 +95,9 @@ class MockASR(BaseASR):
 
         return {"segments": segments}
 
-    def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
         """将 mock 响应转换为 ASRDataSeg"""
         return [
             ASRDataSeg(
