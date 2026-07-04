@@ -118,7 +118,10 @@ class SubtitleThread(QThread):
             subtitle_config = self.task.subtitle_config
             assert subtitle_config is not None, self.tr("字幕配置为空")
 
-            asr_data = ASRData.from_subtitle_file(subtitle_path)
+            asr_data = ASRData.from_subtitle_file(
+                subtitle_path,
+                layout=subtitle_config.subtitle_layout,
+            )
 
             # 1. 分割成字词级时间戳（对于非断句字幕且开启分割选项）
             if subtitle_config.need_split and not asr_data.is_word_timestamp():

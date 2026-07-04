@@ -163,9 +163,12 @@ def run(args: Namespace, config: dict) -> int:
         if needs_llm and llm_model:
             output.info(f"LLM: {llm_model} @ {llm_api_base}")
 
+    from videocaptioner.cli.validators import resolve_layout
+    layout = resolve_layout(layout_str)
+
     # Load subtitle data
     from videocaptioner.core.asr.asr_data import ASRData
-    asr_data = ASRData.from_subtitle_file(str(input_path))
+    asr_data = ASRData.from_subtitle_file(str(input_path), layout=layout)
 
     if need_split and asr_data.is_word_timestamp() and not needs_llm:
         from videocaptioner.cli.validators import validate_llm
@@ -248,8 +251,6 @@ def run(args: Namespace, config: dict) -> int:
             asr_data.remove_punctuation()
 
         # 4. Save
-        from videocaptioner.cli.validators import resolve_layout
-        layout = resolve_layout(layout_str)
         asr_data.save(save_path=output_path, layout=layout)
 
         if progress:

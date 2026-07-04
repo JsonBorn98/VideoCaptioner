@@ -372,6 +372,83 @@ class TestFormatConversionEdgeCases:
         srt4 = asr_data.to_srt(layout=SubtitleLayoutEnum.ONLY_TRANSLATE)
         assert "你好" in srt4
 
+    def test_ass_translate_on_top_roundtrip_preserves_roles_with_layout_hint(self):
+        """读回旧版译文在上 ASS 时不应把原文和译文对调。"""
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+
+        asr_data = ASRData([ASRDataSeg("ORIGINAL", 0, 1000, "TRANSLATED")])
+        ass_text = asr_data.to_ass(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP)
+        ass_text = "\n".join(
+            line for line in ass_text.splitlines()
+            if not line.startswith("; SubtitleLayout:")
+        )
+
+        parsed = ASRData.from_ass(
+            ass_text,
+            layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP,
+        )
+
+        assert parsed.segments[0].text == "ORIGINAL"
+        assert parsed.segments[0].translated_text == "TRANSLATED"
+
+    def test_from_subtitle_file_passes_ass_layout_hint(self):
+        """视频合成入口读 ASS 文件时应使用当前字幕布局提示。"""
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+
+        asr_data = ASRData([ASRDataSeg("ORIGINAL", 0, 1000, "TRANSLATED")])
+        ass_text = asr_data.to_ass(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP)
+        ass_text = "\n".join(
+            line for line in ass_text.splitlines()
+            if not line.startswith("; SubtitleLayout:")
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ass_path = Path(tmpdir) / "caption.ass"
+            ass_path.write_text(ass_text, encoding="utf-8")
+            parsed = ASRData.from_subtitle_file(
+                str(ass_path),
+                layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP,
+            )
+
+        assert parsed.segments[0].text == "ORIGINAL"
+        assert parsed.segments[0].translated_text == "TRANSLATED"
+
+    def test_ass_translate_on_top_roundtrip_uses_layout_metadata(self):
+        """新版 ASS 自带布局元数据，直接读回也能保留原文/译文语义。"""
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+
+        asr_data = ASRData([ASRDataSeg("ORIGINAL", 0, 1000, "TRANSLATED")])
+        ass_text = asr_data.to_ass(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP)
+
+        parsed = ASRData.from_ass(ass_text)
+        rerendered = parsed.to_ass(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP)
+        dialogue_lines = [
+            line for line in rerendered.splitlines() if line.startswith("Dialogue:")
+        ]
+
+        assert parsed.segments[0].text == "ORIGINAL"
+        assert parsed.segments[0].translated_text == "TRANSLATED"
+        assert dialogue_lines == [
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Secondary,,0,0,0,,ORIGINAL",
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,TRANSLATED",
+        ]
+
+    def test_ass_original_on_top_roundtrip_remains_backward_compatible(self):
+        """未带布局提示时，保留原有 Default=原文 的解析行为。"""
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+
+        asr_data = ASRData([ASRDataSeg("ORIGINAL", 0, 1000, "TRANSLATED")])
+        ass_text = asr_data.to_ass(layout=SubtitleLayoutEnum.ORIGINAL_ON_TOP)
+        ass_text = "\n".join(
+            line for line in ass_text.splitlines()
+            if not line.startswith("; SubtitleLayout:")
+        )
+
+        parsed = ASRData.from_ass(ass_text)
+
+        assert parsed.segments[0].text == "ORIGINAL"
+        assert parsed.segments[0].translated_text == "TRANSLATED"
+
     def test_srt_no_translation_all_layouts(self):
         """测试无翻译时的所有布局"""
         segments = [ASRDataSeg("Hello", 0, 1000)]

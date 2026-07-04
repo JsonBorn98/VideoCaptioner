@@ -228,7 +228,7 @@ def run(args: Namespace, config: dict) -> int:
         else:
             # Hard subtitle: resolve style and render
             resolved = _resolve_style(config, verbose)
-            mode, ass_style, rounded_style, font_file, _ = resolved
+            mode, ass_style, rounded_style, font_file, style = resolved
             if mode is None:
                 if progress:
                     progress.fail("Style configuration error")
@@ -241,7 +241,7 @@ def run(args: Namespace, config: dict) -> int:
             if mode == "rounded":
                 from videocaptioner.core.asr.asr_data import ASRData
                 from videocaptioner.core.subtitle.rounded_renderer import render_rounded_video
-                asr_data = ASRData.from_subtitle_file(str(subtitle_path))
+                asr_data = ASRData.from_subtitle_file(str(subtitle_path), layout=layout)
                 render_rounded_video(
                     video_path=str(video_path),
                     asr_data=asr_data,
@@ -251,11 +251,12 @@ def run(args: Namespace, config: dict) -> int:
                     crf=crf,
                     preset=preset,
                     progress_callback=progress_callback,
+                    reference_height=style.reference_height,
                 )
             else:
                 from videocaptioner.core.asr.asr_data import ASRData
                 from videocaptioner.core.subtitle.ass_renderer import render_ass_video
-                asr_data = ASRData.from_subtitle_file(str(subtitle_path))
+                asr_data = ASRData.from_subtitle_file(str(subtitle_path), layout=layout)
 
                 # Register custom font if provided
                 if font_file:
@@ -270,6 +271,7 @@ def run(args: Namespace, config: dict) -> int:
                     crf=crf,
                     preset=preset,
                     progress_callback=progress_callback,
+                    reference_height=style.reference_height,
                 )
 
         if progress:

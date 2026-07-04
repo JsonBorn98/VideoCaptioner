@@ -53,7 +53,10 @@ class VideoSynthesisThread(QThread):
             preset = video_quality.get_preset()
 
             # 读取字幕数据
-            asr_data = ASRData.from_subtitle_file(subtitle_file)
+            asr_data = ASRData.from_subtitle_file(
+                subtitle_file,
+                layout=config.subtitle_layout,
+            )
 
             if config.soft_subtitle:
                 # 软字幕：转为 SRT 后内嵌
@@ -91,6 +94,8 @@ class VideoSynthesisThread(QThread):
                     subtitle_layout=config.subtitle_layout,
                     ass_style=config.ass_style,
                     rounded_style=config.rounded_style,
+                    reference_width=config.reference_width,
+                    reference_height=config.reference_height,
                     crf=crf,
                     preset=preset,
                     progress_callback=self.progress_callback,
