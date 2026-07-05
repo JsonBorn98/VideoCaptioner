@@ -8,6 +8,7 @@ from qfluentwidgets import (
     PushSettingCard,
     SettingCardGroup,
     SingleDirectionScrollArea,
+    SwitchSettingCard,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -143,6 +144,14 @@ class MimoASRSettingWidget(QWidget):
             self.aligner_group,
         )
 
+        self.aligner_compile_card = SwitchSettingCard(
+            FIF.SPEED_HIGH,  # type: ignore
+            self.tr("实验性编译对齐模型"),
+            self.tr("尝试使用 torch.compile 加速 ForcedAligner，失败时自动回退"),
+            cfg.qwen_compile_aligner,
+            self.aligner_group,
+        )
+
         for card in [
             self.base_url_card,
             self.api_key_card,
@@ -151,6 +160,7 @@ class MimoASRSettingWidget(QWidget):
             self.aligner_model_dir_card,
             self.aligner_device_card,
             self.aligner_dtype_card,
+            self.aligner_compile_card,
         ]:
             if hasattr(card, "lineEdit"):
                 card.lineEdit.setMinimumWidth(240)
@@ -167,6 +177,7 @@ class MimoASRSettingWidget(QWidget):
         self.aligner_group.addSettingCard(self.aligner_model_dir_card)
         self.aligner_group.addSettingCard(self.aligner_device_card)
         self.aligner_group.addSettingCard(self.aligner_dtype_card)
+        self.aligner_group.addSettingCard(self.aligner_compile_card)
         self.aligner_group.addSettingCard(self.manage_model_card)
 
         self.check_connection_card.clicked.connect(self.on_check_connection)

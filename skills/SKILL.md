@@ -135,15 +135,21 @@ When changing or adding ASR backends, first identify the real service contract:
 - Text-only ASR is not subtitle-ready by itself. If the user requested SRT/ASS
   timestamps, add or call a forced aligner; do not silently emit one cue for the
   whole chunk.
-- For MiMo/Qwen-style long transcription, keep automatic chunking. Five-minute
-  chunks plus 10 seconds overlap are the current safe baseline.
-- Qwen local runtime depends on `qwen-asr`; install it into the same Python
-  environment that launches the GUI. Treat it as optional because it pulls large
-  ML dependencies.
-- Keep local model concurrency at one unless memory behavior is measured. The
-  1.7B ASR model plus 0.6B ForcedAligner can sit near a 16 GB VRAM ceiling.
+- For MiMo/Qwen-style long transcription, keep automatic chunking. Qwen local
+  ASR uses five-minute source ranges; MiMo uses three-minute chunks when Qwen
+  word alignment is enabled and five-minute chunks for text-only mode. Ten
+  seconds of overlap is the current default.
+- Qwen local runtime depends on `qwen-asr`; use the managed runtime under
+  `AppData/runtimes/qwen` or the desktop user-data equivalent instead of
+  assuming it is installed in the main GUI Python environment.
+- Keep local Qwen model access serialized through the persistent worker, but
+  allow normal first-pass Qwen chunks to enter the worker as a batch after cache
+  checks. The 1.7B ASR model plus 0.6B ForcedAligner can sit near a 16 GB VRAM
+  ceiling, so do not add parallel local GPU workers without measurement.
 - Cache raw ASR responses only after segment conversion succeeds, and version
   cache keys when timestamp parsing semantics change.
+- Prefer VAD-aware MiMo/Qwen chunk boundaries, skip pure-silence chunks, and
+  treat non-silent empty results as degraded so they enter retry handling.
 - Connection tests should use tiny bundled sample audio, never the user's full
   selected media file.
 - Temporary transcription workspaces should live beside the source media as
@@ -153,7 +159,7 @@ When changing or adding ASR backends, first identify the real service contract:
 
 | Command | Purpose |
 |---------|---------|
-| `transcribe` | Speech → subtitles. Engines: `bijian`(free) `jianying`(free) `whisper-api` `whisper-cpp` |
+| `transcribe` | Speech → subtitles. Engines: `bijian`(free) `jianying`(free) `faster-whisper` `whisper-api` `whisper-cpp` `mimo-asr` `qwen-local` |
 | `subtitle` | Optimize (LLM) and/or translate (LLM/Bing/Google) subtitle files |
 | `synthesize` | Burn subtitles into video with customizable styles |
 | `process` | Full pipeline: transcribe → optimize → translate → synthesize |

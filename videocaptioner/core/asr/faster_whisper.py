@@ -54,8 +54,16 @@ class FasterWhisperASR(BaseASR):
         max_comma: int = 20,
         max_comma_cent: int = 50,
         prompt: Optional[str] = None,
+        audio_duration: float | None = None,
+        cache_identity: str | None = None,
     ):
-        super().__init__(audio_input, use_cache)
+        super().__init__(
+            audio_input,
+            use_cache=use_cache,
+            need_word_time_stamp=need_word_time_stamp,
+            audio_duration=audio_duration,
+            cache_identity=cache_identity,
+        )
 
         # 基本参数
         self.model_path = whisper_model
@@ -329,7 +337,7 @@ class FasterWhisperASR(BaseASR):
         """获取缓存key"""
         cmd = self._build_command("")
         cmd_hash = hashlib.md5(str(cmd).encode()).hexdigest()
-        return f"{self.crc32_hex}-{cmd_hash}"
+        return f"{self.cache_identity}-{cmd_hash}"
 
 
 def is_rtx_50_series() -> bool:

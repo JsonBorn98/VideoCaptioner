@@ -446,6 +446,13 @@ class SettingInterface(ScrollArea):
             parent=self.transcribeGroup,
         )
         self.transcribeModelCard.comboBox.setMinimumWidth(150)
+        self.audioLoudnormCard = SwitchSettingCard(
+            FIF.VOLUME,
+            self.tr("音量标准化"),
+            self.tr("抽取音频时使用 EBU R128 loudnorm，适合音量忽大忽小的素材"),
+            cfg.audio_loudnorm,
+            self.transcribeGroup,
+        )
 
         # API Base URL
         self.whisperApiBaseCard = LineEditSettingCard(
@@ -588,6 +595,13 @@ class SettingInterface(ScrollArea):
             60,
             self.transcribeGroup,
         )
+        self.qwenCompileAlignerCard = SwitchSettingCard(
+            FIF.SPEED_HIGH,  # type: ignore
+            self.tr("实验性编译对齐模型"),
+            self.tr("尝试使用 torch.compile 加速 ForcedAligner，失败时自动回退"),
+            cfg.qwen_compile_aligner,
+            self.transcribeGroup,
+        )
         self.manageQwenModelCard = PushSettingCard(
             self.tr("管理 Qwen 模型"),
             FIF.DOWNLOAD,
@@ -619,6 +633,7 @@ class SettingInterface(ScrollArea):
             self.qwenDTypeCard,
             self.qwenMaxTokensCard,
             self.qwenChunkOverlapCard,
+            self.qwenCompileAlignerCard,
             self.manageQwenModelCard,
         ]:
             card.setVisible(False)
@@ -733,6 +748,7 @@ class SettingInterface(ScrollArea):
 
         # 添加转录配置卡片
         self.transcribeGroup.addSettingCard(self.transcribeModelCard)
+        self.transcribeGroup.addSettingCard(self.audioLoudnormCard)
         # 添加 Whisper API 配置卡片
         self.transcribeGroup.addSettingCard(self.whisperApiBaseCard)
         self.transcribeGroup.addSettingCard(self.whisperApiKeyCard)
@@ -750,6 +766,7 @@ class SettingInterface(ScrollArea):
         self.transcribeGroup.addSettingCard(self.qwenDTypeCard)
         self.transcribeGroup.addSettingCard(self.qwenMaxTokensCard)
         self.transcribeGroup.addSettingCard(self.qwenChunkOverlapCard)
+        self.transcribeGroup.addSettingCard(self.qwenCompileAlignerCard)
         self.transcribeGroup.addSettingCard(self.manageQwenModelCard)
 
         # 添加LLM配置卡片
@@ -1057,6 +1074,7 @@ class SettingInterface(ScrollArea):
             self.qwenDeviceCard,
             self.qwenDTypeCard,
             self.qwenChunkOverlapCard,
+            self.qwenCompileAlignerCard,
             self.manageQwenModelCard,
         ]
 

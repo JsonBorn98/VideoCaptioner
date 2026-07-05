@@ -59,6 +59,19 @@ ENV_MAP: Dict[str, str] = {
     "VIDEOCAPTIONER_TTS_MAX_SPEED": "dubbing.max_speed",
     "VIDEOCAPTIONER_TTS_REWRITE_TOO_LONG": "dubbing.rewrite_too_long",
     "VIDEOCAPTIONER_TTS_MIX_ORIGINAL_AUDIO": "dubbing.mix_original_audio",
+    "VIDEOCAPTIONER_AUDIO_LOUDNORM": "transcribe.audio_loudnorm",
+    "VIDEOCAPTIONER_MIMO_ASR_API_KEY": "transcribe.mimo_asr.api_key",
+    "VIDEOCAPTIONER_MIMO_ASR_API_BASE": "transcribe.mimo_asr.api_base",
+    "VIDEOCAPTIONER_MIMO_ASR_MODEL": "transcribe.mimo_asr.model",
+    "VIDEOCAPTIONER_MIMO_ASR_TIMEOUT": "transcribe.mimo_asr.timeout",
+    "VIDEOCAPTIONER_QWEN_ASR_MODEL": "transcribe.qwen.asr_model",
+    "VIDEOCAPTIONER_QWEN_ALIGNER_MODEL": "transcribe.qwen.aligner_model",
+    "VIDEOCAPTIONER_QWEN_MODEL_DIR": "transcribe.qwen.model_dir",
+    "VIDEOCAPTIONER_QWEN_DEVICE": "transcribe.qwen.device",
+    "VIDEOCAPTIONER_QWEN_DTYPE": "transcribe.qwen.dtype",
+    "VIDEOCAPTIONER_QWEN_MAX_NEW_TOKENS": "transcribe.qwen.max_new_tokens",
+    "VIDEOCAPTIONER_QWEN_CHUNK_OVERLAP_SECONDS": "transcribe.qwen.chunk_overlap_seconds",
+    "VIDEOCAPTIONER_QWEN_COMPILE_ALIGNER": "transcribe.qwen.compile_aligner",
 }
 
 DEFAULTS: Dict[str, Any] = {
@@ -76,6 +89,7 @@ DEFAULTS: Dict[str, Any] = {
     "transcribe": {
         "asr": "bijian",
         "language": "auto",
+        "audio_loudnorm": False,
         "faster_whisper": {
             "model": "large-v3",
             "device": "auto",
@@ -87,6 +101,22 @@ DEFAULTS: Dict[str, Any] = {
         },
         "whisper_cpp": {
             "model": "large-v2",
+        },
+        "mimo_asr": {
+            "api_key": "",
+            "api_base": "https://api.xiaomimimo.com/v1",
+            "model": "mimo-v2.5-asr",
+            "timeout": 600,
+        },
+        "qwen": {
+            "asr_model": "Qwen/Qwen3-ASR-1.7B",
+            "aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
+            "model_dir": "",
+            "device": "auto",
+            "dtype": "auto",
+            "max_new_tokens": 2048,
+            "chunk_overlap_seconds": 10,
+            "compile_aligner": False,
         },
     },
     "subtitle": {

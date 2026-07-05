@@ -27,6 +27,8 @@ class WhisperAPI(BaseASR):
         base_url: str = "",
         api_key: str = "",
         use_cache: bool = False,
+        audio_duration: float | None = None,
+        cache_identity: str | None = None,
     ):
         """Initialize Whisper API.
 
@@ -40,7 +42,13 @@ class WhisperAPI(BaseASR):
             api_key: API key
             use_cache: Enable caching
         """
-        super().__init__(audio_input, use_cache)
+        super().__init__(
+            audio_input,
+            use_cache=use_cache,
+            need_word_time_stamp=need_word_time_stamp,
+            audio_duration=audio_duration,
+            cache_identity=cache_identity,
+        )
 
         self.base_url = normalize_base_url(base_url)
         self.api_key = api_key.strip()
@@ -97,7 +105,7 @@ class WhisperAPI(BaseASR):
 
     def _get_key(self) -> str:
         """Get cache key including model and language."""
-        return f"{self.crc32_hex}-{self.model}-{self.language}-{self.prompt}"
+        return f"{self.cache_identity}-{self.model}-{self.language}-{self.prompt}"
 
     def _submit(self) -> dict:
         """Submit audio for transcription."""

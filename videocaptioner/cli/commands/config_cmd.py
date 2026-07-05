@@ -203,6 +203,7 @@ def _render_onboarding_template(config_data: dict) -> str:
     f.write("# [llm] is used for AI subtitle polish, LLM translation, reflective translation, and dubbing length adaptation.\n")
     f.write("# [whisper_api] is only needed when transcribe.asr = \"whisper-api\".\n")
     f.write("# [transcribe] controls speech-to-text. bijian/jianying need no key; whisper-cpp needs a local binary/model.\n")
+    f.write("# transcribe.mimo_asr is used by transcribe.asr = \"mimo-asr\"; transcribe.qwen is used by \"qwen-local\" and MiMo alignment.\n")
     f.write("# [subtitle] split and AI polish use LLM; [translate] can use bing/google/llm.\n")
     f.write("# [synthesize] controls subtitle embedding/burning.\n")
     f.write("# [dubbing] preset selects provider/model/voice defaults; edge-* presets need no API key but require network access.\n")
@@ -228,6 +229,9 @@ def _user_facing_config(config_data: dict) -> dict:
         },
         "transcribe": {
             "asr": config_data["transcribe"]["asr"],
+            "audio_loudnorm": config_data["transcribe"]["audio_loudnorm"],
+            "mimo_asr": config_data["transcribe"]["mimo_asr"],
+            "qwen": config_data["transcribe"]["qwen"],
         },
         "subtitle": {
             "optimize": config_data["subtitle"]["optimize"],

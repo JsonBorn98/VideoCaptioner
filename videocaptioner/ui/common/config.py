@@ -162,6 +162,7 @@ class Config(QConfig):
         OptionsValidator(TranscribeLanguageEnum),
         EnumSerializer(TranscribeLanguageEnum),
     )
+    audio_loudnorm = ConfigItem("Transcribe", "AudioLoudnorm", False, BoolValidator())
 
     # ------------------- Whisper Cpp 配置 -------------------
     whisper_model = OptionsConfigItem(
@@ -263,6 +264,9 @@ class Config(QConfig):
     )
     qwen_chunk_overlap_seconds = RangeConfigItem(
         "QwenASR", "ChunkOverlapSeconds", 10, RangeValidator(0, 60)
+    )
+    qwen_compile_aligner = ConfigItem(
+        "QwenASR", "CompileAligner", False, BoolValidator()
     )
 
     # ------------------- 字幕配置 -------------------

@@ -1,5 +1,6 @@
 import difflib
 import re
+import time
 from typing import List, Tuple
 
 from ..llm import call_llm
@@ -10,6 +11,8 @@ from ..utils.text_utils import count_words, is_mainly_cjk
 logger = setup_logger("split_by_llm")
 
 MAX_STEPS = 2  # Agent loop max retry count
+LLM_SPLIT_MAX_ATTEMPTS = 2
+LLM_SPLIT_RETRY_BASE_DELAY_SECONDS = 0.5
 
 
 def split_by_llm(
@@ -29,13 +32,27 @@ def split_by_llm(
     Returns:
         断句后的文本列表
     """
-    try:
-        return _split_with_agent_loop(
-            text, model, max_word_count_cjk, max_word_count_english
-        )
-    except Exception as e:
-        logger.error(f"Sentence splitting failed: {e}")
-        return [text]
+    for attempt in range(LLM_SPLIT_MAX_ATTEMPTS):
+        try:
+            return _split_with_agent_loop(
+                text, model, max_word_count_cjk, max_word_count_english
+            )
+        except Exception as e:
+            if attempt >= LLM_SPLIT_MAX_ATTEMPTS - 1:
+                logger.error(f"Sentence splitting failed: {e}")
+                return [text]
+
+            delay = LLM_SPLIT_RETRY_BASE_DELAY_SECONDS * (2**attempt)
+            logger.warning(
+                "Sentence splitting attempt %s/%s failed; retrying in %.1fs: %s",
+                attempt + 1,
+                LLM_SPLIT_MAX_ATTEMPTS,
+                delay,
+                e,
+            )
+            time.sleep(delay)
+
+    return [text]
 
 
 def _split_with_agent_loop(

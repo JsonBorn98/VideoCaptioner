@@ -1,0 +1,23 @@
+{
+  "skill_name": "videocaptioner-asr",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我改了 VideoCaptioner 的 Qwen 本地 ASR，现在取消任务后偶尔还会残留 python/qwen_worker.py 进程。请帮我定位应该从哪些文件查起、怎么复现、应该补哪些测试。",
+      "expected_output": "The agent should identify QwenWorkerPool, qwen_worker JSONL protocol, transcript_thread cleanup, benchmark --check-qwen-cleanup, and worker pool tests without exposing unrelated refactors.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "MiMo ASR 在 GUI 里连接测试通过，但我用 CLI 跑 scripts/asr_benchmark.py 时提示没有 API key。请解释为什么，并给一个不把 key 写进 report.json 的验证方式。",
+      "expected_output": "The agent should explain the GUI/CLI config split, avoid printing secrets, prefer VIDEOCAPTIONER_MIMO_ASR_API_KEY over --mimo-api-key, and mention that benchmark reports store command arrays.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我要给 ASR 增加一个新后端，它只返回纯文本，没有任何时间戳。现在要支持 SRT 和 word timestamps，应该怎么接入才不会破坏现有 Qwen/MiMo 分块和对齐逻辑？",
+      "expected_output": "The agent should distinguish backend contract from chunking/alignment, require a forced aligner or fail loudly when timestamps are requested, update factory/config/docs/tests, and reuse ChunkedASR behavior where appropriate.",
+      "files": []
+    }
+  ]
+}

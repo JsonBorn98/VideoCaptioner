@@ -17,6 +17,7 @@ from qfluentwidgets import (
     SettingCardGroup,
     SingleDirectionScrollArea,
     SubtitleLabel,
+    SwitchSettingCard,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -390,6 +391,14 @@ class QwenASRSettingWidget(QWidget):
             self.setting_group,
         )
 
+        self.compile_aligner_card = SwitchSettingCard(
+            FIF.SPEED_HIGH,  # type: ignore
+            self.tr("实验性编译对齐模型"),
+            self.tr("尝试使用 torch.compile 加速 ForcedAligner，失败时自动回退"),
+            cfg.qwen_compile_aligner,
+            self.setting_group,
+        )
+
         for card in [
             self.asr_model_card,
             self.aligner_model_card,
@@ -413,6 +422,7 @@ class QwenASRSettingWidget(QWidget):
             self.dtype_card,
             self.max_tokens_card,
             self.chunk_overlap_card,
+            self.compile_aligner_card,
         ]:
             self.setting_group.addSettingCard(card)
 

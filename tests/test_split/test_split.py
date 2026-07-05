@@ -298,6 +298,52 @@ class TestSubtitleSplitterEdgeCases:
 
         assert len(result.segments) > 0
 
+    def test_llm_merge_falls_back_after_repeated_unmatched_sentences(self):
+        """LLM连续错配时应局部规则降级,不抛错丢掉整段结果。"""
+        segments = [
+            ASRDataSeg(text=char, start_time=i * 100, end_time=(i + 1) * 100)
+            for i, char in enumerate("今天天气很好")
+        ]
+        splitter = SubtitleSplitter(
+            thread_num=1,
+            model="gpt-4o-mini",
+            max_word_count_cjk=20,
+        )
+
+        result = splitter._merge_segments_based_on_sentences(
+            segments,
+            ["完全不相关", "还是不相关", "继续不相关"],
+            max_unmatched=1,
+        )
+
+        assert "".join(seg.text for seg in result) == "今天天气很好"
+        assert result[0].start_time == 0
+        assert result[-1].end_time == segments[-1].end_time
+
+    def test_llm_merge_preserves_asr_gap_before_later_match(self):
+        """LLM从中间开始匹配时,前面的ASR片段应交给规则降级保留。"""
+        words = ["alpha ", "beta ", "gamma ", "delta "]
+        segments = [
+            ASRDataSeg(text=word, start_time=i * 500, end_time=(i + 1) * 500)
+            for i, word in enumerate(words)
+        ]
+        splitter = SubtitleSplitter(
+            thread_num=1,
+            model="gpt-4o-mini",
+            max_word_count_english=4,
+        )
+
+        result = splitter._merge_segments_based_on_sentences(
+            segments,
+            ["gamma delta"],
+            max_unmatched=1,
+        )
+
+        assert "".join(seg.text for seg in result).replace(" ", "") == "alphabetagammadelta"
+        assert result[0].start_time == 0
+        assert result[0].end_time == segments[1].end_time
+        assert result[1].start_time == segments[2].start_time
+
 
 class TestSplitterParameters:
     """测试分割器参数边界"""

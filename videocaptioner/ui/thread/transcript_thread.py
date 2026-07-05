@@ -9,6 +9,7 @@ from typing import Iterator
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from videocaptioner.core.asr import transcribe
+from videocaptioner.core.asr.qwen_local_asr import close_qwen_worker_pool
 from videocaptioner.core.asr.qwen_runtime import clear_qwen_model_cache
 from videocaptioner.core.entities import (
     TranscribeModelEnum,
@@ -195,11 +196,14 @@ class TranscriptThread(QThread):
         if not config or not config.transcribe_model:
             return
         if config.transcribe_model == TranscribeModelEnum.QWEN_LOCAL_ASR:
-            logger.info("跳过 Qwen Local 主进程缓存清理：模型运行在隔离 worker 中")
+            logger.info("关闭 Qwen Local 隔离 worker")
+            close_qwen_worker_pool()
             return
         if config.transcribe_model in {
             TranscribeModelEnum.MIMO_ASR_API,
         }:
+            logger.info("关闭 MiMo/Qwen 对齐隔离 worker")
+            close_qwen_worker_pool()
             clear_qwen_model_cache()
 
     def _cleanup_temp_audio(self):
@@ -285,15 +289,17 @@ class TranscriptThread(QThread):
             ):
                 audio_track_index = self.task.selected_audio_track_index
                 logger.info(
-                    "开始转换音频: input=%s, output=%s, audio_track_index=%s",
+                    "开始转换音频: input=%s, output=%s, audio_track_index=%s, loudnorm=%s",
                     video_path,
                     temp_audio_path,
                     audio_track_index,
+                    self.task.transcribe_config.audio_loudnorm,
                 )
                 is_success = video2audio(
                     str(video_path),
                     output=temp_audio_path,
                     audio_track_index=audio_track_index,
+                    loudnorm=self.task.transcribe_config.audio_loudnorm,
                 )
             self._raise_if_cancelled()
             if not is_success:

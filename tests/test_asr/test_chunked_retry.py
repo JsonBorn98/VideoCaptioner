@@ -34,11 +34,20 @@ class RetryAwareMockASR(BaseASR):
         need_word_time_stamp: bool = False,
         call_state: Optional[dict] = None,
         degrade_on_attempts: Optional[set] = None,
+        audio_duration: float | None = None,
+        cache_identity: str | None = None,
     ):
-        super().__init__(audio_input, use_cache, need_word_time_stamp)
+        super().__init__(
+            audio_input,
+            use_cache=use_cache,
+            need_word_time_stamp=need_word_time_stamp,
+            audio_duration=audio_duration,
+            cache_identity=cache_identity,
+        )
         # call_state is shared via asr_kwargs so all instances see the same counter.
         self._call_state = call_state or {"count": 0}
         self._degrade_on_attempts = degrade_on_attempts or set()
+        self._call_state.setdefault("cache_identities", []).append(self.cache_identity)
 
     def _run(
         self, callback: Optional[Callable[[int, str], None]] = None, **kwargs
@@ -169,6 +178,61 @@ class TestChunkedRetry:
             timestamps = [seg.start_time for seg in result.segments]
             assert min(timestamps) == 0
             assert max(timestamps) >= 10000
+        finally:
+            Path(audio_path).unlink()
+
+    def test_subchunk_retry_uses_source_range_cache_identities(self):
+        """子块重试使用源音频范围 identity，而不是导出后的子块字节。"""
+        audio_path = _create_audio(30)
+        try:
+            call_state = {"count": 0}
+            chunked = ChunkedASR(
+                asr_class=RetryAwareMockASR,
+                audio_path=audio_path,
+                asr_kwargs={
+                    "need_word_time_stamp": True,
+                    "call_state": call_state,
+                    "degrade_on_attempts": {0, 1},
+                },
+                chunk_length=20,
+                chunk_overlap=5,
+                chunk_concurrency=1,
+            )
+
+            chunked.run()
+
+            identities = call_state["cache_identities"]
+            assert identities[0] == identities[1]
+            assert identities[0].endswith("-0-20000")
+            assert identities[2].endswith("-0-10000")
+            assert identities[3].endswith("-10000-20000")
+            assert len(set(identities[:4])) == 3
+        finally:
+            Path(audio_path).unlink()
+
+    def test_can_skip_same_chunk_retry_for_deterministic_backends(self):
+        """首次异常后可直接拆子块，避免确定性本地模型重复同一输入。"""
+        audio_path = _create_audio(30)
+        try:
+            call_state = {"count": 0}
+            chunked = ChunkedASR(
+                asr_class=RetryAwareMockASR,
+                audio_path=audio_path,
+                asr_kwargs={
+                    "need_word_time_stamp": True,
+                    "call_state": call_state,
+                    "degrade_on_attempts": {0},
+                },
+                chunk_length=20,
+                chunk_overlap=5,
+                chunk_concurrency=1,
+                retry_same_chunk=False,
+            )
+            result = chunked.run()
+
+            assert result.has_data()
+            # chunk1: attempt0 (degrade) + two sub-chunks; chunk2: one normal call.
+            assert call_state["count"] == 4
         finally:
             Path(audio_path).unlink()
 

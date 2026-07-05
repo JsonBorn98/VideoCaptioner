@@ -82,6 +82,8 @@ def run(args: Namespace, config: dict) -> int:
         "bijian": TranscribeModelEnum.BIJIAN,
         "jianying": TranscribeModelEnum.JIANYING,
         "whisper-cpp": TranscribeModelEnum.WHISPER_CPP,
+        "mimo-asr": TranscribeModelEnum.MIMO_ASR_API,
+        "qwen-local": TranscribeModelEnum.QWEN_LOCAL_ASR,
     }
 
     # Map CLI string values to enums
@@ -100,6 +102,7 @@ def run(args: Namespace, config: dict) -> int:
         transcribe_model=asr_map.get(asr_engine),
         transcribe_language=language if language != "auto" else "",
         need_word_time_stamp=getattr(args, "word_timestamps", False),
+        audio_loudnorm=bool(get(config, "transcribe.audio_loudnorm", False)),
         # FasterWhisper options
         faster_whisper_model=fw_model_enum,
         faster_whisper_model_dir=None,
@@ -117,6 +120,28 @@ def run(args: Namespace, config: dict) -> int:
         whisper_api_base=get(config, "whisper_api.api_base", ""),
         whisper_api_model=get(config, "whisper_api.model", "whisper-1"),
         whisper_api_prompt=get(config, "whisper_api.prompt", ""),
+        # MiMo ASR options
+        mimo_asr_api_key=get(config, "transcribe.mimo_asr.api_key", ""),
+        mimo_asr_api_base=get(config, "transcribe.mimo_asr.api_base", ""),
+        mimo_asr_model=get(config, "transcribe.mimo_asr.model", "mimo-v2.5-asr"),
+        mimo_asr_timeout=get(config, "transcribe.mimo_asr.timeout", 600),
+        # Qwen ASR / aligner options
+        qwen_asr_model=get(config, "transcribe.qwen.asr_model", "Qwen/Qwen3-ASR-1.7B"),
+        qwen_aligner_model=get(
+            config,
+            "transcribe.qwen.aligner_model",
+            "Qwen/Qwen3-ForcedAligner-0.6B",
+        ),
+        qwen_model_dir=get(config, "transcribe.qwen.model_dir", ""),
+        qwen_device=get(config, "transcribe.qwen.device", "auto"),
+        qwen_dtype=get(config, "transcribe.qwen.dtype", "auto"),
+        qwen_max_new_tokens=get(config, "transcribe.qwen.max_new_tokens", 2048),
+        qwen_chunk_overlap_seconds=get(
+            config,
+            "transcribe.qwen.chunk_overlap_seconds",
+            10,
+        ),
+        qwen_compile_aligner=bool(get(config, "transcribe.qwen.compile_aligner", False)),
     )
 
 
@@ -147,7 +172,11 @@ def run(args: Namespace, config: dict) -> int:
             from videocaptioner.core.utils.video_utils import video2audio
             temp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             temp_audio.close()
-            if not video2audio(str(input_path), output=temp_audio.name):
+            if not video2audio(
+                str(input_path),
+                output=temp_audio.name,
+                loudnorm=transcribe_config.audio_loudnorm,
+            ):
                 # Check if the temp file is empty (no audio track)
                 if os.path.getsize(temp_audio.name) == 0:
                     output.error("Input video has no audio track")

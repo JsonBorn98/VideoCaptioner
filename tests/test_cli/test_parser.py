@@ -1,10 +1,15 @@
 """Tests for CLI argument parsing — verify all commands parse correctly."""
 
+from argparse import Namespace
+from pathlib import Path
+
 import pytest
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli.commands.process import _resolve_final_output_path
-from videocaptioner.cli.main import main
+from videocaptioner.cli.config import build_config
+from videocaptioner.cli.main import _build_cli_overrides, main
+from videocaptioner.core.entities import TranscribeModelEnum
 
 
 class TestMainParser:
@@ -100,10 +105,165 @@ class TestTranscribeParser:
     def test_file_not_found(self):
         assert main(["transcribe", "/nonexistent/file.mp4"]) == EXIT.FILE_NOT_FOUND
 
+    def test_accepts_new_asr_backends(self):
+        assert main(["transcribe", "/nonexistent/file.mp4", "--asr", "faster-whisper"]) == EXIT.FILE_NOT_FOUND
+        assert main(["transcribe", "/nonexistent/file.mp4", "--asr", "mimo-asr"]) == EXIT.FILE_NOT_FOUND
+        assert main(["transcribe", "/nonexistent/file.mp4", "--asr", "qwen-local"]) == EXIT.FILE_NOT_FOUND
+
     def test_verbose_quiet_mutually_exclusive(self):
         with pytest.raises(SystemExit) as exc:
             main(["transcribe", "test.mp4", "-v", "-q"])
         assert exc.value.code == 2
+
+    def test_asr_cli_overrides_include_mimo_and_qwen_options(self):
+        overrides = _build_cli_overrides(
+            Namespace(
+                asr="qwen-local",
+                mimo_api_key="sk-mimo",
+                mimo_api_base="https://example.test/v1",
+                mimo_model="mimo-test",
+                mimo_timeout=120,
+                qwen_asr_model="Qwen/Qwen3-ASR-0.6B",
+                qwen_aligner_model="Qwen/Qwen3-ForcedAligner-0.6B",
+                qwen_model_dir="C:/models",
+                qwen_device="cpu",
+                qwen_dtype="float32",
+                qwen_max_new_tokens=4096,
+                qwen_chunk_overlap=12,
+                qwen_compile_aligner=True,
+            )
+        )
+
+        assert overrides["transcribe"]["asr"] == "qwen-local"
+        assert overrides["transcribe"]["mimo_asr"]["api_key"] == "sk-mimo"
+        assert overrides["transcribe"]["mimo_asr"]["timeout"] == 120
+        assert overrides["transcribe"]["qwen"]["asr_model"] == "Qwen/Qwen3-ASR-0.6B"
+        assert overrides["transcribe"]["qwen"]["model_dir"] == "C:/models"
+        assert overrides["transcribe"]["qwen"]["chunk_overlap_seconds"] == 12
+        assert overrides["transcribe"]["qwen"]["compile_aligner"] is True
+
+    def test_transcribe_command_builds_qwen_config(self, tmp_path, monkeypatch):
+        import videocaptioner.core.asr as asr_package
+        from videocaptioner.cli.commands import transcribe as transcribe_cmd
+
+        audio_path = tmp_path / "input.wav"
+        audio_path.write_bytes(b"fake wav")
+        output_path = tmp_path / "out.srt"
+        captured = {}
+
+        class FakeASRData:
+            segments = []
+
+            def save(self, save_path):
+                Path(save_path).write_text("", encoding="utf-8")
+
+        def fake_transcribe(audio, config, callback=None):
+            captured["audio"] = audio
+            captured["config"] = config
+            return FakeASRData()
+
+        monkeypatch.setattr(asr_package, "transcribe", fake_transcribe)
+        config = build_config(
+            cli_overrides={
+                "transcribe": {
+                    "asr": "qwen-local",
+                    "qwen": {
+                        "asr_model": "Qwen/Qwen3-ASR-0.6B",
+                        "aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
+                        "model_dir": "C:/models",
+                        "device": "cpu",
+                        "dtype": "float32",
+                        "max_new_tokens": 4096,
+                        "chunk_overlap_seconds": 12,
+                        "compile_aligner": True,
+                    },
+                }
+            }
+        )
+
+        result = transcribe_cmd.run(
+            Namespace(
+                input=str(audio_path),
+                output=str(output_path),
+                verbose=False,
+                quiet=True,
+                word_timestamps=True,
+            ),
+            config,
+        )
+
+        assert result == EXIT.SUCCESS
+        transcribe_config = captured["config"]
+        assert transcribe_config.transcribe_model == TranscribeModelEnum.QWEN_LOCAL_ASR
+        assert transcribe_config.qwen_asr_model == "Qwen/Qwen3-ASR-0.6B"
+        assert transcribe_config.qwen_model_dir == "C:/models"
+        assert transcribe_config.qwen_device == "cpu"
+        assert transcribe_config.qwen_dtype == "float32"
+        assert transcribe_config.qwen_max_new_tokens == 4096
+        assert transcribe_config.qwen_chunk_overlap_seconds == 12
+        assert transcribe_config.qwen_compile_aligner is True
+
+    def test_transcribe_command_builds_mimo_config(self, tmp_path, monkeypatch):
+        import videocaptioner.core.asr as asr_package
+        from videocaptioner.cli.commands import transcribe as transcribe_cmd
+
+        audio_path = tmp_path / "input.wav"
+        audio_path.write_bytes(b"fake wav")
+        output_path = tmp_path / "out.srt"
+        captured = {}
+
+        class FakeASRData:
+            segments = []
+
+            def save(self, save_path):
+                Path(save_path).write_text("", encoding="utf-8")
+
+        def fake_transcribe(audio, config, callback=None):
+            captured["config"] = config
+            return FakeASRData()
+
+        monkeypatch.setattr(asr_package, "transcribe", fake_transcribe)
+        config = build_config(
+            cli_overrides={
+                "transcribe": {
+                    "asr": "mimo-asr",
+                    "mimo_asr": {
+                        "api_key": "sk-mimo",
+                        "api_base": "https://example.test/v1",
+                        "model": "mimo-test",
+                        "timeout": 120,
+                    },
+                    "qwen": {
+                        "aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
+                        "device": "cpu",
+                        "dtype": "float32",
+                        "compile_aligner": True,
+                    },
+                }
+            }
+        )
+
+        result = transcribe_cmd.run(
+            Namespace(
+                input=str(audio_path),
+                output=str(output_path),
+                verbose=False,
+                quiet=True,
+                word_timestamps=True,
+            ),
+            config,
+        )
+
+        assert result == EXIT.SUCCESS
+        transcribe_config = captured["config"]
+        assert transcribe_config.transcribe_model == TranscribeModelEnum.MIMO_ASR_API
+        assert transcribe_config.mimo_asr_api_key == "sk-mimo"
+        assert transcribe_config.mimo_asr_api_base == "https://example.test/v1"
+        assert transcribe_config.mimo_asr_model == "mimo-test"
+        assert transcribe_config.mimo_asr_timeout == 120
+        assert transcribe_config.qwen_device == "cpu"
+        assert transcribe_config.qwen_dtype == "float32"
+        assert transcribe_config.qwen_compile_aligner is True
 
 
 class TestSubtitleParser:

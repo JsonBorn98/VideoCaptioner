@@ -112,6 +112,7 @@ class TaskFactory:
             transcribe_language=LANGUAGES[cfg.transcribe_language.value.value],
             need_word_time_stamp=need_word_time_stamp,
             output_format=cfg.transcribe_output_format.value,
+            audio_loudnorm=cfg.audio_loudnorm.value,
             # Whisper Cpp 配置
             whisper_model=cfg.whisper_model.value,
             # Whisper API 配置
@@ -132,6 +133,7 @@ class TaskFactory:
             qwen_dtype=cfg.qwen_dtype.value,
             qwen_max_new_tokens=cfg.qwen_max_new_tokens.value,
             qwen_chunk_overlap_seconds=cfg.qwen_chunk_overlap_seconds.value,
+            qwen_compile_aligner=cfg.qwen_compile_aligner.value,
             # Faster Whisper 配置
             faster_whisper_program=cfg.faster_whisper_program.value,
             faster_whisper_model=cfg.faster_whisper_model.value,

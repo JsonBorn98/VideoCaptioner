@@ -5,7 +5,7 @@ from videocaptioner.core.asr.bcut import BcutASR
 from videocaptioner.core.asr.chunked_asr import ChunkedASR
 from videocaptioner.core.asr.faster_whisper import FasterWhisperASR
 from videocaptioner.core.asr.jianying import JianYingASR
-from videocaptioner.core.asr.mimo_asr import MiMoASR
+from videocaptioner.core.asr.mimo_asr import MAX_RAW_AUDIO_BYTES_FOR_BASE64, MiMoASR
 from videocaptioner.core.asr.qwen_local_asr import QwenLocalASR
 from videocaptioner.core.asr.whisper_api import WhisperAPI
 from videocaptioner.core.asr.whisper_cpp import WhisperCppASR
@@ -205,7 +205,9 @@ def _create_mimo_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
         "aligner_model_dir": config.qwen_model_dir or "",
         "aligner_device": config.qwen_device or "auto",
         "aligner_dtype": config.qwen_dtype or "auto",
+        "aligner_compile": config.qwen_compile_aligner,
         "aligner_temp_dir": config.runtime_temp_dir or "",
+        "request_memo": {},
     }
     return ChunkedASR(
         asr_class=MiMoASR,
@@ -213,7 +215,9 @@ def _create_mimo_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
         asr_kwargs=asr_kwargs,
         chunk_length=chunk_length,
         chunk_overlap=chunk_overlap,
-        chunk_concurrency=1,
+        chunk_concurrency=3,
+        chunk_boundary_mode="vad",
+        max_chunk_payload_bytes=MAX_RAW_AUDIO_BYTES_FOR_BASE64,
     )
 
 
@@ -230,6 +234,7 @@ def _create_qwen_local_asr(audio_path: str, config: TranscribeConfig) -> Chunked
         "device": config.qwen_device or "auto",
         "dtype": config.qwen_dtype or "auto",
         "max_new_tokens": config.qwen_max_new_tokens,
+        "compile_aligner": config.qwen_compile_aligner,
         "temp_dir": config.runtime_temp_dir or "",
     }
     return ChunkedASR(
@@ -239,6 +244,10 @@ def _create_qwen_local_asr(audio_path: str, config: TranscribeConfig) -> Chunked
         chunk_length=60 * 5,
         chunk_overlap=chunk_overlap,
         chunk_concurrency=1,
+        chunk_audio_format="wav",
+        retry_same_chunk=False,
+        chunk_boundary_mode="vad",
+        pass_source_range=True,
     )
 
 

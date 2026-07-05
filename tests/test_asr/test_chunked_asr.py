@@ -15,14 +15,17 @@
 
 import io
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
 import pytest
 from pydub import AudioSegment
+from pydub.generators import Sine
 
-from videocaptioner.core.asr.asr_data import ASRDataSeg
-from videocaptioner.core.asr.base import BaseASR
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+from videocaptioner.core.asr.base import ASRResultDegradedError, BaseASR
 from videocaptioner.core.asr.chunked_asr import ChunkedASR
 
 # ============================================================================
@@ -98,6 +101,319 @@ class MockASR(BaseASR):
         ]
 
 
+class DurationAwareMockASR(BaseASR):
+    """Mock backend that records precomputed chunk durations."""
+
+    duration_values: list[float] = []
+    duration_probe_count = 0
+
+    def __init__(
+        self,
+        audio_input,
+        use_cache: bool = False,
+        need_word_time_stamp: bool = False,
+        audio_duration: float | None = None,
+    ):
+        super().__init__(
+            audio_input,
+            use_cache,
+            need_word_time_stamp,
+            audio_duration=audio_duration,
+        )
+        self.duration_values.append(self.audio_duration)
+
+    def _get_audio_duration(self) -> float:
+        self.__class__.duration_probe_count += 1
+        return super()._get_audio_duration()
+
+    def _run(
+        self, callback: Optional[Callable[[int, str], None]] = None, **kwargs
+    ) -> dict:
+        return {
+            "segments": [
+                {
+                    "text": "duration",
+                    "start": 0,
+                    "end": max(0.001, self.audio_duration),
+                }
+            ]
+        }
+
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
+        return [
+            ASRDataSeg(
+                text=seg["text"],
+                start_time=int(seg["start"] * 1000),
+                end_time=int(seg["end"] * 1000),
+            )
+            for seg in resp_data["segments"]
+        ]
+
+
+class PipelineMockASR(BaseASR):
+    """Two-stage backend used to prove API work continues during alignment."""
+
+    lock = threading.Lock()
+    next_instance_id = 0
+    transcript_completed_count = 0
+    first_alignment_finished_transcript_count = 0
+    alignment_order: list[int] = []
+
+    @classmethod
+    def reset(cls):
+        with cls.lock:
+            cls.next_instance_id = 0
+            cls.transcript_completed_count = 0
+            cls.first_alignment_finished_transcript_count = 0
+            cls.alignment_order = []
+
+    def __init__(
+        self,
+        audio_input,
+        use_cache: bool = False,
+        audio_duration: float | None = None,
+        **kwargs,
+    ):
+        super().__init__(audio_input, use_cache=use_cache, audio_duration=audio_duration)
+        source_start_ms = kwargs.get("source_start_ms")
+        with self.lock:
+            if source_start_ms is None:
+                self.instance_id = self.next_instance_id
+                type(self).next_instance_id += 1
+            else:
+                duration_ms = max(1, int((audio_duration or 1) * 1000))
+                self.instance_id = int(source_start_ms) // duration_ms
+
+    def run_transcript_stage(self, callback=None, **kwargs):
+        time.sleep(0.02)
+        with self.lock:
+            type(self).transcript_completed_count += 1
+        return {"text": f"pipe-{self.instance_id}", "seconds": 1.0}
+
+    def run_alignment_stage(self, resp_data: dict, callback=None, **kwargs):
+        with self.lock:
+            type(self).alignment_order.append(self.instance_id)
+            is_first_alignment = len(self.alignment_order) == 1
+        if is_first_alignment:
+            time.sleep(0.3)
+            with self.lock:
+                type(self).first_alignment_finished_transcript_count = (
+                    self.transcript_completed_count
+                )
+        return ASRData(
+            [
+                ASRDataSeg(
+                    text=str(resp_data["text"]),
+                    start_time=0,
+                    end_time=1000,
+                )
+            ]
+        )
+
+    def _run(self, callback=None, **kwargs):
+        raise AssertionError("PipelineMockASR should use the two-stage path")
+
+    def _make_segments(self, resp_data: dict, _allow_degraded: bool = False):
+        return []
+
+
+class CacheIdentityMockASR(BaseASR):
+    """Mock backend that records cache identity propagation."""
+
+    cache_identities: list[str] = []
+
+    def __init__(
+        self,
+        audio_input,
+        use_cache: bool = False,
+        need_word_time_stamp: bool = False,
+        audio_duration: float | None = None,
+        cache_identity: str | None = None,
+    ):
+        super().__init__(
+            audio_input,
+            use_cache=use_cache,
+            need_word_time_stamp=need_word_time_stamp,
+            audio_duration=audio_duration,
+            cache_identity=cache_identity,
+        )
+        self.__class__.cache_identities.append(self.cache_identity)
+
+    def _run(
+        self, callback: Optional[Callable[[int, str], None]] = None, **kwargs
+    ) -> dict:
+        return {
+            "segments": [
+                {
+                    "text": "cache",
+                    "start": 0,
+                    "end": max(0.001, self.audio_duration),
+                }
+            ]
+        }
+
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
+        return [
+            ASRDataSeg(
+                text=seg["text"],
+                start_time=int(seg["start"] * 1000),
+                end_time=int(seg["end"] * 1000),
+            )
+            for seg in resp_data["segments"]
+        ]
+
+
+class SourceRangeMockASR(BaseASR):
+    """Mock backend that records source-range handoff instead of chunk payload."""
+
+    calls: list[dict] = []
+
+    def __init__(
+        self,
+        audio_input,
+        use_cache: bool = False,
+        need_word_time_stamp: bool = False,
+        audio_duration: float | None = None,
+        cache_identity: str | None = None,
+        source_audio_path: str = "",
+        source_start_ms: int | None = None,
+        source_duration_ms: int | None = None,
+    ):
+        super().__init__(
+            audio_input,
+            use_cache=use_cache,
+            need_word_time_stamp=need_word_time_stamp,
+            audio_duration=audio_duration,
+            cache_identity=cache_identity,
+        )
+        self.source_audio_path = source_audio_path
+        self.source_start_ms = source_start_ms
+        self.source_duration_ms = source_duration_ms
+        self.__class__.calls.append(
+            {
+                "payload_size": len(self.file_binary or b""),
+                "source_audio_path": source_audio_path,
+                "source_start_ms": source_start_ms,
+                "source_duration_ms": source_duration_ms,
+                "audio_duration": self.audio_duration,
+            }
+        )
+
+    def _run(
+        self, callback: Optional[Callable[[int, str], None]] = None, **kwargs
+    ) -> dict:
+        return {
+            "segments": [
+                {
+                    "text": "source",
+                    "start": 0,
+                    "end": max(0.001, self.audio_duration),
+                }
+            ]
+        }
+
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
+        return [
+            ASRDataSeg(
+                text=seg["text"],
+                start_time=int(seg["start"] * 1000),
+                end_time=int(seg["end"] * 1000),
+            )
+            for seg in resp_data["segments"]
+        ]
+
+
+class BatchMockASR(BaseASR):
+    """Mock backend that supports batch first-pass transcription."""
+
+    batch_calls: list[list[int | None]] = []
+    single_run_count = 0
+    fail_offsets_ms: set[int] = set()
+
+    def __init__(
+        self,
+        audio_input,
+        use_cache: bool = False,
+        need_word_time_stamp: bool = False,
+        audio_duration: float | None = None,
+        cache_identity: str | None = None,
+        source_audio_path: str = "",
+        source_start_ms: int | None = None,
+        source_duration_ms: int | None = None,
+    ):
+        super().__init__(
+            audio_input,
+            use_cache=use_cache,
+            need_word_time_stamp=need_word_time_stamp,
+            audio_duration=audio_duration,
+            cache_identity=cache_identity,
+        )
+        self.source_audio_path = source_audio_path
+        self.source_start_ms = source_start_ms
+        self.source_duration_ms = source_duration_ms
+
+    @classmethod
+    def reset(cls):
+        cls.batch_calls = []
+        cls.single_run_count = 0
+        cls.fail_offsets_ms = set()
+
+    @classmethod
+    def run_batch_instances(cls, instances, callback=None):
+        cls.batch_calls.append([instance.source_start_ms for instance in instances])
+        if callback:
+            callback(50, "batch processing")
+        results = []
+        for instance in instances:
+            if instance.source_start_ms in cls.fail_offsets_ms:
+                results.append(ASRResultDegradedError("batch degraded"))
+                continue
+            results.append(
+                ASRData(
+                    [
+                        ASRDataSeg(
+                            text=f"batch-{instance.source_start_ms}",
+                            start_time=0,
+                            end_time=max(1, int(instance.audio_duration * 1000)),
+                        )
+                    ]
+                )
+            )
+        return results
+
+    def _run(
+        self, callback: Optional[Callable[[int, str], None]] = None, **kwargs
+    ) -> dict:
+        type(self).single_run_count += 1
+        return {
+            "segments": [
+                {
+                    "text": f"single-{self.source_start_ms}",
+                    "start": 0,
+                    "end": max(0.001, self.audio_duration),
+                }
+            ]
+        }
+
+    def _make_segments(
+        self, resp_data: dict, _allow_degraded: bool = False
+    ) -> List[ASRDataSeg]:
+        return [
+            ASRDataSeg(
+                text=seg["text"],
+                start_time=int(seg["start"] * 1000),
+                end_time=int(seg["end"] * 1000),
+            )
+            for seg in resp_data["segments"]
+        ]
+
+
 def create_test_audio_file(duration_sec: int = 60) -> str:
     """创建测试用音频文件（静音）
 
@@ -115,6 +431,16 @@ def create_test_audio_file(duration_sec: int = 60) -> str:
     temp_path = temp_file.name
     temp_file.close()  # 关闭文件句柄，让 pydub 可以写入
     audio.export(temp_path, format="mp3")
+    return temp_path
+
+
+def create_tone_audio_file(duration_sec: int = 60) -> str:
+    """Create a non-silent test audio file."""
+    audio = Sine(440).to_audio_segment(duration=duration_sec * 1000)
+    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    temp_path = temp_file.name
+    temp_file.close()
+    audio.export(temp_path, format="wav")
     return temp_path
 
 
@@ -208,6 +534,60 @@ class TestChunkedASRBasics:
         finally:
             Path(audio_input).unlink()
 
+    def test_batch_backend_uses_one_batch_for_first_pass(self):
+        """Batch-capable backends can transcribe all initial chunks in one request."""
+        audio_input = create_test_audio_file(25)
+        try:
+            BatchMockASR.reset()
+            chunked = ChunkedASR(
+                asr_class=BatchMockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+                chunk_concurrency=1,
+                pass_source_range=True,
+            )
+
+            result = chunked.run()
+
+            assert BatchMockASR.batch_calls == [[0, 10_000, 20_000]]
+            assert BatchMockASR.single_run_count == 0
+            assert [seg.text for seg in result.segments] == [
+                "batch-0",
+                "batch-10000",
+                "batch-20000",
+            ]
+        finally:
+            Path(audio_input).unlink()
+
+    def test_batch_backend_retries_only_degraded_chunks(self):
+        """A degraded batch item falls back to the existing single-chunk retry path."""
+        audio_input = create_test_audio_file(25)
+        try:
+            BatchMockASR.reset()
+            BatchMockASR.fail_offsets_ms = {10_000}
+            chunked = ChunkedASR(
+                asr_class=BatchMockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+                chunk_concurrency=1,
+                pass_source_range=True,
+                retry_same_chunk=True,
+            )
+
+            result = chunked.run()
+
+            assert BatchMockASR.batch_calls == [[0, 10_000, 20_000]]
+            assert BatchMockASR.single_run_count == 1
+            assert [seg.text for seg in result.segments] == [
+                "batch-0",
+                "single-10000",
+                "batch-20000",
+            ]
+        finally:
+            Path(audio_input).unlink()
+
 
 # ============================================================================
 # 测试音频分块逻辑
@@ -282,6 +662,159 @@ class TestAudioSplitting:
         finally:
             Path(audio_input).unlink()
 
+    def test_chunk_asr_receives_precomputed_audio_duration(self):
+        """ChunkedASR passes known chunk duration instead of probing each ASR instance."""
+        audio_input = create_test_audio_file(25)
+        try:
+            DurationAwareMockASR.duration_values = []
+            DurationAwareMockASR.duration_probe_count = 0
+            chunked = ChunkedASR(
+                asr_class=DurationAwareMockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+                chunk_concurrency=1,
+            )
+
+            chunked.run()
+
+            assert DurationAwareMockASR.duration_probe_count == 0
+            assert [round(value) for value in DurationAwareMockASR.duration_values] == [
+                10,
+                10,
+                5,
+            ]
+        finally:
+            Path(audio_input).unlink()
+
+    def test_direct_asr_cache_identity_defaults_to_crc32(self):
+        """Direct ASR instances keep byte-CRC cache identity unless caller overrides it."""
+        audio_input = create_test_audio_file(1)
+        try:
+            CacheIdentityMockASR.cache_identities = []
+            audio_bytes = Path(audio_input).read_bytes()
+            asr = CacheIdentityMockASR(audio_bytes, audio_duration=1)
+
+            assert asr.cache_identity == asr.crc32_hex
+            assert asr._get_key() == asr.crc32_hex
+        finally:
+            Path(audio_input).unlink()
+
+    def test_chunk_cache_identity_is_stable_across_export_formats(self):
+        """Chunk cache identity depends on source range, not exported chunk bytes."""
+        audio_input = create_test_audio_file(25)
+        try:
+            CacheIdentityMockASR.cache_identities = []
+            mp3_chunked = ChunkedASR(
+                asr_class=CacheIdentityMockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+                chunk_concurrency=1,
+                chunk_audio_format="mp3",
+            )
+            mp3_chunked.run()
+            mp3_identities = list(CacheIdentityMockASR.cache_identities)
+
+            CacheIdentityMockASR.cache_identities = []
+            wav_chunked = ChunkedASR(
+                asr_class=CacheIdentityMockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+                chunk_concurrency=1,
+                chunk_audio_format="wav",
+            )
+            wav_chunked.run()
+
+            assert mp3_identities == CacheIdentityMockASR.cache_identities
+            assert [identity.rsplit("-", 2)[1:] for identity in mp3_identities] == [
+                ["0", "10000"],
+                ["10000", "20000"],
+                ["20000", "25000"],
+            ]
+        finally:
+            Path(audio_input).unlink()
+
+    def test_retry_subchunk_split_reuses_loaded_source_audio(self):
+        """Retry splitting can use the decoded source audio instead of parent bytes."""
+        audio_input = create_test_audio_file(20)
+        try:
+            chunked = ChunkedASR(
+                asr_class=MockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+            )
+            chunked._split_audio()
+
+            subchunks = chunked._split_chunk_bytes(
+                b"not a decodable parent chunk",
+                2,
+                source_offset_ms=0,
+                source_duration_ms=10_000,
+            )
+
+            assert len(subchunks) == 2
+            assert [offset for _, offset, _ in subchunks] == [0, 5000]
+            assert [duration for _, _, duration in subchunks] == [5000, 5000]
+        finally:
+            Path(audio_input).unlink()
+
+    def test_export_chunks_respects_payload_byte_limit(self):
+        """Oversized exported chunks are split again using source byte rate."""
+        audio_input = create_test_audio_file(20)
+        try:
+            chunked = ChunkedASR(
+                asr_class=MockASR,
+                audio_path=audio_input,
+                chunk_length=20,
+                chunk_overlap=0,
+                chunk_audio_format="wav",
+                max_chunk_payload_bytes=100_000,
+            )
+
+            chunks = chunked._split_audio()
+
+            assert len(chunks) > 1
+            assert all(len(chunk_bytes) <= 100_000 for chunk_bytes, _ in chunks)
+            assert [offset for _, offset in chunks] == sorted(offset for _, offset in chunks)
+        finally:
+            Path(audio_input).unlink()
+
+    def test_source_range_backend_skips_chunk_payload_export(self):
+        """Backends can receive source path/range instead of exported chunk bytes."""
+        audio_input = create_tone_audio_file(25)
+        try:
+            SourceRangeMockASR.calls = []
+            chunked = ChunkedASR(
+                asr_class=SourceRangeMockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+                chunk_concurrency=1,
+                pass_source_range=True,
+            )
+
+            chunked.run()
+
+            assert [call["payload_size"] for call in SourceRangeMockASR.calls] == [
+                0,
+                0,
+                0,
+            ]
+            assert [
+                call["source_audio_path"] for call in SourceRangeMockASR.calls
+            ] == [audio_input, audio_input, audio_input]
+            assert [
+                call["source_start_ms"] for call in SourceRangeMockASR.calls
+            ] == [0, 10_000, 20_000]
+            assert [
+                call["source_duration_ms"] for call in SourceRangeMockASR.calls
+            ] == [10_000, 10_000, 5_000]
+        finally:
+            Path(audio_input).unlink()
+
 
 # ============================================================================
 # 测试并发转录
@@ -335,6 +868,27 @@ class TestConcurrentTranscription:
             # 所有 segment 的文本都应该包含 "Chunk"
             for seg in result.segments:
                 assert "Chunk" in seg.text
+        finally:
+            Path(audio_input).unlink()
+
+    def test_two_stage_pipeline_keeps_api_stage_running_during_alignment(self):
+        audio_input = create_test_audio_file(40)
+        try:
+            PipelineMockASR.reset()
+            chunked = ChunkedASR(
+                asr_class=PipelineMockASR,
+                audio_path=audio_input,
+                chunk_length=10,
+                chunk_overlap=0,
+                chunk_concurrency=2,
+            )
+
+            result = chunked.run()
+
+            assert len(result.segments) == 4
+            assert PipelineMockASR.alignment_order == [0, 1, 2, 3]
+            assert PipelineMockASR.transcript_completed_count == 4
+            assert PipelineMockASR.first_alignment_finished_transcript_count >= 3
         finally:
             Path(audio_input).unlink()
 

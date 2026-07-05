@@ -601,6 +601,7 @@ class TranscribeConfig:
     transcribe_language: str = ""
     need_word_time_stamp: bool = True
     output_format: Optional[TranscribeOutputFormatEnum] = None
+    audio_loudnorm: bool = False
     # Whisper Cpp 配置
     whisper_model: Optional[WhisperModelEnum] = None
     # Whisper API 配置
@@ -621,6 +622,7 @@ class TranscribeConfig:
     qwen_dtype: str = "auto"
     qwen_max_new_tokens: int = 2048
     qwen_chunk_overlap_seconds: int = 10
+    qwen_compile_aligner: bool = False
     runtime_temp_dir: Optional[str] = None
     # Faster Whisper 配置
     faster_whisper_program: Optional[str] = None
@@ -648,6 +650,7 @@ class TranscribeConfig:
         )
         lines.append(f"Language: {self.transcribe_language or 'Auto'}")
         lines.append(f"Word Timestamp: {self.need_word_time_stamp}")
+        lines.append(f"Audio Loudnorm: {self.audio_loudnorm}")
         lines.append(
             f"Output Format: {self.output_format.value if self.output_format else 'None'}"
         )
@@ -666,6 +669,7 @@ class TranscribeConfig:
             lines.append("Native Timestamps: No")
             lines.append(f"Aligner Model: {self.qwen_aligner_model}")
             lines.append(f"Aligner Device: {self.qwen_device}")
+            lines.append(f"Compile Aligner: {self.qwen_compile_aligner}")
             lines.append(f"Chunk Overlap: {self.qwen_chunk_overlap_seconds}s")
             lines.append(f"Timeout: {self.mimo_asr_timeout}s")
 
@@ -677,6 +681,7 @@ class TranscribeConfig:
             lines.append(f"DType: {self.qwen_dtype}")
             lines.append(f"Max New Tokens: {self.qwen_max_new_tokens}")
             lines.append(f"Chunk Overlap: {self.qwen_chunk_overlap_seconds}s")
+            lines.append(f"Compile Aligner: {self.qwen_compile_aligner}")
 
         elif self.transcribe_model == TranscribeModelEnum.FASTER_WHISPER:
             lines.append(

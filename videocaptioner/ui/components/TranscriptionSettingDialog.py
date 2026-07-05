@@ -3,6 +3,7 @@ from qfluentwidgets import (
     BodyLabel,
     ComboBoxSettingCard,
     MessageBoxBase,
+    SwitchSettingCard,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -26,10 +27,18 @@ class TranscriptionSettingDialog(MessageBoxBase):
             texts=[fmt.value for fmt in TranscribeOutputFormatEnum],
             parent=self,
         )
+        self.audio_loudnorm_card = SwitchSettingCard(
+            FIF.VOLUME,
+            self.tr("音量标准化"),
+            self.tr("抽取音频时使用 EBU R128 loudnorm，适合音量忽大忽小的素材"),
+            cfg.audio_loudnorm,
+            self,
+        )
 
         # 添加到布局
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.output_format_card)
+        self.viewLayout.addWidget(self.audio_loudnorm_card)
         # 设置间距
         self.viewLayout.setSpacing(10)
 

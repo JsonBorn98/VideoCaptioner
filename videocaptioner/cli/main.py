@@ -21,6 +21,16 @@ from typing import List, Optional
 
 from videocaptioner.cli import exit_codes as EXIT
 
+ASR_ENGINE_CHOICES = [
+    "bijian",
+    "jianying",
+    "faster-whisper",
+    "whisper-api",
+    "whisper-cpp",
+    "mimo-asr",
+    "qwen-local",
+]
+
 
 def _configure_stdio() -> None:
     """Prefer UTF-8 CLI output, and never crash on legacy Windows encodings."""
@@ -58,6 +68,46 @@ def _add_output_options(parser: argparse.ArgumentParser) -> None:
         "--format",
         choices=["srt", "ass", "txt", "json"],
         help="Output subtitle format (default: srt)",
+    )
+
+
+def _add_advanced_asr_options(parser: argparse.ArgumentParser, *, hidden: bool = False) -> None:
+    """Add ASR backend-specific options that can also be stored in config."""
+    help_text = argparse.SUPPRESS if hidden else None
+
+    parser.add_argument("--mimo-api-key", metavar="KEY", help=help_text or "MiMo ASR API key")
+    parser.add_argument("--mimo-api-base", metavar="URL", help=help_text or "MiMo ASR API base URL")
+    parser.add_argument("--mimo-model", metavar="NAME", help=help_text or "MiMo ASR model name")
+    parser.add_argument("--mimo-timeout", type=int, metavar="SEC", help=help_text or "MiMo ASR timeout seconds")
+    parser.add_argument("--qwen-asr-model", metavar="NAME", help=help_text or "Qwen3 ASR model")
+    parser.add_argument("--qwen-aligner-model", metavar="NAME", help=help_text or "Qwen3 ForcedAligner model")
+    parser.add_argument("--qwen-model-dir", metavar="DIR", help=help_text or "Local Qwen model directory")
+    parser.add_argument(
+        "--qwen-device",
+        choices=["auto", "cuda:0", "cpu"],
+        help=help_text or "Qwen runtime device",
+    )
+    parser.add_argument(
+        "--qwen-dtype",
+        choices=["auto", "bfloat16", "float16", "float32"],
+        help=help_text or "Qwen runtime dtype",
+    )
+    parser.add_argument(
+        "--qwen-max-new-tokens",
+        type=int,
+        metavar="N",
+        help=help_text or "Qwen maximum generated tokens per chunk",
+    )
+    parser.add_argument(
+        "--qwen-chunk-overlap",
+        type=int,
+        metavar="SEC",
+        help=help_text or "Qwen/MiMo chunk overlap seconds",
+    )
+    parser.add_argument(
+        "--qwen-compile-aligner",
+        action="store_true",
+        help=help_text or "Experimentally compile Qwen3-ForcedAligner with torch.compile",
     )
 
 
@@ -112,15 +162,17 @@ def _build_transcribe_parser(subparsers) -> None:
     asr = p.add_argument_group("ASR options")
     asr.add_argument(
         "--asr",
-        choices=["bijian", "jianying", "whisper-api", "whisper-cpp"],
+        choices=ASR_ENGINE_CHOICES,
         help="ASR engine (default: bijian). "
              "bijian/jianying: free, no setup, Chinese & English only. "
-             "For other languages use whisper-api or whisper-cpp",
+             "For other languages use whisper-api, faster-whisper, MiMo, or Qwen",
     )
     asr.add_argument("--language", metavar="CODE",
                      help="Source language as ISO 639-1 code, or 'auto' (default: auto)")
     asr.add_argument("--word-timestamps", action="store_true",
                      help="Include word-level timestamps (for subtitle splitting)")
+    asr.add_argument("--audio-loudnorm", action="store_true",
+                     help="Apply EBU R128 loudness normalization while extracting audio")
     asr.add_argument("--whisper-api-key", metavar="KEY",
                      help="Whisper API key (for --asr whisper-api)")
     asr.add_argument("--whisper-api-base", metavar="URL",
@@ -135,6 +187,7 @@ def _build_transcribe_parser(subparsers) -> None:
         p.add_argument(arg, help=argparse.SUPPRESS)
     p.add_argument("--fw-vad-threshold", type=float, help=argparse.SUPPRESS)
     p.add_argument("--fw-voice-extraction", action="store_true", help=argparse.SUPPRESS)
+    _add_advanced_asr_options(p)
 
     p.set_defaults(func=_run_transcribe)
 
@@ -353,7 +406,7 @@ def _build_process_parser(subparsers) -> None:
     pipe.add_argument("--dub", action="store_true", help="Generate dubbed audio/video after subtitle processing")
     pipe.add_argument("--dub-only", action="store_true", help="Output only the dubbed result, skipping subtitle burn/embedding")
 
-    pipe.add_argument("--asr", choices=["bijian", "jianying", "whisper-api", "whisper-cpp"],
+    pipe.add_argument("--asr", choices=ASR_ENGINE_CHOICES,
                       help="ASR engine (default: bijian)")
     pipe.add_argument("--language", metavar="CODE",
                       help="Source language as ISO 639-1 code, or 'auto' (default: auto)")
@@ -387,6 +440,7 @@ def _build_process_parser(subparsers) -> None:
     p.add_argument("--batch-size", type=int, metavar="N", help=argparse.SUPPRESS)
     p.add_argument("--whisper-api-base", help=argparse.SUPPRESS)
     p.add_argument("--whisper-model", help=argparse.SUPPRESS)
+    _add_advanced_asr_options(p, hidden=True)
     p.add_argument("--dub-provider", choices=["siliconflow", "gemini", "edge"], help=argparse.SUPPRESS)
     p.add_argument("--tts-api-base", metavar="URL", help=argparse.SUPPRESS)
     p.add_argument("--tts-model", metavar="NAME", help=argparse.SUPPRESS)
@@ -455,7 +509,7 @@ def _build_config_parser(subparsers) -> None:
     init_p.add_argument("--llm-api-key", metavar="KEY", help="LLM API key")
     init_p.add_argument("--llm-api-base", metavar="URL", help="LLM API base URL")
     init_p.add_argument("--llm-model", metavar="NAME", help="LLM model")
-    init_p.add_argument("--asr", choices=["bijian", "jianying", "whisper-api", "whisper-cpp"], help="Default ASR engine")
+    init_p.add_argument("--asr", choices=ASR_ENGINE_CHOICES, help="Default ASR engine")
     init_p.add_argument("--translator", choices=["llm", "bing", "google"], help="Default translation service")
     init_p.add_argument("--target-language", "--to", dest="target_language", metavar="CODE", help=argparse.SUPPRESS)
     init_p.add_argument("--no-optimize", action="store_true", help="Disable AI subtitle polish by default")
@@ -554,6 +608,8 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
     # Transcribe
     _set("transcribe.asr", getattr(args, "asr", None))
     _set("transcribe.language", getattr(args, "language", None))
+    if getattr(args, "audio_loudnorm", False):
+        _set("transcribe.audio_loudnorm", True)
 
     # FasterWhisper
     _set("transcribe.faster_whisper.model", getattr(args, "fw_model", None))
@@ -566,6 +622,21 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
 
     # Whisper prompt
     _set("whisper_api.prompt", getattr(args, "whisper_prompt", None))
+
+    # MiMo ASR / Qwen ASR
+    _set("transcribe.mimo_asr.api_key", getattr(args, "mimo_api_key", None))
+    _set("transcribe.mimo_asr.api_base", getattr(args, "mimo_api_base", None))
+    _set("transcribe.mimo_asr.model", getattr(args, "mimo_model", None))
+    _set("transcribe.mimo_asr.timeout", getattr(args, "mimo_timeout", None))
+    _set("transcribe.qwen.asr_model", getattr(args, "qwen_asr_model", None))
+    _set("transcribe.qwen.aligner_model", getattr(args, "qwen_aligner_model", None))
+    _set("transcribe.qwen.model_dir", getattr(args, "qwen_model_dir", None))
+    _set("transcribe.qwen.device", getattr(args, "qwen_device", None))
+    _set("transcribe.qwen.dtype", getattr(args, "qwen_dtype", None))
+    _set("transcribe.qwen.max_new_tokens", getattr(args, "qwen_max_new_tokens", None))
+    _set("transcribe.qwen.chunk_overlap_seconds", getattr(args, "qwen_chunk_overlap", None))
+    if getattr(args, "qwen_compile_aligner", False):
+        _set("transcribe.qwen.compile_aligner", True)
 
     # Subtitle
     if getattr(args, "no_optimize", False):

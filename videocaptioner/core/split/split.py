@@ -747,9 +747,6 @@ class SubtitleSplitter:
 
         Returns:
             合并后的Segments列表
-
-        Raises:
-            ValueError: Unmatched sentences exceeded threshold时
         """
 
         def preprocess_text(s: str) -> str:
@@ -764,8 +761,21 @@ class SubtitleSplitter:
         unmatched_count = 0
 
         new_segments = []
+        emitted_until = 0
+
+        def append_rule_fallback(start: int, end: int, reason: str) -> None:
+            if start >= end:
+                return
+            logger.warning(
+                f"Falling back to rule split for ASR segments {start}:{end}: {reason}"
+            )
+            new_segments.extend(self._process_by_rules(segments[start:end]))
 
         for sentence in sentences:
+            if asr_index >= asr_len:
+                logger.warning(f"No ASR segments left for LLM sentence: {sentence}")
+                break
+
             logger.debug("==========")
             logger.debug(f"Processing sentence: {sentence}")
             logger.debug("Next sentences: :" + "".join(asr_texts[asr_index : asr_index + 10]))
@@ -808,6 +818,18 @@ class SubtitleSplitter:
                 start_seg_index = best_pos
                 end_seg_index = best_pos + best_window_size - 1
 
+                if end_seg_index < emitted_until:
+                    asr_index = emitted_until
+                    continue
+                if start_seg_index < emitted_until:
+                    start_seg_index = emitted_until
+
+                append_rule_fallback(
+                    emitted_until,
+                    start_seg_index,
+                    "LLM match skipped earlier ASR text",
+                )
+
                 segs_to_merge = segments[start_seg_index : end_seg_index + 1]
 
                 # 按时间切分避免跨度过大
@@ -829,15 +851,27 @@ class SubtitleSplitter:
 
                 max_shift = MATCH_MAX_SHIFT
                 asr_index = end_seg_index + 1
+                emitted_until = max(emitted_until, asr_index)
+                unmatched_count = 0
             else:
                 logger.warning(f"Cannot match sentence: {sentence}")
                 unmatched_count += 1
                 if unmatched_count > max_unmatched:
-                    raise ValueError(f"Unmatched sentences exceeded threshold {max_unmatched},processing aborted")
+                    append_rule_fallback(
+                        emitted_until,
+                        asr_len,
+                        f"unmatched LLM sentences exceeded threshold {max_unmatched}",
+                    )
+                    return sorted(new_segments, key=lambda seg: seg.start_time)
                 max_shift = MATCH_LARGE_SHIFT
-                asr_index = min(asr_index + 1, asr_len - 1)
+                asr_index = min(asr_index + 1, asr_len)
 
-        return new_segments
+        append_rule_fallback(
+            emitted_until,
+            asr_len,
+            "LLM output ended before all ASR text was consumed",
+        )
+        return sorted(new_segments, key=lambda seg: seg.start_time)
 
     def stop(self):
         """停止分割器并清理资源"""

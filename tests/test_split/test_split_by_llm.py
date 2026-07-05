@@ -6,9 +6,11 @@ Requires environment variables:
     OPENAI_MODEL: Model name (optional, defaults to gpt-4o-mini)
 """
 
+from types import SimpleNamespace
 
 import pytest
 
+import videocaptioner.core.split.split_by_llm as split_by_llm_module
 from videocaptioner.core.split.split_by_llm import count_words, split_by_llm
 
 
@@ -155,3 +157,47 @@ class TestSplitByLLM:
             assert (
                 word_count <= max_limit * 1.2
             ), f"分段长度应该符合限制: {word_count} > {max_limit}"
+
+    def test_split_retries_transient_llm_exception(self, monkeypatch):
+        calls = {"count": 0}
+        sleeps = []
+
+        def flaky_call_llm(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("temporary gateway error")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="Hello<br>world")
+                    )
+                ]
+            )
+
+        monkeypatch.setattr(split_by_llm_module, "call_llm", flaky_call_llm)
+        monkeypatch.setattr(split_by_llm_module.time, "sleep", sleeps.append)
+
+        result = split_by_llm(
+            "Hello world",
+            model="gpt-4o-mini",
+            max_word_count_english=4,
+        )
+
+        assert result == ["Hello", "world"]
+        assert calls["count"] == 2
+        assert sleeps == [split_by_llm_module.LLM_SPLIT_RETRY_BASE_DELAY_SECONDS]
+
+    def test_split_falls_back_after_retry_exhausted(self, monkeypatch):
+        calls = {"count": 0}
+
+        def failing_call_llm(*args, **kwargs):
+            calls["count"] += 1
+            raise RuntimeError("gateway down")
+
+        monkeypatch.setattr(split_by_llm_module, "call_llm", failing_call_llm)
+        monkeypatch.setattr(split_by_llm_module.time, "sleep", lambda delay: None)
+
+        result = split_by_llm("Hello world", model="gpt-4o-mini")
+
+        assert result == ["Hello world"]
+        assert calls["count"] == split_by_llm_module.LLM_SPLIT_MAX_ATTEMPTS

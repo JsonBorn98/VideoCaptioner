@@ -1,8 +1,11 @@
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydub import AudioSegment
+from pydub.generators import Sine
 
 import videocaptioner.core.asr.mimo_asr as mimo_asr_module
 import videocaptioner.core.asr.qwen_local_asr as qwen_local_module
@@ -11,6 +14,7 @@ import videocaptioner.core.asr.qwen_worker as qwen_worker_module
 from videocaptioner.core.asr.mimo_asr import MiMoASR
 from videocaptioner.core.asr.qwen_local_asr import QwenLocalASR
 from videocaptioner.core.asr.qwen_runtime import timestamp_items_to_segments
+from videocaptioner.core.asr.text_timing import make_timed_segments
 from videocaptioner.core.asr.transcribe import _create_mimo_asr, _create_qwen_local_asr
 from videocaptioner.core.entities import TranscribeConfig, TranscribeModelEnum
 
@@ -65,6 +69,7 @@ def test_mimo_asr_uses_qwen_aligner_for_word_timestamps(monkeypatch):
         aligner_model="Qwen/Qwen3-ForcedAligner-0.6B",
         aligner_device="cpu",
         aligner_dtype="float32",
+        aligner_compile=True,
         need_word_time_stamp=True,
     )
 
@@ -78,6 +83,7 @@ def test_mimo_asr_uses_qwen_aligner_for_word_timestamps(monkeypatch):
     assert align_calls[0]["language"] == "zh"
     assert align_calls[0]["aligner_model"] == "Qwen/Qwen3-ForcedAligner-0.6B"
     assert align_calls[0]["device"] == "cpu"
+    assert align_calls[0]["compile_aligner"] is True
     assert [seg.text for seg in segments] == ["你", "好"]
     assert segments[0].start_time == 100
     assert segments[1].end_time == 500
@@ -130,6 +136,60 @@ def test_mimo_asr_cleans_gateway_markup_before_alignment(monkeypatch):
     assert asr._get_key().startswith("v4-")
 
 
+def test_mimo_asr_reuses_request_memo_for_same_audio(monkeypatch):
+    completions = FakeCompletions()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=completions)
+
+    monkeypatch.setattr(mimo_asr_module, "OpenAI", FakeOpenAI)
+    request_memo = {}
+
+    first = MiMoASR(
+        audio_input=b"fake mp3",
+        api_key="sk-test",
+        language="zh",
+        request_memo=request_memo,
+    )
+    second = MiMoASR(
+        audio_input=b"fake mp3",
+        api_key="sk-test",
+        language="zh",
+        request_memo=request_memo,
+    )
+
+    assert first._run()["text"] == "你好世界"
+    assert second._run()["text"] == "你好世界"
+    assert len(completions.calls) == 1
+
+
+def test_mimo_base64_payload_size_limit_uses_raw_byte_boundary():
+    max_raw = mimo_asr_module.MAX_RAW_AUDIO_BYTES_FOR_BASE64
+
+    assert (
+        mimo_asr_module._base64_encoded_size(max_raw)
+        <= mimo_asr_module.MAX_BASE64_AUDIO_SIZE
+    )
+    assert (
+        mimo_asr_module._base64_encoded_size(max_raw + 1)
+        > mimo_asr_module.MAX_BASE64_AUDIO_SIZE
+    )
+
+
+def test_make_timed_segments_constrains_estimates_to_speech_ranges():
+    segments = make_timed_segments(
+        ["alpha beta gamma delta", "epsilon zeta eta theta"],
+        10_000,
+        speech_ranges_ms=[(1_000, 3_000), (7_000, 9_000)],
+    )
+
+    assert [(seg.start_time, seg.end_time) for seg in segments] == [
+        (1_000, 3_000),
+        (7_000, 9_000),
+    ]
+
+
 def test_mimo_asr_falls_back_to_estimated_segments_without_timestamps():
     asr = MiMoASR(
         audio_input=b"fake mp3",
@@ -159,6 +219,31 @@ def test_mimo_asr_falls_back_to_estimated_segments_without_timestamps():
     assert "More text" in segments[-1].text
     assert segments[-1].end_time == 2000
     assert asr._should_cache_response({"text": "plain text"}, segments) is False
+
+
+def test_mimo_estimated_timestamps_use_speech_ranges():
+    asr = MiMoASR(
+        audio_input=b"fake mp3",
+        api_key="sk-test",
+        need_word_time_stamp=True,
+        audio_duration=10.0,
+        speech_ranges_ms=[(1_000, 3_000), (7_000, 9_000)],
+    )
+    text = (
+        "one two three four five six seven eight nine ten. "
+        "eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen "
+        "nineteen twenty."
+    )
+
+    segments = asr._make_segments(
+        {"text": text, "seconds": 10},
+        _allow_degraded=True,
+    )
+
+    assert [(seg.start_time, seg.end_time) for seg in segments] == [
+        (1_000, 3_000),
+        (7_000, 9_000),
+    ]
 
 
 def test_mimo_asr_falls_back_when_alignment_coverage_is_low():
@@ -253,8 +338,10 @@ def test_qwen_local_asr_uses_runtime_and_returns_timestamps(monkeypatch):
         device="cpu",
         dtype="float32",
         max_new_tokens=512,
+        compile_aligner=True,
         need_word_time_stamp=True,
     )
+    asr.audio_duration = 0.8
 
     result = asr._run()
     segments = asr._make_segments(result)
@@ -263,9 +350,317 @@ def test_qwen_local_asr_uses_runtime_and_returns_timestamps(monkeypatch):
     assert calls[0]["aligner_model"] == "Qwen/Qwen3-ForcedAligner-0.6B"
     assert calls[0]["model_dir"] == "C:/models"
     assert calls[0]["return_time_stamps"] is True
+    assert calls[0]["compile_aligner"] is True
     assert calls[0]["callback"] is None
     assert [seg.text for seg in segments] == ["hello", "world"]
     assert segments[1].start_time == 400
+
+
+def test_qwen_runtime_compile_model_best_effort(monkeypatch):
+    model = object()
+    compiled = object()
+    fake_torch = SimpleNamespace(compile=lambda value: compiled)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert (
+        qwen_runtime_module._compile_model_if_requested(
+            model,
+            enabled=True,
+            label="test model",
+        )
+        is compiled
+    )
+
+
+def test_qwen_runtime_compile_model_falls_back_on_error(monkeypatch):
+    model = object()
+
+    def fail_compile(value):
+        raise RuntimeError("compile unsupported")
+
+    fake_torch = SimpleNamespace(compile=fail_compile)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert (
+        qwen_runtime_module._compile_model_if_requested(
+            model,
+            enabled=True,
+            label="test model",
+        )
+        is model
+    )
+
+
+def test_qwen_local_asr_passes_source_range_to_worker(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_qwen_worker(**kwargs):
+        calls.append(kwargs)
+        return {"text": "hello", "time_stamps": [], "seconds": 2.0}
+
+    monkeypatch.setattr(qwen_local_module, "run_qwen_worker", fake_run_qwen_worker)
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"fake wav")
+
+    asr = QwenLocalASR(
+        audio_input=b"",
+        need_word_time_stamp=False,
+        audio_duration=2.0,
+        source_audio_path=str(audio_path),
+        source_start_ms=1200,
+        source_duration_ms=2000,
+    )
+
+    result = asr._run()
+
+    assert result["text"] == "hello"
+    assert calls[0]["audio_input"] == str(audio_path)
+    assert calls[0]["clip_start_ms"] == 1200
+    assert calls[0]["clip_duration_ms"] == 2000
+
+
+def test_qwen_local_asr_batch_instances_use_source_ranges(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_qwen_batch_worker(**kwargs):
+        calls.append(kwargs)
+        return [
+            {
+                "text": "hello",
+                "time_stamps": [
+                    {"text": "hello", "start_time": 0.0, "end_time": 0.5},
+                ],
+            },
+            {
+                "text": "world",
+                "time_stamps": [
+                    {"text": "world", "start_time": 0.0, "end_time": 0.5},
+                ],
+            },
+        ]
+
+    monkeypatch.setattr(
+        qwen_local_module,
+        "run_qwen_batch_worker",
+        fake_run_qwen_batch_worker,
+    )
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"fake wav")
+
+    instances = [
+        QwenLocalASR(
+            audio_input=b"",
+            need_word_time_stamp=True,
+            audio_duration=1.0,
+            source_audio_path=str(audio_path),
+            source_start_ms=0,
+            source_duration_ms=1000,
+            cache_identity="chunk-0",
+        ),
+        QwenLocalASR(
+            audio_input=b"",
+            need_word_time_stamp=True,
+            audio_duration=1.0,
+            source_audio_path=str(audio_path),
+            source_start_ms=1000,
+            source_duration_ms=1000,
+            cache_identity="chunk-1",
+        ),
+    ]
+
+    results = QwenLocalASR.run_batch_instances(instances)
+
+    assert calls[0]["items"][0]["audio_input"] == str(audio_path)
+    assert calls[0]["items"][0]["clip_start_ms"] == 0
+    assert calls[0]["items"][1]["clip_start_ms"] == 1000
+    assert [result.segments[0].text for result in results] == ["hello", "world"]
+
+
+def test_qwen_runtime_audio_input_as_path_can_clip_source_range(tmp_path):
+    audio_path = tmp_path / "tone.wav"
+    Sine(440).to_audio_segment(duration=2000).export(audio_path, format="wav")
+
+    with qwen_runtime_module.audio_input_as_path(
+        str(audio_path),
+        temp_dir=str(tmp_path),
+        clip_start_ms=500,
+        clip_duration_ms=700,
+    ) as clip_path:
+        clip_path_obj = Path(clip_path)
+        clipped_audio = AudioSegment.from_file(clip_path)
+        assert clip_path_obj != audio_path
+        assert abs(len(clipped_audio) - 700) <= 25
+
+    assert not clip_path_obj.exists()
+
+
+def test_qwen_runtime_audio_input_as_qwen_audio_clips_to_pcm_tuple(tmp_path):
+    numpy = pytest.importorskip("numpy")
+    audio_path = tmp_path / "tone.wav"
+    Sine(440).to_audio_segment(duration=2000).export(audio_path, format="wav")
+
+    with qwen_runtime_module.audio_input_as_qwen_audio(
+        str(audio_path),
+        temp_dir=str(tmp_path),
+        clip_start_ms=500,
+        clip_duration_ms=700,
+    ) as audio_arg:
+        samples, sample_rate = audio_arg
+
+    assert sample_rate == 16_000
+    assert samples.dtype == numpy.float32
+    assert abs(len(samples) - int(0.7 * sample_rate)) <= sample_rate * 0.03
+
+
+def test_qwen_transcribe_passes_source_range_as_pcm_tuple(monkeypatch, tmp_path):
+    captured = {}
+    pcm_audio_arg = (object(), 16_000)
+    audio_path = tmp_path / "tone.wav"
+    Sine(440).to_audio_segment(duration=2000).export(audio_path, format="wav")
+
+    class FakeASRModel:
+        @classmethod
+        def from_pretrained(cls, model_ref, **kwargs):
+            captured["model_ref"] = model_ref
+            captured["load_kwargs"] = kwargs
+            return cls()
+
+        def transcribe(self, **kwargs):
+            captured["transcribe_kwargs"] = kwargs
+            return [
+                SimpleNamespace(
+                    text="hello",
+                    language="English",
+                    time_stamps=[],
+                )
+            ]
+
+    fake_qwen_asr = SimpleNamespace(Qwen3ASRModel=FakeASRModel)
+    monkeypatch.setitem(sys.modules, "qwen_asr", fake_qwen_asr)
+    monkeypatch.setattr(qwen_runtime_module, "ensure_qwen_runtime_on_path", lambda: None)
+    monkeypatch.setattr(
+        qwen_runtime_module,
+        "_audio_input_as_pcm_tuple",
+        lambda *args, **kwargs: pcm_audio_arg,
+    )
+    qwen_runtime_module._asr_cache.clear()
+
+    result = qwen_runtime_module.transcribe_with_qwen(
+        audio_input=str(audio_path),
+        language="en",
+        asr_model="Qwen/Qwen3-ASR-1.7B",
+        aligner_model="Qwen/Qwen3-ForcedAligner-0.6B",
+        device="cpu",
+        dtype="auto",
+        return_time_stamps=False,
+        clip_start_ms=500,
+        clip_duration_ms=700,
+    )
+
+    audio_arg = captured["transcribe_kwargs"]["audio"]
+    assert audio_arg is pcm_audio_arg
+    assert captured["transcribe_kwargs"]["language"] == "English"
+    assert result["text"] == "hello"
+    qwen_runtime_module._asr_cache.clear()
+
+
+def test_qwen_transcribe_batch_passes_audio_list_to_runtime(monkeypatch, tmp_path):
+    captured = {}
+    audio_path = tmp_path / "tone.wav"
+    Sine(440).to_audio_segment(duration=2000).export(audio_path, format="wav")
+
+    class FakeASRModel:
+        @classmethod
+        def from_pretrained(cls, model_ref, **kwargs):
+            captured["model_ref"] = model_ref
+            captured["load_kwargs"] = kwargs
+            return cls()
+
+        def transcribe(self, **kwargs):
+            captured["transcribe_kwargs"] = kwargs
+            return [
+                SimpleNamespace(text="first", language="English", time_stamps=[]),
+                SimpleNamespace(text="second", language="English", time_stamps=[]),
+            ]
+
+    fake_qwen_asr = SimpleNamespace(Qwen3ASRModel=FakeASRModel)
+    monkeypatch.setitem(sys.modules, "qwen_asr", fake_qwen_asr)
+    monkeypatch.setattr(qwen_runtime_module, "ensure_qwen_runtime_on_path", lambda: None)
+    monkeypatch.setattr(
+        qwen_runtime_module,
+        "_audio_input_as_pcm_tuple",
+        lambda *args, **kwargs: (f"pcm-{kwargs.get('clip_start_ms')}", 16_000),
+    )
+    qwen_runtime_module._asr_cache.clear()
+
+    results = qwen_runtime_module.transcribe_batch_with_qwen(
+        requests=[
+            {
+                "audio_input": str(audio_path),
+                "clip_start_ms": 0,
+                "clip_duration_ms": 500,
+            },
+            {
+                "audio_input": str(audio_path),
+                "clip_start_ms": 500,
+                "clip_duration_ms": 500,
+            },
+        ],
+        language="en",
+        asr_model="Qwen/Qwen3-ASR-1.7B",
+        aligner_model="Qwen/Qwen3-ForcedAligner-0.6B",
+        device="cpu",
+        dtype="auto",
+        return_time_stamps=False,
+    )
+
+    assert captured["transcribe_kwargs"]["audio"] == [
+        ("pcm-0", 16_000),
+        ("pcm-500", 16_000),
+    ]
+    assert captured["transcribe_kwargs"]["language"] == "English"
+    assert [result["text"] for result in results] == ["first", "second"]
+    qwen_runtime_module._asr_cache.clear()
+
+
+def test_qwen_align_passes_bytes_as_pcm_tuple(monkeypatch):
+    captured = {}
+    pcm_audio_arg = (object(), 16_000)
+
+    class FakeAligner:
+        @classmethod
+        def from_pretrained(cls, model_ref, **kwargs):
+            captured["model_ref"] = model_ref
+            captured["load_kwargs"] = kwargs
+            return cls()
+
+        def align(self, **kwargs):
+            captured["align_kwargs"] = kwargs
+            return [{"text": "hello", "start_time": 0.0, "end_time": 0.5}]
+
+    fake_qwen_asr = SimpleNamespace(Qwen3ForcedAligner=FakeAligner)
+    monkeypatch.setitem(sys.modules, "qwen_asr", fake_qwen_asr)
+    monkeypatch.setattr(qwen_runtime_module, "ensure_qwen_runtime_on_path", lambda: None)
+    monkeypatch.setattr(
+        qwen_runtime_module,
+        "_audio_input_as_pcm_tuple",
+        lambda *args, **kwargs: pcm_audio_arg,
+    )
+    qwen_runtime_module._aligner_cache.clear()
+
+    items = qwen_runtime_module.align_with_qwen(
+        audio_input=b"fake wav",
+        transcript="hello",
+        language="en",
+        aligner_model="Qwen/Qwen3-ForcedAligner-0.6B",
+        device="cpu",
+        dtype="auto",
+    )
+
+    assert captured["align_kwargs"]["audio"] is pcm_audio_arg
+    assert captured["align_kwargs"]["language"] == "English"
+    assert items == [{"text": "hello", "start_time": 0.0, "end_time": 0.5}]
+    qwen_runtime_module._aligner_cache.clear()
 
 
 def test_qwen_worker_path_removes_pyqt_qt_bin():
@@ -300,6 +695,7 @@ def test_qwen_worker_supports_alignment_mode(monkeypatch, tmp_path):
           "model_dir": "C:/models",
           "device": "cpu",
           "dtype": "float32",
+          "compile_aligner": true,
           "temp_dir": "%s"
         }
         """
@@ -327,7 +723,82 @@ def test_qwen_worker_supports_alignment_mode(monkeypatch, tmp_path):
     assert exit_code == 0
     assert calls[0]["transcript"] == "hello world"
     assert calls[0]["device"] == "cpu"
+    assert calls[0]["compile_aligner"] is True
     assert '"time_stamps"' in output_path.read_text(encoding="utf-8")
+
+
+def test_qwen_worker_supports_transcribe_batch_mode(monkeypatch, tmp_path):
+    calls = []
+    request_path = tmp_path / "request.json"
+    output_path = tmp_path / "output.json"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake wav")
+    request_path.write_text(
+        """
+        {
+          "items": [
+            {
+              "audio_path": "%s",
+              "clip_start_ms": 0,
+              "clip_duration_ms": 1000
+            },
+            {
+              "audio_path": "%s",
+              "clip_start_ms": 1000,
+              "clip_duration_ms": 1000
+            }
+          ],
+          "language": "en",
+          "asr_model": "Qwen/Qwen3-ASR-1.7B",
+          "aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
+          "model_dir": "C:/models",
+          "device": "cpu",
+          "dtype": "float32",
+          "max_new_tokens": 512,
+          "max_inference_batch_size": 4,
+          "return_time_stamps": false,
+          "compile_aligner": true,
+          "temp_dir": "%s"
+        }
+        """
+        % (
+            str(audio_path).replace("\\", "\\\\"),
+            str(audio_path).replace("\\", "\\\\"),
+            str(tmp_path).replace("\\", "\\\\"),
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_transcribe_batch_with_qwen(**kwargs):
+        calls.append(kwargs)
+        return [
+            {"text": "first", "time_stamps": []},
+            {"text": "second", "time_stamps": []},
+        ]
+
+    monkeypatch.setattr(
+        qwen_worker_module,
+        "transcribe_batch_with_qwen",
+        fake_transcribe_batch_with_qwen,
+    )
+
+    exit_code = qwen_worker_module.main(
+        [
+            "--mode",
+            "transcribe_batch",
+            "--request",
+            str(request_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls[0]["requests"][0]["audio_input"] == str(audio_path)
+    assert calls[0]["requests"][1]["clip_start_ms"] == 1000
+    assert calls[0]["max_inference_batch_size"] == 4
+    assert calls[0]["compile_aligner"] is True
+    assert '"results"' in output_path.read_text(encoding="utf-8")
 
 
 def test_qwen_cuda_device_fails_fast_with_cpu_torch(monkeypatch):
@@ -340,6 +811,33 @@ def test_qwen_cuda_device_fails_fast_with_cpu_torch(monkeypatch):
 
     with pytest.raises(RuntimeError, match="PyTorch 是 CPU 版"):
         qwen_runtime_module._validate_requested_device("cuda:0")
+
+
+def test_qwen_aligner_language_guesses_supported_languages_from_text():
+    assert (
+        qwen_runtime_module.normalize_aligner_language("auto", "今日は良い天気です")
+        == "Japanese"
+    )
+    assert (
+        qwen_runtime_module.normalize_aligner_language("auto", "오늘 날씨가 좋습니다")
+        == "Korean"
+    )
+    assert (
+        qwen_runtime_module.normalize_aligner_language("auto", "Привет как дела")
+        == "Russian"
+    )
+    assert (
+        qwen_runtime_module.normalize_aligner_language("auto", "¿Qué está pasando?")
+        == "Spanish"
+    )
+    assert (
+        qwen_runtime_module.normalize_aligner_language("auto", "não é uma opção")
+        == "Portuguese"
+    )
+    assert (
+        qwen_runtime_module.normalize_aligner_language("auto", "this is plain English")
+        == "English"
+    )
 
 
 def test_qwen_local_asr_requires_timestamps_when_requested():
@@ -381,6 +879,27 @@ def test_qwen_local_asr_splits_plain_text_when_timestamps_not_requested():
     assert "first sentence" in segments[0].text
 
 
+def test_qwen_estimated_timestamps_use_speech_ranges():
+    asr = QwenLocalASR(
+        audio_input=b"fake mp3",
+        need_word_time_stamp=False,
+        audio_duration=10.0,
+        speech_ranges_ms=[(1_000, 3_000), (7_000, 9_000)],
+    )
+    text = (
+        "one two three four five six seven eight nine ten. "
+        "eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen "
+        "nineteen twenty."
+    )
+
+    segments = asr._make_segments({"text": text, "seconds": 10, "time_stamps": []})
+
+    assert [(seg.start_time, seg.end_time) for seg in segments] == [
+        (1_000, 3_000),
+        (7_000, 9_000),
+    ]
+
+
 def test_transcribe_factories_preserve_requested_word_timestamp_flag(tmp_path):
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"fake wav")
@@ -394,13 +913,22 @@ def test_transcribe_factories_preserve_requested_word_timestamp_flag(tmp_path):
         qwen_device="cpu",
         qwen_dtype="float32",
         qwen_chunk_overlap_seconds=12,
+        qwen_compile_aligner=True,
     )
 
     mimo_chunked = _create_mimo_asr(str(audio_path), config)
     assert mimo_chunked.asr_kwargs["need_word_time_stamp"] is True
     assert mimo_chunked.asr_kwargs["aligner_model_dir"] == "C:/models"
+    assert mimo_chunked.asr_kwargs["aligner_compile"] is True
+    assert isinstance(mimo_chunked.asr_kwargs["request_memo"], dict)
     assert mimo_chunked.chunk_overlap_ms == 12_000
     assert mimo_chunked.chunk_length_ms == 180_000
+    assert mimo_chunked.chunk_concurrency == 3
+    assert mimo_chunked.chunk_boundary_mode == "vad"
+    assert (
+        mimo_chunked.max_chunk_payload_bytes
+        == mimo_asr_module.MAX_RAW_AUDIO_BYTES_FOR_BASE64
+    )
 
     config.need_word_time_stamp = False
     mimo_text_only_chunked = _create_mimo_asr(str(audio_path), config)
@@ -412,7 +940,12 @@ def test_transcribe_factories_preserve_requested_word_timestamp_flag(tmp_path):
     qwen_chunked = _create_qwen_local_asr(str(audio_path), config)
     assert qwen_chunked.asr_kwargs["need_word_time_stamp"] is True
     assert qwen_chunked.asr_kwargs["asr_model"] == "Qwen/Qwen3-ASR-1.7B"
+    assert qwen_chunked.asr_kwargs["compile_aligner"] is True
     assert qwen_chunked.chunk_overlap_ms == 12_000
+    assert qwen_chunked.chunk_audio_format == "wav"
+    assert qwen_chunked.retry_same_chunk is False
+    assert qwen_chunked.chunk_boundary_mode == "vad"
+    assert qwen_chunked.pass_source_range is True
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +971,24 @@ def test_check_transcript_anomaly_high_density():
     reason = mimo_asr_module._check_transcript_anomaly(text, audio_duration=180.0)
     assert reason is not None
     assert "density" in reason
+
+
+def test_anomaly_thresholds_can_relax_density_gate():
+    """Thresholds are configurable without changing module-level defaults."""
+    text = " ".join(f"word{i}" for i in range(1000))
+    thresholds = mimo_asr_module._asr_anomaly.AnomalyThresholds(
+        max_words_per_second_en=10.0
+    )
+
+    assert (
+        mimo_asr_module._asr_anomaly.check_transcript_anomaly(
+            text,
+            audio_duration=180.0,
+            thresholds=thresholds,
+        )
+        is None
+    )
+    assert mimo_asr_module._check_transcript_anomaly(text, 180.0) is not None
 
 
 def test_check_transcript_anomaly_normal_text():
@@ -663,6 +1214,89 @@ def _mimo_asr_with_duration(duration_s: float) -> MiMoASR:
     )
     asr.audio_duration = duration_s
     return asr
+
+
+def _qwen_asr_with_duration(duration_s: float) -> QwenLocalASR:
+    asr = QwenLocalASR(
+        audio_input=b"fake mp3",
+        need_word_time_stamp=True,
+    )
+    asr.audio_duration = duration_s
+    return asr
+
+
+def test_qwen_local_asr_flags_high_density_transcript_with_timestamps():
+    asr = _qwen_asr_with_duration(180.0)
+    text = " ".join(f"word{i}" for i in range(1000))
+    response = {
+        "text": text,
+        "seconds": 180.0,
+        "time_stamps": _make_word_timestamps(1000, start=0.0, step=0.18),
+    }
+
+    with pytest.raises(qwen_local_module.ASRResultDegradedError) as exc_info:
+        asr._make_segments(response)
+
+    assert "density" in exc_info.value.reason
+    segments = asr._make_segments(response, _allow_degraded=True)
+    assert segments
+    assert asr._should_cache_response(response, segments) is False
+
+
+def test_qwen_local_asr_clamps_and_flags_timestamp_overflow():
+    asr = _qwen_asr_with_duration(180.0)
+    text = " ".join(f"word{i}" for i in range(230))
+    response = {
+        "text": text,
+        "seconds": 181.0,
+        "time_stamps": _make_word_timestamps(230, start=0.0, step=0.88),
+    }
+
+    with pytest.raises(qwen_local_module.ASRResultDegradedError) as exc_info:
+        asr._make_segments(response)
+    assert "overflow" in exc_info.value.reason
+
+    segments = asr._make_segments(response, _allow_degraded=True)
+    assert segments
+    assert max(seg.end_time for seg in segments) <= 181_000
+    assert asr._should_cache_response(response, segments) is False
+
+
+def test_qwen_local_asr_degraded_truncation_keeps_clamped_alignment():
+    asr = _qwen_asr_with_duration(180.0)
+    text = " ".join(f"word{i}" for i in range(60))
+    response = {
+        "text": text,
+        "seconds": 180.0,
+        "time_stamps": _make_word_timestamps(60, start=0.0, step=0.78),
+    }
+
+    with pytest.raises(qwen_local_module.ASRResultDegradedError) as exc_info:
+        asr._make_segments(response)
+    assert "coverage" in exc_info.value.reason
+
+    segments = asr._make_segments(response, _allow_degraded=True)
+    assert len(segments) == 60
+    assert segments[-1].end_time <= 60 * 780 + 1
+    assert asr._should_cache_response(response, segments) is False
+
+
+def test_qwen_local_asr_degraded_pathological_alignment_uses_estimated_timings():
+    asr = _qwen_asr_with_duration(180.0)
+    text = " ".join(f"word{i}" for i in range(200))
+    response = {
+        "text": text,
+        "seconds": 180.0,
+        "time_stamps": _make_word_timestamps(2, start=0.0, step=0.5),
+    }
+
+    with pytest.raises(qwen_local_module.ASRResultDegradedError):
+        asr._make_segments(response)
+
+    segments = asr._make_segments(response, _allow_degraded=True)
+    merged_text = " ".join(seg.text for seg in segments)
+    assert "word199" in merged_text
+    assert segments[-1].end_time == 180_000
 
 
 def test_mimo_asr_flags_silent_truncation_by_time_coverage():

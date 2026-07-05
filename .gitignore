@@ -39,6 +39,7 @@ docs/.vitepress/dist/
 !/resource/bin/bin_environment.txt
 /AppData/
 /work-dir/
+/benchmark-output/
 /.videocaptioner-*/
 **/.videocaptioner-*/
 /*.srt

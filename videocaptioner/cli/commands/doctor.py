@@ -139,6 +139,10 @@ def _check_transcribe(config: dict) -> list[Check]:
         checks.append(Check("whisper_api.api_key", "error", "Whisper API key is missing", "Run 'videocaptioner config set whisper_api.api_key <key>'"))
     if asr == "whisper-cpp" and not any(shutil.which(n) for n in ["whisper-cpp", "whisper", "whisper-cpp-main"]):
         checks.append(Check("whisper-cpp", "error", "whisper.cpp binary not found", "Install whisper.cpp or choose --asr bijian/whisper-api"))
+    if asr == "mimo-asr" and not get(config, "transcribe.mimo_asr.api_key", ""):
+        checks.append(Check("mimo_asr.api_key", "error", "MiMo ASR API key is missing", "Run 'videocaptioner config set transcribe.mimo_asr.api_key <key>'"))
+    if asr == "qwen-local":
+        checks.extend(_check_qwen_runtime())
     return checks
 
 

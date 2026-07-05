@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -199,7 +200,10 @@ class TestBaseTTS:
     def test_synthesize_single(self):
         """测试单条语音合成"""
         config = TTSConfig(
-            model="test-model", api_key="test-key", base_url="https://test.api"
+            model="test-model",
+            api_key="test-key",
+            base_url="https://test.api",
+            use_cache=False,
         )
         tts = MockTTS(config)
 
@@ -261,14 +265,15 @@ class TestBaseTTS:
 
     def test_cache_parameter(self):
         """测试 use_cache 参数"""
+        model_name = f"test-model-{uuid4().hex}"
         config_no_cache = TTSConfig(
-            model="test-model",
+            model=model_name,
             api_key="test-key",
             base_url="https://test.api",
             use_cache=False,
         )
         config_with_cache = TTSConfig(
-            model="test-model",
+            model=model_name,
             api_key="test-key",
             base_url="https://test.api",
             use_cache=True,

@@ -35,6 +35,7 @@ PresetType = Literal[
 ]
 
 logger = setup_logger("video_utils")
+LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 
 @contextmanager
@@ -64,13 +65,19 @@ def temporary_subtitle_file(subtitle_path: str):
         Path(temp_path).unlink(missing_ok=True)
 
 
-def video2audio(input_file: str, output: str = "", audio_track_index: int = 0) -> bool:
+def video2audio(
+    input_file: str,
+    output: str = "",
+    audio_track_index: int = 0,
+    loudnorm: bool = False,
+) -> bool:
     """使用 ffmpeg 将视频转换为音频
 
     Args:
         input_file: 输入视频文件路径
         output: 输出音频文件路径
         audio_track_index: 要提取的音轨索引，默认为 0（第一 audio tracks）
+        loudnorm: 是否在输出 16k mono PCM 前应用两遍 EBU R128 loudnorm
 
     Returns:
         转换是否成功
@@ -87,13 +94,17 @@ def video2audio(input_file: str, output: str = "", audio_track_index: int = 0) -
         "-map",
         f"0:a:{audio_track_index}",
         "-vn",
+    ]
+    if loudnorm:
+        cmd.extend(["-af", f"{LOUDNORM_FILTER},{LOUDNORM_FILTER}"])
+    cmd.extend([
         "-ac",
         "1",  # 单声道
         "-ar",
         "16000",  # 采样率16kHz
         "-y",
         output,
-    ]
+    ])
 
     logger.debug(f"Audio conversion cmd: {' '.join(cmd)}")
 

@@ -118,6 +118,20 @@ def validate_whisper_api(config: dict) -> bool:
     return True
 
 
+def validate_mimo_asr(config: dict) -> bool:
+    """Validate MiMo ASR API configuration."""
+    api_key = get(config, "transcribe.mimo_asr.api_key")
+    if not api_key:
+        output.config_missing_error(
+            "MiMo ASR API key",
+            "transcribe.mimo_asr.api_key",
+            "VIDEOCAPTIONER_MIMO_ASR_API_KEY",
+            "--mimo-api-key",
+        )
+        return False
+    return True
+
+
 def validate_ffmpeg() -> bool:
     """Check that FFmpeg is available on PATH."""
     if not shutil.which("ffmpeg"):
@@ -167,6 +181,8 @@ def validate_transcribe(config: dict) -> bool:
         return validate_faster_whisper()
     if asr == "whisper-cpp":
         return validate_whisper_cpp()
+    if asr == "mimo-asr":
+        return validate_mimo_asr(config)
     # bijian/jianying: no config needed (public endpoints)
     return True
 

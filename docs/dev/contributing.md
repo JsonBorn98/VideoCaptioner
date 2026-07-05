@@ -58,7 +58,7 @@ uv run ruff check --select I --fix .
 ---
 
 相关文档：
-- [架构设计](/dev/architecture)
-- [API 文档](/dev/api)
+- [MiMo and Qwen ASR Backend Lessons](/dev/asr-mimo-qwen-lessons)
+- [ASR 配置指南](/config/asr)
 
 更多信息请参考 [GitHub Issues](https://github.com/JsonBorn98/VideoCaptioner/issues)。

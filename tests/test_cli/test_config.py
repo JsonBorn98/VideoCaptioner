@@ -155,6 +155,9 @@ class TestBuildConfig:
         monkeypatch.setenv("VIDEOCAPTIONER_TTS_WORKERS", "3")
         monkeypatch.setenv("VIDEOCAPTIONER_TTS_REWRITE_TOO_LONG", "true")
         monkeypatch.setenv("VIDEOCAPTIONER_TTS_MIX_ORIGINAL_AUDIO", "false")
+        monkeypatch.setenv("VIDEOCAPTIONER_MIMO_ASR_TIMEOUT", "120")
+        monkeypatch.setenv("VIDEOCAPTIONER_QWEN_MAX_NEW_TOKENS", "4096")
+        monkeypatch.setenv("VIDEOCAPTIONER_QWEN_COMPILE_ALIGNER", "true")
 
         overrides = load_env_overrides()
 
@@ -162,3 +165,6 @@ class TestBuildConfig:
         assert overrides["dubbing"]["tts_workers"] == 3
         assert overrides["dubbing"]["rewrite_too_long"] is True
         assert overrides["dubbing"]["mix_original_audio"] is False
+        assert overrides["transcribe"]["mimo_asr"]["timeout"] == 120
+        assert overrides["transcribe"]["qwen"]["max_new_tokens"] == 4096
+        assert overrides["transcribe"]["qwen"]["compile_aligner"] is True

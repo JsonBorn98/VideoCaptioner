@@ -66,6 +66,9 @@ class BaseASR:
         audio_input: Optional[Union[str, bytes]] = None,
         use_cache: bool = False,
         need_word_time_stamp: bool = False,
+        audio_duration: float | None = None,
+        cache_identity: str | None = None,
+        speech_ranges_ms: list[tuple[int, int]] | None = None,
     ):
         """Initialize ASR with audio data.
 
@@ -73,13 +76,26 @@ class BaseASR:
             audio_input: Path to audio file or raw audio bytes
             use_cache: Whether to cache recognition results
             need_word_time_stamp: Whether to return word-level timestamps
+            audio_duration: Known audio duration in seconds, if the caller already has it
+            cache_identity: Stable cache identity to use instead of the current byte CRC32
+            speech_ranges_ms: Known non-silent ranges relative to this audio input
         """
         self.audio_input = audio_input
         self.file_binary = None
         self.use_cache = use_cache
+        self.speech_ranges_ms = [
+            (int(start), int(end))
+            for start, end in (speech_ranges_ms or [])
+            if int(end) > int(start)
+        ]
         self._set_data()
+        self.cache_identity = str(cache_identity).strip() if cache_identity else self.crc32_hex
         self._cache = get_asr_cache()
-        self.audio_duration = self._get_audio_duration()
+        self.audio_duration = (
+            float(audio_duration)
+            if audio_duration is not None and audio_duration > 0
+            else self._get_audio_duration()
+        )
 
     def _set_data(self):
         """Load audio data and compute CRC32 hash for cache key."""
@@ -190,13 +206,15 @@ class BaseASR:
     def _get_key(self) -> str:
         """Get cache key for this ASR request.
 
-        Default implementation uses file CRC32.
+        Default implementation uses a stable cache identity. Direct ASR calls
+        fall back to the current audio byte CRC32, while chunked callers can
+        provide a source-audio range identity that survives re-export details.
         Subclasses can override to include additional parameters.
 
         Returns:
             Cache key string
         """
-        return self.crc32_hex
+        return self.cache_identity
 
     def _make_segments(
         self, resp_data: dict, _allow_degraded: bool = False

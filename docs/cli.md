@@ -53,12 +53,21 @@ videocaptioner transcribe <文件> [选项]
 
 | 选项 | 说明 |
 |------|------|
-| `--asr` | ASR 引擎：`bijian`(默认,免费) `jianying`(免费) `whisper-api` `whisper-cpp`。bijian/jianying 仅支持中英文，其他语言用 whisper-api 或 whisper-cpp |
+| `--asr` | ASR 引擎：`bijian`(默认,免费) `jianying`(免费) `faster-whisper` `whisper-api` `whisper-cpp` `mimo-asr` `qwen-local`。bijian/jianying 仅支持中英文，其他语言可用 whisper-api/faster-whisper/MiMo/Qwen |
 | `--language CODE` | 源语言 ISO 639-1 代码，如 `zh` `en` `ja`，或 `auto`（默认） |
 | `--word-timestamps` | 输出词级时间戳（配合字幕断句使用） |
+| `--audio-loudnorm` | 抽取视频音频时启用 EBU R128 loudnorm，适合音量忽大忽小的素材 |
 | `--whisper-api-key` | Whisper API 密钥（仅 `--asr whisper-api`） |
 | `--whisper-api-base` | Whisper API 地址 |
 | `--whisper-model` | Whisper 模型名（whisper-api 默认 whisper-1，whisper-cpp 默认 large-v2） |
+| `--mimo-api-key` | MiMo ASR API 密钥（仅 `--asr mimo-asr`） |
+| `--mimo-api-base` / `--mimo-model` / `--mimo-timeout` | MiMo ASR API 地址、模型名、超时时间 |
+| `--qwen-asr-model` / `--qwen-aligner-model` | Qwen3 ASR / ForcedAligner 模型名 |
+| `--qwen-model-dir` | 本地 Qwen 模型目录 |
+| `--qwen-device` / `--qwen-dtype` | Qwen 运行设备与精度，例如 `cuda:0`、`bfloat16` |
+| `--qwen-max-new-tokens` | Qwen 单块最大生成 token 数 |
+| `--qwen-chunk-overlap` | Qwen/MiMo 分块重叠秒数 |
+| `--qwen-compile-aligner` | 实验性编译 Qwen3-ForcedAligner，失败自动回退 |
 | `-o PATH` | 输出文件或目录路径 |
 | `--format` | 输出格式：`srt`(默认) `ass` `txt` `json` |
 
@@ -296,6 +305,19 @@ videocaptioner doctor --json   # Agent/CI 友好的 JSON 输出
 | `VIDEOCAPTIONER_DUB_AUDIO_MODE` | 原声处理方式 |
 | `VIDEOCAPTIONER_TTS_MAX_SPEED` | 配音最大变速倍数 |
 | `VIDEOCAPTIONER_TTS_REWRITE_TOO_LONG` | 是否启用 LLM 缩短过长台词 |
+| `VIDEOCAPTIONER_AUDIO_LOUDNORM` | 转录前是否启用 EBU R128 loudnorm |
+| `VIDEOCAPTIONER_MIMO_ASR_API_KEY` | MiMo ASR API 密钥 |
+| `VIDEOCAPTIONER_MIMO_ASR_API_BASE` | MiMo ASR API 地址 |
+| `VIDEOCAPTIONER_MIMO_ASR_MODEL` | MiMo ASR 模型名 |
+| `VIDEOCAPTIONER_MIMO_ASR_TIMEOUT` | MiMo ASR 超时时间 |
+| `VIDEOCAPTIONER_QWEN_ASR_MODEL` | Qwen3 ASR 模型 |
+| `VIDEOCAPTIONER_QWEN_ALIGNER_MODEL` | Qwen3 ForcedAligner 模型 |
+| `VIDEOCAPTIONER_QWEN_MODEL_DIR` | 本地 Qwen 模型目录 |
+| `VIDEOCAPTIONER_QWEN_DEVICE` | Qwen 运行设备 |
+| `VIDEOCAPTIONER_QWEN_DTYPE` | Qwen 计算精度 |
+| `VIDEOCAPTIONER_QWEN_MAX_NEW_TOKENS` | Qwen 单块最大生成 token 数 |
+| `VIDEOCAPTIONER_QWEN_CHUNK_OVERLAP_SECONDS` | Qwen/MiMo 分块重叠秒数 |
+| `VIDEOCAPTIONER_QWEN_COMPILE_ALIGNER` | 是否启用实验性 ForcedAligner 编译 |
 
 ### 配置文件
 
