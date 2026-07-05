@@ -222,6 +222,8 @@ class ASRData:
         save_path: str,
         ass_style: Optional[str] = None,
         layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        video_width: int = 1280,
+        video_height: int = 720,
     ) -> None:
         """Save ASRData to file in specified format.
 
@@ -229,6 +231,8 @@ class ASRData:
             save_path: Output file path
             ass_style: ASS style string (optional, uses default if None)
             layout: Subtitle layout mode
+            video_width: ASS PlayResX used when saving .ass files
+            video_height: ASS PlayResY used when saving .ass files
         """
         save_path = handle_long_path(save_path)
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -241,7 +245,13 @@ class ASRData:
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(self.to_json(), f, ensure_ascii=False, indent=2)
         elif save_path.endswith(".ass"):
-            self.to_ass(save_path=save_path, style_str=ass_style, layout=layout)
+            self.to_ass(
+                save_path=save_path,
+                style_str=ass_style,
+                layout=layout,
+                video_width=video_width,
+                video_height=video_height,
+            )
         else:
             raise ValueError(f"Unsupported file extension: {save_path}")
 

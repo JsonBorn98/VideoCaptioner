@@ -34,7 +34,6 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
-from videocaptioner.config import SUBTITLE_STYLE_PATH
 from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
@@ -45,6 +44,7 @@ from videocaptioner.core.constant import (
 from videocaptioner.core.entities import (
     OutputSubtitleFormatEnum,
     SubtitleLayoutEnum,
+    SubtitleRenderModeEnum,
     SubtitleTask,
     SupportedSubtitleFormats,
 )
@@ -56,6 +56,30 @@ from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.components.SubtitleSettingDialog import SubtitleSettingDialog
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.subtitle_thread import RetranslateThread, SubtitleThread
+
+
+def save_editor_asr_data(
+    asr_data: ASRData,
+    save_path: str,
+    layout: SubtitleLayoutEnum,
+    style_name: str,
+) -> None:
+    """Save edited subtitle data while preserving ASS style settings."""
+    if save_path.lower().endswith(".ass"):
+        style_str = get_subtitle_style(style_name) or ""
+        reference_width, reference_height = TaskFactory.get_style_reference(
+            style_name,
+            SubtitleRenderModeEnum.ASS_STYLE,
+        )
+        asr_data.save(
+            save_path,
+            layout=layout,
+            ass_style=style_str,
+            video_width=reference_width,
+            video_height=reference_height,
+        )
+    else:
+        asr_data.save(save_path, layout=layout)
 
 
 class SubtitleTableModel(QAbstractTableModel):
@@ -465,7 +489,12 @@ class SubtitleInterface(QWidget):
         if need_create_task:
             # 将当前表格状态写回原文件，保留用户的合并/删除/编辑
             if self.model._data:
-                ASRData.from_json(self.model._data).to_srt(save_path=self.subtitle_path)
+                save_editor_asr_data(
+                    ASRData.from_json(self.model._data),
+                    self.subtitle_path,
+                    cfg.subtitle_layout.value,
+                    cfg.subtitle_style_name.value,
+                )
             self.task = TaskFactory.create_subtitle_task(file_path=self.subtitle_path)
         if not self.task:
             self.start_button.setEnabled(True)
@@ -587,11 +616,12 @@ class SubtitleInterface(QWidget):
             asr_data = ASRData.from_json(self.model._data)
             layout = cfg.subtitle_layout.value
 
-            if file_path.endswith(".ass"):
-                style_str = get_subtitle_style(cfg.subtitle_style_name.value)
-                asr_data.to_ass(style_str, layout, file_path)
-            else:
-                asr_data.save(file_path, layout=layout)
+            save_editor_asr_data(
+                asr_data,
+                file_path,
+                layout,
+                cfg.subtitle_style_name.value,
+            )
             InfoBar.success(
                 self.tr("保存成功"),
                 self.tr("字幕已保存至:") + file_path,
@@ -692,18 +722,12 @@ class SubtitleInterface(QWidget):
         def signal_update() -> None:
             if not self.model._data:
                 return
-            ass_style_name = cfg.subtitle_style_name.value
-            ass_style_path = SUBTITLE_STYLE_PATH / f"{ass_style_name}.txt"
-            if ass_style_path.exists():
-                subtitle_style_srt = ass_style_path.read_text(encoding="utf-8")
-            else:
-                subtitle_style_srt = None
             temp_srt_path = os.path.join(tempfile.gettempdir(), "temp_subtitle.ass")
-            asr_data = ASRData.from_json(self.model._data)
-            asr_data.save(
+            save_editor_asr_data(
+                ASRData.from_json(self.model._data),
                 temp_srt_path,
-                layout=cfg.subtitle_layout.value,
-                ass_style=subtitle_style_srt or "",
+                cfg.subtitle_layout.value,
+                cfg.subtitle_style_name.value,
             )
             signalBus.add_subtitle(temp_srt_path)
 

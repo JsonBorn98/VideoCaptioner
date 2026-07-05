@@ -31,11 +31,32 @@ class TaskFactory:
     """任务工厂类，用于创建各种类型的任务"""
 
     @staticmethod
+    def _load_style_for_render_mode(style_name: str, render_mode: SubtitleRenderModeEnum):
+        """Load a style only if it matches the requested render mode."""
+        from videocaptioner.core.subtitle.style_manager import StyleMode, load_style
+
+        expected_mode = (
+            StyleMode.ROUNDED
+            if render_mode == SubtitleRenderModeEnum.ROUNDED_BG
+            else StyleMode.ASS
+        )
+        style = load_style(style_name, mode=expected_mode.value)
+        if style is not None and style.mode == expected_mode:
+            return style
+
+        default_style = load_style("default", mode=expected_mode.value)
+        if default_style is not None and default_style.mode == expected_mode:
+            return default_style
+
+        return None
+
+    @staticmethod
     def get_ass_style(style_name: str) -> str:
         """获取 ASS 字幕样式内容 (via style_manager, JSON-first with .txt fallback)"""
-        from videocaptioner.core.subtitle.style_manager import load_style
-
-        style = load_style(style_name, mode="ass")
+        style = TaskFactory._load_style_for_render_mode(
+            style_name,
+            SubtitleRenderModeEnum.ASS_STYLE,
+        )
         if style is not None:
             return style.to_ass_string()
         return ""
@@ -43,10 +64,7 @@ class TaskFactory:
     @staticmethod
     def get_style_reference(style_name: str, render_mode: SubtitleRenderModeEnum) -> tuple[int, int]:
         """获取当前样式的设计基准分辨率。"""
-        from videocaptioner.core.subtitle.style_manager import load_style
-
-        mode = "rounded" if render_mode == SubtitleRenderModeEnum.ROUNDED_BG else "ass"
-        style = load_style(style_name, mode=mode)
+        style = TaskFactory._load_style_for_render_mode(style_name, render_mode)
         if style is not None:
             return style.reference_width, style.reference_height
 
@@ -218,6 +236,11 @@ class TaskFactory:
             api_key = ""
             llm_model = ""
 
+        reference_width, reference_height = TaskFactory.get_style_reference(
+            cfg.subtitle_style_name.value,
+            SubtitleRenderModeEnum.ASS_STYLE,
+        )
+
         config = SubtitleConfig(
             # 翻译配置
             base_url=base_url,
@@ -235,6 +258,8 @@ class TaskFactory:
             # 字幕布局、样式
             subtitle_layout=cfg.subtitle_layout.value,  # Now returns SubtitleLayoutEnum
             subtitle_style=TaskFactory.get_ass_style(cfg.subtitle_style_name.value),
+            subtitle_style_reference_width=reference_width,
+            subtitle_style_reference_height=reference_height,
             # 字幕分割
             max_word_count_cjk=cfg.max_word_count_cjk.value,
             max_word_count_english=cfg.max_word_count_english.value,

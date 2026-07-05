@@ -117,6 +117,8 @@ class SubtitleThread(QThread):
 
             subtitle_config = self.task.subtitle_config
             assert subtitle_config is not None, self.tr("字幕配置为空")
+            ass_video_width = subtitle_config.subtitle_style_reference_width
+            ass_video_height = subtitle_config.subtitle_style_reference_height
 
             asr_data = ASRData.from_subtitle_file(
                 subtitle_path,
@@ -213,6 +215,8 @@ class SubtitleThread(QThread):
                 save_path=self.task.output_path or "",
                 ass_style=subtitle_config.subtitle_style or "",
                 layout=subtitle_config.subtitle_layout or SubtitleLayoutEnum.ONLY_TRANSLATE,
+                video_width=ass_video_width,
+                video_height=ass_video_height,
             )
             logger.info(f"字幕保存到 {self.task.output_path}")
 
@@ -233,6 +237,8 @@ class SubtitleThread(QThread):
                     save_path=str(save_ass_path),
                     layout=subtitle_config.subtitle_layout,
                     style_str=subtitle_config.subtitle_style,
+                    video_width=ass_video_width,
+                    video_height=ass_video_height,
                 )
 
             self.progress.emit(100, self.tr("优化完成"))

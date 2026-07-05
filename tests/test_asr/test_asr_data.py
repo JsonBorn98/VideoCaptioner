@@ -513,6 +513,24 @@ class TestFileIOEdgeCases:
             loaded = ASRData.from_subtitle_file(str(unicode_path))
             assert loaded.segments[0].text == "测试"
 
+    def test_save_ass_uses_explicit_play_resolution(self, tmp_path):
+        """保存 ASS 时应使用调用方传入的样式基准分辨率。"""
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+
+        asr_data = ASRData([ASRDataSeg("Hello", 0, 1000)])
+        ass_path = tmp_path / "caption.ass"
+
+        asr_data.save(
+            str(ass_path),
+            layout=SubtitleLayoutEnum.ONLY_ORIGINAL,
+            video_width=1920,
+            video_height=1080,
+        )
+
+        ass_text = ass_path.read_text(encoding="utf-8")
+        assert "PlayResX: 1920" in ass_text
+        assert "PlayResY: 1080" in ass_text
+
 
 class TestParseEdgeCases:
     """测试解析边缘情况"""

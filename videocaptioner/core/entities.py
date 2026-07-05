@@ -728,6 +728,8 @@ class SubtitleConfig:
     need_split: bool = True
     target_language: Optional["TargetLanguage"] = None
     subtitle_style: Optional[str] = None
+    subtitle_style_reference_width: int = 1280
+    subtitle_style_reference_height: int = 720
     custom_prompt_text: Optional[str] = None
 
     def _mask_key(self, key: Optional[str]) -> str:

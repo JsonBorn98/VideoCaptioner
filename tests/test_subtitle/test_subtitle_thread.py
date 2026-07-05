@@ -16,6 +16,7 @@ from PyQt5.QtCore import QEventLoop, QTimer
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import (
     SubtitleConfig,
+    SubtitleLayoutEnum,
     SubtitleTask,
     TranslatorServiceEnum,
 )
@@ -362,6 +363,49 @@ class TestSubtitleThreadFullPipeline:
 
         assert "error" not in results, f"Failed: {results.get('error')}"
         assert "output" in results
+
+
+class TestSubtitleThreadAssOutput:
+    """Test ASS output settings from the subtitle processing thread."""
+
+    def test_ass_output_uses_configured_style_reference(self, tmp_path, base_config):
+        """翻译/处理线程保存 ASS 时应保留样式的基准分辨率。"""
+        subtitle_path = tmp_path / "input.srt"
+        subtitle_path.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "output.ass"
+
+        config = base_config
+        config.subtitle_layout = SubtitleLayoutEnum.ONLY_ORIGINAL
+        config.subtitle_style_reference_width = 1920
+        config.subtitle_style_reference_height = 1080
+        config.subtitle_style = (
+            "[V4+ Styles]\n"
+            "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,"
+            "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
+            "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
+            "Alignment,MarginL,MarginR,MarginV,Encoding\n"
+            "Style: Default,Arial,68,&H00FFFFFF,&H000000FF,&H00000000,"
+            "&H00000000,-1,0,0,0,100,100,0,0,1,5,0,2,10,10,30,1\n"
+            "Style: Secondary,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,"
+            "&H00000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,30,1"
+        )
+
+        task = SubtitleTask(
+            subtitle_path=str(subtitle_path),
+            video_path="",
+            subtitle_config=config,
+            output_path=str(output_path),
+        )
+        thread = SubtitleThread(task)
+        results = run_thread_with_timeout(thread, timeout_ms=5000)
+
+        assert "error" not in results, f"Failed: {results.get('error')}"
+        ass_text = output_path.read_text(encoding="utf-8")
+        assert "PlayResX: 1920" in ass_text
+        assert "PlayResY: 1080" in ass_text
 
 
 class TestSubtitleThreadError:
