@@ -164,9 +164,13 @@ Current policy:
 - use three-minute MiMo chunks when Qwen word alignment is enabled, otherwise
   five-minute MiMo text-only chunks
 - run MiMo through an explicit two-stage chunk pipeline: remote API transcript
-  requests run with modest network concurrency, while local Qwen alignment is
-  consumed in chunk order through the single persistent Qwen worker. This keeps
-  later API requests moving while earlier chunks wait for GPU alignment.
+  requests run with modest, user-configurable network concurrency (default 2),
+  while local Qwen alignment is consumed in chunk order through the single
+  persistent Qwen worker. This keeps later API requests moving while earlier
+  chunks wait for GPU alignment.
+- retry MiMo 429 responses with bounded exponential backoff, honoring
+  Retry-After when the API provides it, and lower concurrency when sustained
+  rate limits persist.
 - keep an overlap setting, defaulting to 10 seconds
 - for MiMo/Qwen, snap chunk boundaries to nearby non-speech gaps. Prefer
   Silero VAD when its package or torch hub model can be loaded; fall back to

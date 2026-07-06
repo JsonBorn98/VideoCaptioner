@@ -61,7 +61,7 @@ videocaptioner transcribe <文件> [选项]
 | `--whisper-api-base` | Whisper API 地址 |
 | `--whisper-model` | Whisper 模型名（whisper-api 默认 whisper-1，whisper-cpp 默认 large-v2） |
 | `--mimo-api-key` | MiMo ASR API 密钥（仅 `--asr mimo-asr`） |
-| `--mimo-api-base` / `--mimo-model` / `--mimo-timeout` | MiMo ASR API 地址、模型名、超时时间 |
+| `--mimo-api-base` / `--mimo-model` / `--mimo-timeout` / `--mimo-concurrency` | MiMo ASR API 地址、模型名、超时时间、并发分块请求数 |
 | `--qwen-asr-model` / `--qwen-aligner-model` | Qwen3 ASR / ForcedAligner 模型名 |
 | `--qwen-model-dir` | 本地 Qwen 模型目录 |
 | `--qwen-device` / `--qwen-dtype` | Qwen 运行设备与精度，例如 `cuda:0`、`bfloat16` |

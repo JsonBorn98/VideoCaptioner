@@ -123,6 +123,7 @@ class TestTranscribeParser:
                 mimo_api_base="https://example.test/v1",
                 mimo_model="mimo-test",
                 mimo_timeout=120,
+                mimo_concurrency=4,
                 qwen_asr_model="Qwen/Qwen3-ASR-0.6B",
                 qwen_aligner_model="Qwen/Qwen3-ForcedAligner-0.6B",
                 qwen_model_dir="C:/models",
@@ -137,6 +138,7 @@ class TestTranscribeParser:
         assert overrides["transcribe"]["asr"] == "qwen-local"
         assert overrides["transcribe"]["mimo_asr"]["api_key"] == "sk-mimo"
         assert overrides["transcribe"]["mimo_asr"]["timeout"] == 120
+        assert overrides["transcribe"]["mimo_asr"]["concurrency"] == 4
         assert overrides["transcribe"]["qwen"]["asr_model"] == "Qwen/Qwen3-ASR-0.6B"
         assert overrides["transcribe"]["qwen"]["model_dir"] == "C:/models"
         assert overrides["transcribe"]["qwen"]["chunk_overlap_seconds"] == 12
