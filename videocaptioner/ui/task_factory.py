@@ -143,6 +143,7 @@ class TaskFactory:
             mimo_asr_api_base=cfg.mimo_asr_api_base.value,
             mimo_asr_model=cfg.mimo_asr_model.value,
             mimo_asr_timeout=cfg.mimo_asr_timeout.value,
+            mimo_asr_concurrency=cfg.mimo_asr_concurrency.value,
             # Qwen ASR / Forced Aligner 配置
             qwen_asr_model=cfg.qwen_asr_model.value,
             qwen_aligner_model=cfg.qwen_aligner_model.value,

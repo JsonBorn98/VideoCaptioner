@@ -230,6 +230,9 @@ class Config(QConfig):
     mimo_asr_timeout = RangeConfigItem(
         "MiMoASR", "Timeout", 600, RangeValidator(30, 7200)
     )
+    mimo_asr_concurrency = RangeConfigItem(
+        "MiMoASR", "Concurrency", 2, RangeValidator(1, 8)
+    )
 
     # ------------------- Qwen3 ASR / Forced Aligner 配置 -------------------
     qwen_asr_model = OptionsConfigItem(

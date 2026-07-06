@@ -616,6 +616,15 @@ class SettingInterface(ScrollArea):
             7200,
             self.transcribeGroup,
         )
+        self.mimoAsrConcurrencyCard = SpinBoxSettingCard(
+            cfg.mimo_asr_concurrency,
+            FIF.ALIGNMENT,  # type: ignore
+            self.tr("并发请求数"),
+            self.tr("同时请求 MiMo API 的分块数；遇到 429 限流请调低（默认 2）"),
+            1,
+            8,
+            self.transcribeGroup,
+        )
         self.checkMimoAsrConnectionCard = PushSettingCard(
             self.tr("测试 MiMo ASR 连接"),
             FIF.CONNECT,
@@ -708,6 +717,7 @@ class SettingInterface(ScrollArea):
             self.mimoAsrKeyCard,
             self.mimoAsrModelCard,
             self.mimoAsrTimeoutCard,
+            self.mimoAsrConcurrencyCard,
             self.checkMimoAsrConnectionCard,
         ]:
             card.setVisible(False)
@@ -845,6 +855,7 @@ class SettingInterface(ScrollArea):
         self.transcribeGroup.addSettingCard(self.mimoAsrKeyCard)
         self.transcribeGroup.addSettingCard(self.mimoAsrModelCard)
         self.transcribeGroup.addSettingCard(self.mimoAsrTimeoutCard)
+        self.transcribeGroup.addSettingCard(self.mimoAsrConcurrencyCard)
         self.transcribeGroup.addSettingCard(self.checkMimoAsrConnectionCard)
         self.transcribeGroup.addSettingCard(self.qwenAsrModelCard)
         self.transcribeGroup.addSettingCard(self.qwenAlignerModelCard)
@@ -1153,6 +1164,7 @@ class SettingInterface(ScrollArea):
             self.mimoAsrKeyCard,
             self.mimoAsrModelCard,
             self.mimoAsrTimeoutCard,
+            self.mimoAsrConcurrencyCard,
             self.checkMimoAsrConnectionCard,
         ]
         qwen_local_only_cards = [self.qwenAsrModelCard, self.qwenMaxTokensCard]

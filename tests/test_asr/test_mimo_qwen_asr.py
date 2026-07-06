@@ -923,7 +923,7 @@ def test_transcribe_factories_preserve_requested_word_timestamp_flag(tmp_path):
     assert isinstance(mimo_chunked.asr_kwargs["request_memo"], dict)
     assert mimo_chunked.chunk_overlap_ms == 12_000
     assert mimo_chunked.chunk_length_ms == 180_000
-    assert mimo_chunked.chunk_concurrency == 3
+    assert mimo_chunked.chunk_concurrency == 2  # default lowered to avoid 429 rate limits
     assert mimo_chunked.chunk_boundary_mode == "vad"
     assert (
         mimo_chunked.max_chunk_payload_bytes
@@ -946,6 +946,89 @@ def test_transcribe_factories_preserve_requested_word_timestamp_flag(tmp_path):
     assert qwen_chunked.retry_same_chunk is False
     assert qwen_chunked.chunk_boundary_mode == "vad"
     assert qwen_chunked.pass_source_range is True
+
+
+def test_mimo_asr_concurrency_config_is_honored(tmp_path):
+    """MiMo chunk concurrency comes from config and is clamped to at least 1."""
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"fake wav")
+    config = TranscribeConfig(
+        transcribe_model=TranscribeModelEnum.MIMO_ASR_API,
+        transcribe_language="zh",
+        need_word_time_stamp=True,
+        mimo_asr_api_key="sk-test",
+        mimo_asr_concurrency=5,
+    )
+    assert _create_mimo_asr(str(audio_path), config).chunk_concurrency == 5
+
+    config.mimo_asr_concurrency = 0
+    assert _create_mimo_asr(str(audio_path), config).chunk_concurrency == 1
+
+
+def _rate_limit_error() -> "Exception":
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://api.xiaomimimo.com/v1/chat/completions")
+    response = httpx.Response(429, headers={"retry-after": "0"}, request=request)
+    return openai.RateLimitError("Too many requests", response=response, body=None)
+
+
+class _RateLimitedThenOK:
+    """Raise 429 the first ``fail_times`` calls, then return a valid response."""
+
+    def __init__(self, fail_times: int):
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise _rate_limit_error()
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="你好世界"))],
+            usage=SimpleNamespace(seconds=2.0),
+        )
+
+
+def test_mimo_asr_retries_then_succeeds_on_rate_limit(monkeypatch):
+    """A transient 429 is retried with backoff instead of aborting the chunk."""
+    completions = _RateLimitedThenOK(fail_times=2)
+    sleeps: list[float] = []
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=completions)
+
+    monkeypatch.setattr(mimo_asr_module, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(mimo_asr_module.time, "sleep", lambda s: sleeps.append(s))
+
+    asr = MiMoASR(audio_input=b"fake mp3", api_key="sk-test", need_word_time_stamp=False)
+    result = asr._run()
+
+    assert result["text"] == "你好世界"
+    assert completions.calls == 3  # 2 failures + 1 success
+    assert len(sleeps) == 2
+
+
+def test_mimo_asr_raises_after_exhausting_rate_limit_retries(monkeypatch):
+    """A sustained 429 still surfaces after the bounded retry budget."""
+    import openai
+
+    completions = _RateLimitedThenOK(fail_times=999)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=completions)
+
+    monkeypatch.setattr(mimo_asr_module, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(mimo_asr_module.time, "sleep", lambda s: None)
+
+    asr = MiMoASR(audio_input=b"fake mp3", api_key="sk-test", need_word_time_stamp=False)
+    with pytest.raises(openai.RateLimitError):
+        asr._run()
+
+    assert completions.calls == mimo_asr_module.MIMO_RATE_LIMIT_MAX_ATTEMPTS + 1
 
 
 # ---------------------------------------------------------------------------

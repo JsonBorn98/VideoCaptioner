@@ -64,6 +64,7 @@ ENV_MAP: Dict[str, str] = {
     "VIDEOCAPTIONER_MIMO_ASR_API_BASE": "transcribe.mimo_asr.api_base",
     "VIDEOCAPTIONER_MIMO_ASR_MODEL": "transcribe.mimo_asr.model",
     "VIDEOCAPTIONER_MIMO_ASR_TIMEOUT": "transcribe.mimo_asr.timeout",
+    "VIDEOCAPTIONER_MIMO_ASR_CONCURRENCY": "transcribe.mimo_asr.concurrency",
     "VIDEOCAPTIONER_QWEN_ASR_MODEL": "transcribe.qwen.asr_model",
     "VIDEOCAPTIONER_QWEN_ALIGNER_MODEL": "transcribe.qwen.aligner_model",
     "VIDEOCAPTIONER_QWEN_MODEL_DIR": "transcribe.qwen.model_dir",
@@ -107,6 +108,7 @@ DEFAULTS: Dict[str, Any] = {
             "api_base": "https://api.xiaomimimo.com/v1",
             "model": "mimo-v2.5-asr",
             "timeout": 600,
+            "concurrency": 2,
         },
         "qwen": {
             "asr_model": "Qwen/Qwen3-ASR-1.7B",

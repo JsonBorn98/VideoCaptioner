@@ -81,6 +81,16 @@ class MimoASRSettingWidget(QWidget):
             self.setting_group,
         )
 
+        self.concurrency_card = SpinBoxSettingCard(
+            cfg.mimo_asr_concurrency,
+            FIF.ALIGNMENT,  # type: ignore
+            self.tr("并发请求数"),
+            self.tr("同时请求 MiMo API 的分块数；遇到 429 限流请调低（默认 2）"),
+            1,
+            8,
+            self.setting_group,
+        )
+
         self.chunk_overlap_card = SpinBoxSettingCard(
             cfg.qwen_chunk_overlap_seconds,
             FIF.ALIGNMENT,  # type: ignore
@@ -171,6 +181,7 @@ class MimoASRSettingWidget(QWidget):
         self.setting_group.addSettingCard(self.api_key_card)
         self.setting_group.addSettingCard(self.model_card)
         self.setting_group.addSettingCard(self.timeout_card)
+        self.setting_group.addSettingCard(self.concurrency_card)
         self.setting_group.addSettingCard(self.chunk_overlap_card)
         self.setting_group.addSettingCard(self.check_connection_card)
         self.aligner_group.addSettingCard(self.aligner_model_card)

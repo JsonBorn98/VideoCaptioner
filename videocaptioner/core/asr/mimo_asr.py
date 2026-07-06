@@ -1,8 +1,11 @@
 import base64
+import random
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Union
 
+import openai
 from openai import OpenAI
 
 from videocaptioner.core.llm.client import normalize_base_url
@@ -34,6 +37,16 @@ MAX_BASE64_AUDIO_SIZE = 10 * 1024 * 1024
 MAX_RAW_AUDIO_BYTES_FOR_BASE64 = (MAX_BASE64_AUDIO_SIZE // 4) * 3
 MAX_WORD_COUNT_CJK = 25
 MAX_WORD_COUNT_ENGLISH = 14
+
+# Rate-limit resilience for the remote MiMo API.
+# The OpenAI SDK already retries 429/5xx a few times with short backoff; on top of
+# that we loop on sustained 429s with longer exponential backoff (honoring
+# Retry-After) so a temporary MiMo rate limit does not abort a whole long-audio job.
+MIMO_API_MAX_RETRIES = 3  # SDK-level retries (transient errors + short 429 backoff)
+MIMO_RATE_LIMIT_MAX_ATTEMPTS = 5  # extra app-level retries for sustained 429s
+MIMO_RATE_LIMIT_BASE_DELAY = 5.0  # seconds
+MIMO_RATE_LIMIT_MAX_DELAY = 60.0  # seconds
+MIMO_RATE_LIMIT_JITTER = 2.0  # seconds
 MIN_ALIGNMENT_COVERAGE = _asr_anomaly.MIN_ALIGNMENT_COVERAGE
 SUPPORTED_AUDIO_FORMATS = {"mp3", "wav"}
 MIME_TYPES = {
@@ -233,6 +246,7 @@ class MiMoASR(BaseASR):
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=self.timeout,
+            max_retries=MIMO_API_MAX_RETRIES,
         )
 
     def _request_memo_key(self) -> str:
@@ -316,6 +330,64 @@ class MiMoASR(BaseASR):
 
         return _make_estimated_segments(text, end_time, self.speech_ranges_ms)
 
+    def _rate_limit_delay(self, exc: "openai.RateLimitError", attempt: int) -> float:
+        """Backoff delay for a 429, honoring Retry-After when the API provides it."""
+        retry_after: float | None = None
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            raw = headers.get("retry-after") or headers.get("Retry-After")
+            if raw:
+                try:
+                    retry_after = float(raw)
+                except (TypeError, ValueError):
+                    retry_after = None
+        capped = min(MIMO_RATE_LIMIT_BASE_DELAY * (2 ** attempt), MIMO_RATE_LIMIT_MAX_DELAY)
+        delay = max(retry_after or 0.0, capped)
+        return delay + random.uniform(0.0, MIMO_RATE_LIMIT_JITTER)
+
+    def _create_completion(
+        self,
+        messages: Any,
+        callback: Optional[Callable[[int, str], None]] = None,
+    ) -> Any:
+        """Call the MiMo chat endpoint, retrying sustained 429 rate limits.
+
+        The OpenAI SDK already retries transient errors and short 429s; this loop
+        adds longer exponential backoff so a temporary rate limit does not abort
+        the whole long-audio job.
+        """
+        last_exc: Optional[openai.RateLimitError] = None
+        for attempt in range(MIMO_RATE_LIMIT_MAX_ATTEMPTS + 1):
+            try:
+                return self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    stream=False,
+                    timeout=self.timeout,
+                    extra_body={
+                        "asr_options": {
+                            "language": self.language,
+                        }
+                    },
+                )
+            except openai.RateLimitError as exc:
+                last_exc = exc
+                if attempt >= MIMO_RATE_LIMIT_MAX_ATTEMPTS:
+                    break
+                delay = self._rate_limit_delay(exc, attempt)
+                logger.warning(
+                    "MiMo ASR rate-limited (429); backing off %.1fs before retry %s/%s",
+                    delay,
+                    attempt + 1,
+                    MIMO_RATE_LIMIT_MAX_ATTEMPTS,
+                )
+                if callback:
+                    callback(10, f"MiMo API 限流，{delay:.0f}s 后重试")
+                time.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
+
     def _run(
         self, callback: Optional[Callable[[int, str], None]] = None, **kwargs: Any
     ) -> dict:
@@ -359,17 +431,7 @@ class MiMoASR(BaseASR):
             ]
 
             logger.info("Calling MiMo ASR: base_url=%s, model=%s", self.base_url, self.model)
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                stream=False,
-                timeout=self.timeout,
-                extra_body={
-                    "asr_options": {
-                        "language": self.language,
-                    }
-                },
-            )
+            response = self._create_completion(messages, callback=callback)
 
             result = {
                 "text": _clean_mimo_transcript_text(_extract_chat_text(response)),

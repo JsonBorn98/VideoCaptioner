@@ -215,7 +215,7 @@ def _create_mimo_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
         asr_kwargs=asr_kwargs,
         chunk_length=chunk_length,
         chunk_overlap=chunk_overlap,
-        chunk_concurrency=3,
+        chunk_concurrency=max(1, config.mimo_asr_concurrency),
         chunk_boundary_mode="vad",
         max_chunk_payload_bytes=MAX_RAW_AUDIO_BYTES_FOR_BASE64,
     )

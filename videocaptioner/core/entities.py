@@ -614,6 +614,7 @@ class TranscribeConfig:
     mimo_asr_api_base: Optional[str] = None
     mimo_asr_model: Optional[str] = None
     mimo_asr_timeout: int = 600
+    mimo_asr_concurrency: int = 2
     # Qwen ASR / Qwen forced aligner 配置
     qwen_asr_model: Optional[str] = None
     qwen_aligner_model: Optional[str] = None
@@ -671,6 +672,7 @@ class TranscribeConfig:
             lines.append(f"Aligner Device: {self.qwen_device}")
             lines.append(f"Compile Aligner: {self.qwen_compile_aligner}")
             lines.append(f"Chunk Overlap: {self.qwen_chunk_overlap_seconds}s")
+            lines.append(f"Concurrency: {self.mimo_asr_concurrency}")
             lines.append(f"Timeout: {self.mimo_asr_timeout}s")
 
         elif self.transcribe_model == TranscribeModelEnum.QWEN_LOCAL_ASR:

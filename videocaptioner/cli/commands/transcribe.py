@@ -125,6 +125,7 @@ def run(args: Namespace, config: dict) -> int:
         mimo_asr_api_base=get(config, "transcribe.mimo_asr.api_base", ""),
         mimo_asr_model=get(config, "transcribe.mimo_asr.model", "mimo-v2.5-asr"),
         mimo_asr_timeout=get(config, "transcribe.mimo_asr.timeout", 600),
+        mimo_asr_concurrency=get(config, "transcribe.mimo_asr.concurrency", 2),
         # Qwen ASR / aligner options
         qwen_asr_model=get(config, "transcribe.qwen.asr_model", "Qwen/Qwen3-ASR-1.7B"),
         qwen_aligner_model=get(

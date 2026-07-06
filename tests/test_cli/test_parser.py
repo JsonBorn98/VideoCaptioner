@@ -266,6 +266,7 @@ class TestTranscribeParser:
                         "api_base": "https://example.test/v1",
                         "model": "mimo-test",
                         "timeout": 120,
+                        "concurrency": 4,
                     },
                     "qwen": {
                         "aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
@@ -295,6 +296,7 @@ class TestTranscribeParser:
         assert transcribe_config.mimo_asr_api_base == "https://example.test/v1"
         assert transcribe_config.mimo_asr_model == "mimo-test"
         assert transcribe_config.mimo_asr_timeout == 120
+        assert transcribe_config.mimo_asr_concurrency == 4
         assert transcribe_config.qwen_device == "cpu"
         assert transcribe_config.qwen_dtype == "float32"
         assert transcribe_config.qwen_compile_aligner is True
