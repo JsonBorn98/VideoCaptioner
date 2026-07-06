@@ -127,3 +127,64 @@ def test_reference_resolution_is_clamped_when_loading_json():
 
     assert style.reference_width == 320
     assert style.reference_height == 180
+
+
+def test_ass_style_emits_shadow_and_margins():
+    """to_ass_string 应输出 Shadow / MarginL / MarginR 字段。"""
+    style = SubtitleStyle(
+        mode=StyleMode.ASS,
+        shadow=1.5,
+        margin_l=20,
+        margin_r=25,
+        margin_bottom=40,
+    )
+    default_line = [
+        ln for ln in style.to_ass_string().splitlines() if ln.startswith("Style: Default,")
+    ][0]
+    parts = default_line.split(",")
+    assert parts[17] == "1.5"  # Shadow
+    assert parts[19] == "20"   # MarginL
+    assert parts[20] == "25"   # MarginR
+    assert parts[21] == "40"   # MarginV
+
+
+def test_ass_style_default_is_backward_compatible():
+    """默认样式（无新字段）应保持旧输出：Shadow=0、Margin=10,10。"""
+    default_line = [
+        ln for ln in SubtitleStyle().to_ass_string().splitlines()
+        if ln.startswith("Style: Default,")
+    ][0]
+    assert default_line.endswith(",0,2,10,10,30,1")
+
+
+def test_secondary_shadow_and_margin_bottom_fallback():
+    """副样式 shadow 输出，margin_bottom=None 时沿用主样式。"""
+    style = SubtitleStyle(
+        mode=StyleMode.ASS,
+        margin_bottom=30,
+        secondary=SecondaryStyle(shadow=2.0, margin_bottom=None),
+    )
+    sec_line = [
+        ln for ln in style.to_ass_string().splitlines() if ln.startswith("Style: Secondary,")
+    ][0]
+    parts = sec_line.split(",")
+    assert parts[17] == "2"    # Shadow (compact)
+    assert parts[21] == "30"   # MarginV falls back to main margin_bottom
+
+
+def test_scaled_border_and_shadow_in_generated_ass():
+    """生成的 ASS 头应包含 ScaledBorderAndShadow: yes。"""
+    ass = ASRData([ASRDataSeg("hi", 0, 1000, "你好")]).to_ass()
+    assert "ScaledBorderAndShadow: yes" in ass
+
+
+def test_new_fields_round_trip_through_json():
+    """新字段应能通过 JSON 往返。"""
+    style = SubtitleStyle(
+        mode=StyleMode.ASS, shadow=1.0, margin_l=15, margin_r=18, wrap_style=2
+    )
+    restored = SubtitleStyle.from_json(style.to_json_dict())
+    assert restored.shadow == 1.0
+    assert restored.margin_l == 15
+    assert restored.margin_r == 18
+    assert restored.wrap_style == 2

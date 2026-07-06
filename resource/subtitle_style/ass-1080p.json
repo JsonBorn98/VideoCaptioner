@@ -1,11 +1,11 @@
 {
-  "name": "default",
+  "name": "1080p",
   "description": "",
   "mode": "ass",
   "reference_width": 1920,
   "reference_height": 1080,
-  "font_name": "LXGW WenKai",
-  "font_size": 64,
+  "font_name": "霞鹜文楷 屏幕阅读版",
+  "font_size": 68,
   "primary_color": "#ffffff",
   "outline_color": "#002040",
   "outline_width": 5.0,
@@ -13,7 +13,7 @@
   "spacing": 3.2,
   "margin_bottom": 30,
   "secondary": {
-    "font_name": "Noto Sans SC",
+    "font_name": "LXGW WenKai Screen",
     "font_size": 48,
     "color": "#ffffff",
     "outline_color": "#400020",

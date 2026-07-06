@@ -37,6 +37,8 @@ class SecondaryStyle:
     outline_color: str = "#000000"
     outline_width: float = 2.0
     spacing: float = 0.8
+    shadow: float = 0.0
+    margin_bottom: Optional[int] = None  # None -> 沿用主样式 margin_bottom
 
 
 @dataclass
@@ -65,6 +67,10 @@ class SubtitleStyle:
     bold: bool = True
     spacing: float = 3.2
     margin_bottom: int = 30
+    shadow: float = 0.0
+    margin_l: int = 10
+    margin_r: int = 10
+    wrap_style: int = 1
     secondary: Optional[SecondaryStyle] = None
 
     # -- Rounded mode fields --
@@ -93,6 +99,7 @@ class SubtitleStyle:
         )
         sec_color = _hex_to_ass(sec.color)
         sec_outline = _hex_to_ass(sec.outline_color)
+        sec_margin_v = sec.margin_bottom if sec.margin_bottom is not None else self.margin_bottom
 
         header = (
             "[V4+ Styles]\n"
@@ -105,13 +112,15 @@ class SubtitleStyle:
             f"Style: Default,{self.font_name},{self.font_size},"
             f"{primary},&H000000FF,{outline},&H00000000,"
             f"{bold_flag},0,0,0,100,100,{self.spacing},0,1,"
-            f"{self.outline_width},0,2,10,10,{self.margin_bottom},1"
+            f"{self.outline_width},{_compact_num(self.shadow)},2,"
+            f"{self.margin_l},{self.margin_r},{self.margin_bottom},1"
         )
         secondary_line = (
             f"Style: Secondary,{sec.font_name},{sec.font_size},"
             f"{sec_color},&H000000FF,{sec_outline},&H00000000,"
             f"{bold_flag},0,0,0,100,100,{sec.spacing},0,1,"
-            f"{sec.outline_width},0,2,10,10,{self.margin_bottom},1"
+            f"{sec.outline_width},{_compact_num(sec.shadow)},2,"
+            f"{self.margin_l},{self.margin_r},{sec_margin_v},1"
         )
         return f"{header}\n{default_line}\n{secondary_line}"
 
@@ -153,6 +162,10 @@ class SubtitleStyle:
                 "bold": self.bold,
                 "spacing": self.spacing,
                 "margin_bottom": self.margin_bottom,
+                "shadow": self.shadow,
+                "margin_l": self.margin_l,
+                "margin_r": self.margin_r,
+                "wrap_style": self.wrap_style,
             })
             if self.secondary:
                 d["secondary"] = asdict(self.secondary)
@@ -211,6 +224,10 @@ class SubtitleStyle:
             bold=data.get("bold", cls.bold),
             spacing=data.get("spacing", cls.spacing),
             margin_bottom=data.get("margin_bottom", cls.margin_bottom),
+            shadow=data.get("shadow", cls.shadow),
+            margin_l=data.get("margin_l", cls.margin_l),
+            margin_r=data.get("margin_r", cls.margin_r),
+            wrap_style=data.get("wrap_style", cls.wrap_style),
             secondary=secondary,
         )
 
@@ -375,6 +392,12 @@ def _default_styles_dir() -> Path:
     return SUBTITLE_STYLE_PATH
 
 
+def _compact_num(value: float) -> str:
+    """Render integral floats without a trailing .0 (0.0 -> '0', 2.6 -> '2.6')."""
+    f = float(value)
+    return str(int(f)) if f.is_integer() else str(f)
+
+
 def _hex_to_ass(hex_color: str) -> str:
     """Convert #RRGGBB to ASS &H00BBGGRR format. Only used for ASS style colors."""
     h = hex_color.lstrip("#")
@@ -416,6 +439,9 @@ def _parse_ass_txt(content: str, stem: str = "") -> SubtitleStyle:
             kwargs["bold"] = parts[7].strip() == "-1"
             kwargs["spacing"] = float(parts[13])
             kwargs["outline_width"] = float(parts[16])
+            kwargs["shadow"] = float(parts[17])
+            kwargs["margin_l"] = int(parts[19])
+            kwargs["margin_r"] = int(parts[20])
             kwargs["margin_bottom"] = int(parts[21])
 
         elif line.startswith("Style: Secondary,"):
@@ -426,6 +452,8 @@ def _parse_ass_txt(content: str, stem: str = "") -> SubtitleStyle:
             secondary_kwargs["outline_color"] = _ass_color_to_hex(parts[5])
             secondary_kwargs["spacing"] = float(parts[13])
             secondary_kwargs["outline_width"] = float(parts[16])
+            secondary_kwargs["shadow"] = float(parts[17])
+            secondary_kwargs["margin_bottom"] = int(parts[21])
 
     if secondary_kwargs:
         kwargs["secondary"] = SecondaryStyle(**secondary_kwargs)

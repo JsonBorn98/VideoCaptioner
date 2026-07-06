@@ -367,6 +367,7 @@ class ASRData:
             f"; SubtitleLayout: {layout_marker}\n"
             "ScriptType: v4.00+\n"
             "WrapStyle: 1\n"
+            "ScaledBorderAndShadow: yes\n"
             f"PlayResX: {video_width}\n"
             f"PlayResY: {video_height}\n\n"
             f"{style_str}\n\n"
@@ -533,9 +534,11 @@ class ASRData:
 
         Args:
             file_path: Subtitle file path (supports .srt, .vtt, .ass, .json)
-            layout: Optional layout hint for VideoCaptioner-generated bilingual ASS
-                files. In translate-on-top ASS output, Default carries the
-                translated text and Secondary carries the original text.
+            layout: Optional layout hint for VideoCaptioner-generated bilingual
+                subtitle files. In translate-on-top ASS output, Default carries
+                the translated text and Secondary carries the original text. In
+                translate-on-top SRT output, the first visible text line is the
+                translated text.
 
         Returns:
             Parsed ASRData instance
@@ -556,7 +559,7 @@ class ASRData:
         suffix = file_path_obj.suffix.lower()
 
         if suffix == ".srt":
-            return ASRData.from_srt(content)
+            return ASRData.from_srt(content, layout=layout)
         elif suffix == ".vtt":
             if "<c>" in content:
                 return ASRData.from_youtube_vtt(content)
@@ -584,7 +587,10 @@ class ASRData:
         return ASRData(segments)
 
     @staticmethod
-    def from_srt(srt_str: str) -> "ASRData":
+    def from_srt(
+        srt_str: str,
+        layout: Optional[SubtitleLayoutEnum] = None,
+    ) -> "ASRData":
         """Create ASRData from SRT format string.
 
         Uses language detection to distinguish between bilingual subtitles
@@ -592,6 +598,9 @@ class ASRData:
 
         Args:
             srt_str: SRT format subtitle string
+            layout: Optional layout hint for VideoCaptioner-generated bilingual
+                SRT files. In translate-on-top SRT output, the first text line
+                is translated text and the second line is original text.
 
         Returns:
             Parsed ASRData instance
@@ -647,8 +656,11 @@ class ASRData:
 
             text_lines = lines[2:]
             if is_bilingual and len(text_lines) >= 2:
-                # First line = original, second line = translation
-                segments.append(ASRDataSeg(text_lines[0], start_time, end_time, text_lines[1]))
+                if layout == SubtitleLayoutEnum.TRANSLATE_ON_TOP:
+                    original, translated = text_lines[1], text_lines[0]
+                else:
+                    original, translated = text_lines[0], text_lines[1]
+                segments.append(ASRDataSeg(original, start_time, end_time, translated))
             elif len(text_lines) == 1:
                 segments.append(ASRDataSeg(text_lines[0], start_time, end_time))
             else:

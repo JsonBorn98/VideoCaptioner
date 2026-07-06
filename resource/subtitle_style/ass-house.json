@@ -1,0 +1,28 @@
+{
+  "name": "house",
+  "description": "双语一体化：同近白填充，语言区分仅在描边色（中文深蓝 / 英文深棕），无阴影",
+  "mode": "ass",
+  "reference_width": 1280,
+  "reference_height": 720,
+  "font_name": "LXGW WenKai",
+  "font_size": 48,
+  "primary_color": "#f8f8f6",
+  "outline_color": "#182030",
+  "outline_width": 3.0,
+  "bold": true,
+  "spacing": 3.2,
+  "margin_bottom": 30,
+  "shadow": 0.0,
+  "margin_l": 10,
+  "margin_r": 10,
+  "wrap_style": 1,
+  "secondary": {
+    "font_name": "LXGW WenKai",
+    "font_size": 32,
+    "color": "#f8f8f6",
+    "outline_color": "#331e15",
+    "outline_width": 2.6,
+    "spacing": 0.6,
+    "shadow": 0.0
+  }
+}

@@ -60,7 +60,8 @@ def _list(args: Namespace) -> int:
         else:
             details = style.to_json_dict()
             for k in ["font_name", "font_size", "primary_color", "outline_color",
-                       "outline_width", "bold", "spacing", "margin_bottom"]:
+                       "outline_width", "bold", "spacing", "margin_bottom",
+                       "shadow", "margin_l", "margin_r", "wrap_style"]:
                 if k in details:
                     print(f"    {k}: {details[k]}")
             if style.secondary:
@@ -75,7 +76,8 @@ def _list(args: Namespace) -> int:
     print("\nCustom style JSON fields:")
     print("  ASS mode:     font_name, font_size, primary_color (#rrggbb), outline_color,")
     print("                outline_width, bold (bool), spacing, margin_bottom,")
-    print("                secondary: {font_name, font_size, color}")
+    print("                shadow, margin_l, margin_r, wrap_style,")
+    print("                secondary: {font_name, font_size, color, outline_color, shadow, margin_bottom}")
     print("  Rounded mode: font_name, font_size, text_color (#rrggbb), bg_color (#rrggbbaa),")
     print("                corner_radius, padding_h, padding_v, margin_bottom,")
     print("                line_spacing, letter_spacing")
