@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from ..utils.text_utils import is_mainly_cjk
+
 _MAX_SAMPLES = 20
 _MAX_TABLE_ROWS = 40
 
@@ -225,7 +227,7 @@ def _write_speed_table(lines: List[str], warnings: List[SpeedWarning]) -> None:
     lines.append("| 段 | 时间 | CPS | 限值 | 时长(s) | 文本 |\n")
     lines.append("| --- | --- | ---: | ---: | ---: | --- |\n")
     for w in warnings[:_MAX_TABLE_ROWS]:
-        shown = w.text if w.is_cjk else w.translated or w.text
+        shown = _speed_warning_display_text(w)
         lines.append(
             _md_row([
                 w.index,
@@ -238,3 +240,12 @@ def _write_speed_table(lines: List[str], warnings: List[SpeedWarning]) -> None:
         )
     if len(warnings) > _MAX_TABLE_ROWS:
         lines.append(f"\n_省略 {len(warnings) - _MAX_TABLE_ROWS} 条。_\n")
+
+
+def _speed_warning_display_text(warning: SpeedWarning) -> str:
+    """Show the actual field that triggered the CJK/non-CJK speed warning."""
+    fields = [warning.text, warning.translated]
+    for value in fields:
+        if value and bool(is_mainly_cjk(value)) == warning.is_cjk:
+            return value
+    return warning.text or warning.translated

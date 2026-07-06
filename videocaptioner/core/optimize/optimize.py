@@ -40,6 +40,7 @@ class SubtitleOptimizer:
         model: str,
         custom_prompt: str,
         update_callback: Optional[Callable] = None,
+        extra_rules: str = "",
     ):
         """初始化优化器
 
@@ -50,12 +51,14 @@ class SubtitleOptimizer:
             custom_prompt: 自定义优化提示词
             temperature: LLM温度参数
             update_callback: 进度更新回调函数
+            extra_rules: 由可选规则型后处理注入的额外输出约束
         """
         self.thread_num = thread_num
         self.batch_num = batch_num
         self.model = model
         self.custom_prompt = custom_prompt
         self.update_callback = update_callback
+        self.extra_rules = extra_rules
 
         self.is_running = True
         self.executor: Optional[ThreadPoolExecutor] = None
@@ -210,7 +213,10 @@ class SubtitleOptimizer:
             )
 
         messages = [
-            {"role": "system", "content": get_prompt("optimize/subtitle")},
+            {
+                "role": "system",
+                "content": get_prompt("optimize/subtitle", extra_rules=self.extra_rules or ""),
+            },
             {"role": "user", "content": user_prompt},
         ]
 

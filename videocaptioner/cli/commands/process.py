@@ -8,6 +8,21 @@ from videocaptioner.cli import output
 from videocaptioner.cli.config import get
 
 
+def _postprocess_requested(config: dict) -> bool:
+    """Return True when process should run subtitle stage for explicit postprocess work."""
+    return any(
+        bool(get(config, f"subtitle.{key}", False))
+        for key in (
+            "remove_placeholders",
+            "normalize_quotes",
+            "fix_gaps",
+            "audit_reading_speed",
+            "compress_fast_subtitles",
+            "qa_report",
+        )
+    )
+
+
 def run(args: Namespace, config: dict) -> int:
     input_path = args.input
     verbose = getattr(args, "verbose", False)
@@ -24,6 +39,8 @@ def run(args: Namespace, config: dict) -> int:
     # If user specified --translator or --target-language, enable translation
     if getattr(args, "translator", None) or getattr(args, "target_language", None):
         no_translate = False
+
+    run_subtitle_stage = not no_optimize or not no_translate or _postprocess_requested(config)
 
     # URL input not yet supported
     is_url = input_path.startswith("http://") or input_path.startswith("https://")
@@ -66,7 +83,7 @@ def run(args: Namespace, config: dict) -> int:
     else:
         out_dir = path.parent
 
-    total_steps = 2 + (0 if no_synthesize else 1) + (1 if do_dub else 0)
+    total_steps = 1 + (1 if run_subtitle_stage else 0) + (0 if no_synthesize else 1) + (1 if do_dub else 0)
     current_step = 1
     final_output_path = _resolve_final_output_path(out_arg, out_dir, path, do_dub, no_synthesize, is_audio_input)
     dubbed_video_path: str | None = None
@@ -96,7 +113,7 @@ def run(args: Namespace, config: dict) -> int:
     current_step += 1
 
     # Step 2: Subtitle (optimize + translate)
-    if not no_optimize or not no_translate:
+    if run_subtitle_stage:
         if not quiet:
             output.info(f"Step {current_step}/{total_steps}: Processing subtitles...")
 
@@ -124,10 +141,9 @@ def run(args: Namespace, config: dict) -> int:
         if ret != 0:
             return ret
         subtitle_path = processed_path
-    else:
-        if not quiet:
-            output.info(f"Step {current_step}/{total_steps}: Skipped (optimization and translation disabled)")
-    current_step += 1
+        current_step += 1
+    elif not quiet:
+        output.info("Subtitle processing skipped (optimization, translation, and postprocess disabled)")
 
     # Step 3: Dub
     if do_dub:
@@ -214,7 +230,7 @@ def run(args: Namespace, config: dict) -> int:
             return ret
     else:
         if not quiet and not getattr(args, "dub_only", False):
-            output.info(f"Step {current_step}/{total_steps}: Skipped (synthesis disabled)")
+            output.info("Synthesis skipped (disabled)")
 
     if not quiet:
         output.success("Pipeline complete!")

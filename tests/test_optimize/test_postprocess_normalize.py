@@ -1,7 +1,7 @@
 """F2 文本规范化测试（引号 + 弱尾标点）。"""
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
-from videocaptioner.core.postprocess import PostprocessConfig, run_normalize_stage
+from videocaptioner.core.postprocess import PostprocessConfig, run_normalize_stage, run_post_stage
 from videocaptioner.core.postprocess.normalize import (
     QuoteState,
     normalize_quotes,
@@ -74,3 +74,13 @@ def test_keep_trailing_punct_disables_trimming():
     cfg = PostprocessConfig(trim_trailing_punct=False)
     data, _ = run_normalize_stage(data, cfg)
     assert data.segments[0].text == "你好，"
+
+
+def test_post_stage_runs_explicit_normalize_without_llm_steps():
+    """只开规则规范化、不开优化/翻译时，保存前仍应执行 normalize。"""
+    data = ASRData([ASRDataSeg('他说"你好。"', 0, 1000)])
+    cfg = PostprocessConfig(normalize_quotes=True)
+
+    data, _ = run_post_stage(data, cfg)
+
+    assert data.segments[0].text == "他说「你好」"

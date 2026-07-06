@@ -95,7 +95,11 @@ def run(args: Namespace, config: dict) -> int:
     translator_service = get(config, "translate.service", "bing")
 
     # Validate AFTER resolving the actual need_translate / need_optimize state
-    needs_llm = need_optimize or (need_translate and translator_service == "llm")
+    needs_llm = (
+        need_optimize
+        or get(config, "subtitle.compress_fast_subtitles", False)
+        or (need_translate and translator_service == "llm")
+    )
     if needs_llm:
         from videocaptioner.cli.validators import validate_llm
         if not validate_llm(config):
@@ -252,6 +256,11 @@ def run(args: Namespace, config: dict) -> int:
                 model=llm_model,
                 custom_prompt=custom_prompt,
                 update_callback=callback,
+                extra_rules=(
+                    "中文引号使用「」/『』；不要在中文行尾输出弱标点（，。；：等）。"
+                    if pp_cfg.normalize_quotes
+                    else ""
+                ),
             )
             asr_data = optimizer.optimize_subtitle(asr_data)
             asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)

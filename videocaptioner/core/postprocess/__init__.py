@@ -6,7 +6,7 @@
 管线插入点（见 docs/dev/subtitle-optimizer-integration-plan.md §3.2）：
 - 加载后、断句前          → run_pre_stage       （占位符清理）
 - 优化后 / 翻译后          → run_normalize_stage （取代 remove_punctuation）
-- 保存前                   → run_post_stage      （压缩 → 闭合间隙 → 审计）
+- 保存前                   → run_post_stage      （必要时规范化 → 压缩 → 闭合间隙 → 审计）
 
 任何步骤内部异常均捕获后记 warning 并跳过，绝不阻断主管线。
 """
@@ -81,11 +81,16 @@ def run_post_stage(
     report: Optional[QualityReport] = None,
     llm_ctx: Optional[dict] = None,
 ) -> Tuple["ASRData", QualityReport]:
-    """保存前：[压缩重译] → 闭合间隙 → 审计。
+    """保存前：[必要时规范化] → [压缩重译] → 闭合间隙 → 审计。
 
     顺序保证删除段/压缩产生的新间隙被闭合，且审计看到的是最终时轴。
     """
     report = _new_report(asr_data, report)
+
+    # 允许用户只开启规则后处理（例如 --normalize-quotes --no-optimize --no-translate）。
+    # 默认 trim_trailing_punct=True 仅复刻旧 LLM 后处理路径，不在纯透传路径里单独改字节。
+    if cfg.normalize_quotes or cfg.compress_fast_subtitles:
+        asr_data, report = run_normalize_stage(asr_data, cfg, report)
 
     if cfg.compress_fast_subtitles:
         try:

@@ -203,6 +203,11 @@ class SubtitleThread(QThread):
                     model=subtitle_config.llm_model,
                     custom_prompt=custom_prompt or "",
                     update_callback=self.callback,
+                    extra_rules=(
+                        "中文引号使用「」/『』；不要在中文行尾输出弱标点（，。；：等）。"
+                        if pp_cfg.normalize_quotes
+                        else ""
+                    ),
                 )
                 asr_data = optimizer.optimize_subtitle(asr_data)
                 asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)
@@ -306,6 +311,7 @@ class SubtitleThread(QThread):
     def need_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
         return (
             subtitle_config.need_optimize
+            or subtitle_config.compress_fast_subtitles
             or (subtitle_config.need_split and asr_data.is_word_timestamp())
             or (
                 subtitle_config.need_translate

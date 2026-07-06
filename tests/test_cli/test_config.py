@@ -168,3 +168,20 @@ class TestBuildConfig:
         assert overrides["transcribe"]["mimo_asr"]["timeout"] == 120
         assert overrides["transcribe"]["qwen"]["max_new_tokens"] == 4096
         assert overrides["transcribe"]["qwen"]["compile_aligner"] is True
+
+    def test_compress_fast_requires_llm_validation(self, capsys):
+        from videocaptioner.cli.validators import validate_subtitle
+
+        config = build_config(
+            cli_overrides={
+                "llm": {"api_key": ""},
+                "subtitle": {
+                    "optimize": False,
+                    "translate": False,
+                    "compress_fast_subtitles": True,
+                },
+            }
+        )
+
+        assert validate_subtitle(config) is False
+        assert "LLM API key" in capsys.readouterr().err

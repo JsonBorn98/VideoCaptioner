@@ -374,6 +374,163 @@ class TestProcessParser:
         assert "--style-prompt" not in out
         assert "--tts-api-base" not in out
 
+    def test_process_runs_subtitle_stage_for_postprocess_only(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from videocaptioner.cli.commands import process as process_cmd
+        from videocaptioner.cli.commands import subtitle as subtitle_cmd
+        from videocaptioner.cli.commands import transcribe as transcribe_cmd
+
+        input_path = tmp_path / "talk.mp3"
+        input_path.write_bytes(b"fake")
+        calls = {"subtitle": 0}
+
+        def fake_transcribe(args, config):
+            Path(args.output).write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n[Music]\n",
+                encoding="utf-8",
+            )
+            return EXIT.SUCCESS
+
+        def fake_subtitle(args, config):
+            calls["subtitle"] += 1
+            Path(args.output).write_text("", encoding="utf-8")
+            return EXIT.SUCCESS
+
+        monkeypatch.setattr(transcribe_cmd, "run", fake_transcribe)
+        monkeypatch.setattr(subtitle_cmd, "run", fake_subtitle)
+        config = build_config(
+            cli_overrides={
+                "subtitle": {
+                    "optimize": False,
+                    "translate": False,
+                    "remove_placeholders": True,
+                }
+            }
+        )
+
+        ret = process_cmd.run(
+            Namespace(
+                input=str(input_path),
+                output=str(tmp_path),
+                verbose=False,
+                quiet=True,
+                no_synthesize=True,
+                dub=False,
+                dub_only=False,
+                translator=None,
+                target_language=None,
+                config=None,
+            ),
+            config,
+        )
+
+        assert ret == EXIT.SUCCESS
+        assert calls["subtitle"] == 1
+
+    def test_process_runs_subtitle_stage_when_cli_enables_translation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from videocaptioner.cli.commands import process as process_cmd
+        from videocaptioner.cli.commands import subtitle as subtitle_cmd
+        from videocaptioner.cli.commands import transcribe as transcribe_cmd
+
+        input_path = tmp_path / "talk.mp3"
+        input_path.write_bytes(b"fake")
+        calls = {"subtitle": 0}
+
+        def fake_transcribe(args, config):
+            Path(args.output).write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            return EXIT.SUCCESS
+
+        def fake_subtitle(args, config):
+            calls["subtitle"] += 1
+            Path(args.output).write_text("", encoding="utf-8")
+            return EXIT.SUCCESS
+
+        monkeypatch.setattr(transcribe_cmd, "run", fake_transcribe)
+        monkeypatch.setattr(subtitle_cmd, "run", fake_subtitle)
+        config = build_config(
+            cli_overrides={
+                "subtitle": {"optimize": False, "translate": False},
+                "translate": {"service": "bing"},
+            }
+        )
+
+        ret = process_cmd.run(
+            Namespace(
+                input=str(input_path),
+                output=str(tmp_path),
+                verbose=False,
+                quiet=True,
+                no_synthesize=True,
+                dub=False,
+                dub_only=False,
+                translator="bing",
+                target_language=None,
+                config=None,
+            ),
+            config,
+        )
+
+        assert ret == EXIT.SUCCESS
+        assert calls["subtitle"] == 1
+
+    def test_process_skip_messages_do_not_use_unrun_step_numbers(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        from videocaptioner.cli.commands import process as process_cmd
+        from videocaptioner.cli.commands import transcribe as transcribe_cmd
+
+        input_path = tmp_path / "talk.mp3"
+        input_path.write_bytes(b"fake")
+
+        def fake_transcribe(args, config):
+            Path(args.output).write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            return EXIT.SUCCESS
+
+        monkeypatch.setattr(transcribe_cmd, "run", fake_transcribe)
+        config = build_config(
+            cli_overrides={
+                "subtitle": {"optimize": False, "translate": False},
+                "transcribe": {"asr": "bijian"},
+            }
+        )
+
+        ret = process_cmd.run(
+            Namespace(
+                input=str(input_path),
+                output=str(tmp_path),
+                verbose=False,
+                quiet=False,
+                no_synthesize=True,
+                dub=False,
+                dub_only=False,
+                translator=None,
+                target_language=None,
+                config=None,
+            ),
+            config,
+        )
+
+        assert ret == EXIT.SUCCESS
+        err = capsys.readouterr().err
+        assert "Step 2/1" not in err
+        assert "Synthesis skipped (disabled)" in err
+
 
 class TestDubParser:
     def test_missing_subtitle(self):

@@ -199,6 +199,8 @@ def validate_subtitle(config: dict) -> bool:
         needs_llm = True
     if translate and translator == "llm":
         needs_llm = True
+    if get(config, "subtitle.compress_fast_subtitles", False):
+        needs_llm = True
 
     if needs_llm:
         return validate_llm(config)

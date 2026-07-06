@@ -26,6 +26,7 @@ You will receive:
 5. Use reference information to correct terminology when provided
 6. Keep original language (English stays English, Chinese stays Chinese)
 7. Output only the corrected JSON, no explanations
+$extra_rules
 </instructions>
 
 <output_format>

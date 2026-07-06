@@ -160,6 +160,17 @@ class TestSubtitleThreadLlmRouting:
 
         assert thread.need_llm(config, asr_data)
 
+    def test_compress_fast_needs_llm_even_without_other_llm_steps(self, base_config):
+        config = base_config
+        config.need_split = False
+        config.need_optimize = False
+        config.need_translate = False
+        config.compress_fast_subtitles = True
+        asr_data = ASRData([ASRDataSeg(text="你好", start_time=0, end_time=1000)])
+        thread = SubtitleThread(SubtitleTask(subtitle_path="", subtitle_config=config))
+
+        assert thread.need_llm(config, asr_data)
+
 
 class TestSubtitleThreadSplit:
     """Test subtitle splitting functionality."""

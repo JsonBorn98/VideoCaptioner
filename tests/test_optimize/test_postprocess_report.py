@@ -45,3 +45,17 @@ def test_qa_report_table_row_cap():
     report = QualityReport(audit=result)
     md = build_qa_report(report)
     assert "省略 10 条长时长样本" in md
+
+
+def test_speed_report_shows_triggering_language_field():
+    """英文侧超速时，快速外文表应展示英文字段而不是中文译文。"""
+    data = ASRData([ASRDataSeg("this sentence is much too fast", 0, 500, "这句很快")])
+    _, report = run_post_stage(
+        data,
+        PostprocessConfig(qa_report=True, trim_trailing_punct=False),
+    )
+
+    md = build_qa_report(report)
+
+    assert "this sentence is much too fast" in md
+    assert "| 这句很快 |" not in md
