@@ -46,6 +46,30 @@ def _resolve_target_language(code: str):
     return None
 
 
+def _build_postprocess_config(config: dict):
+    """Build a PostprocessConfig from the merged CLI config dict."""
+    from videocaptioner.core.postprocess import PostprocessConfig
+
+    return PostprocessConfig(
+        remove_placeholders=get(config, "subtitle.remove_placeholders", False),
+        normalize_quotes=get(config, "subtitle.normalize_quotes", False),
+        trim_trailing_punct=get(config, "subtitle.trim_trailing_punct", True),
+        fix_gaps=get(config, "subtitle.fix_gaps", False),
+        max_gap_ms=get(config, "subtitle.max_gap_ms", 800),
+        gap_mode=get(config, "subtitle.gap_mode", "extend"),
+        audit_reading_speed=get(config, "subtitle.audit_reading_speed", False),
+        max_cps_cjk=get(config, "subtitle.max_cps_cjk", 11.0),
+        max_cps_latin=get(config, "subtitle.max_cps_latin", 20.0),
+        comfort_cps_cjk=get(config, "subtitle.comfort_cps_cjk", 9.0),
+        comfort_cps_latin=get(config, "subtitle.comfort_cps_latin", 16.0),
+        min_duration_ms=get(config, "subtitle.min_duration_ms", 1000),
+        max_duration_ms=get(config, "subtitle.max_duration_ms", 7000),
+        compress_fast_subtitles=get(config, "subtitle.compress_fast_subtitles", False),
+        llm_model=get(config, "llm.model", ""),
+        qa_report=get(config, "subtitle.qa_report", False),
+    )
+
+
 def run(args: Namespace, config: dict) -> int:
     input_path = Path(args.input)
     if not input_path.exists():
@@ -170,6 +194,16 @@ def run(args: Namespace, config: dict) -> int:
     from videocaptioner.core.asr.asr_data import ASRData
     asr_data = ASRData.from_subtitle_file(str(input_path), layout=layout)
 
+    from videocaptioner.core.postprocess import (
+        run_normalize_stage,
+        run_post_stage,
+        run_pre_stage,
+    )
+    pp_cfg = _build_postprocess_config(config)
+    pp_report = None
+    # Rule-based cleanup before splitting/optimizing (placeholders).
+    asr_data, pp_report = run_pre_stage(asr_data, pp_cfg, pp_report)
+
     if need_split and asr_data.is_word_timestamp() and not needs_llm:
         from videocaptioner.cli.validators import validate_llm
         if not validate_llm(config):
@@ -220,7 +254,7 @@ def run(args: Namespace, config: dict) -> int:
                 update_callback=callback,
             )
             asr_data = optimizer.optimize_subtitle(asr_data)
-            asr_data.remove_punctuation()
+            asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)
 
         # 3. Translate
         if need_translate:
@@ -248,14 +282,32 @@ def run(args: Namespace, config: dict) -> int:
                 update_callback=callback,
             )
             asr_data = translator.translate_subtitle(asr_data)
-            asr_data.remove_punctuation()
+            asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)
 
         # 4. Save
+        asr_data, pp_report = run_post_stage(asr_data, pp_cfg, pp_report)
         asr_data.save(save_path=output_path, layout=layout)
+
+        # Write QA report if requested
+        if pp_cfg.qa_report and pp_report is not None:
+            from videocaptioner.core.postprocess import build_qa_report
+            pp_report.source_path = str(input_path)
+            pp_report.output_path = output_path
+            pp_report.segment_count = len(asr_data.segments)
+            qa_path = str(Path(output_path).with_suffix(".qa.md"))
+            Path(qa_path).write_text(build_qa_report(pp_report), encoding="utf-8")
+            if verbose and not quiet:
+                output.info(f"QA report -> {qa_path}")
 
         if progress:
             n = len(asr_data.segments)
             progress.finish(f"Done -> {output_path} ({n} segment{'' if n == 1 else 's'})")
+        if pp_report is not None and pp_report.audit is not None and not quiet:
+            c = pp_report.audit.counts()
+            output.info(
+                f"Audit: {c['hard']} hard, {c['comfort']} comfort, "
+                f"{c['long_duration']} long-duration, {c['overlaps']} overlap"
+            )
         if quiet:
             print(output_path)
         return EXIT.SUCCESS

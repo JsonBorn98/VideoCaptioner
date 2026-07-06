@@ -731,6 +731,19 @@ class SubtitleConfig:
     subtitle_style_reference_width: int = 1280
     subtitle_style_reference_height: int = 720
     custom_prompt_text: Optional[str] = None
+    # 规则型后处理 / 审计选项
+    # keep in sync with core/postprocess/config.py (PostprocessConfig)
+    remove_placeholders: bool = False
+    normalize_quotes: bool = False
+    trim_trailing_punct: bool = True
+    fix_gaps: bool = False
+    max_gap_ms: int = 800
+    gap_mode: str = "extend"
+    audit_reading_speed: bool = False
+    max_cps_cjk: float = 11.0
+    max_cps_latin: float = 20.0
+    compress_fast_subtitles: bool = False
+    qa_report: bool = False
 
     def _mask_key(self, key: Optional[str]) -> str:
         """Mask sensitive key for display"""
@@ -772,6 +785,23 @@ class SubtitleConfig:
             lines.append(f"  Batch Size: {self.batch_size}")
 
         lines.append(f"Layout: {self.subtitle_layout.value}")
+        postprocess = []
+        if self.remove_placeholders:
+            postprocess.append("placeholders")
+        if self.normalize_quotes:
+            postprocess.append("normalize-quotes")
+        if not self.trim_trailing_punct:
+            postprocess.append("keep-trailing-punct")
+        if self.fix_gaps:
+            postprocess.append(f"fix-gaps({self.gap_mode},{self.max_gap_ms}ms)")
+        if self.audit_reading_speed:
+            postprocess.append("audit-speed")
+        if self.compress_fast_subtitles:
+            postprocess.append("compress-fast")
+        if self.qa_report:
+            postprocess.append("qa-report")
+        if postprocess:
+            lines.append(f"Postprocess: {', '.join(postprocess)}")
         lines.append("=" * 48)
         return "\n".join(lines)
 

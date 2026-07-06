@@ -288,6 +288,31 @@ class Config(QConfig):
     )
     custom_prompt_text = ConfigItem("Subtitle", "CustomPromptText", "")
 
+    # 规则型后处理 / 审计
+    # keep in sync with core/postprocess/config.py (PostprocessConfig)
+    need_remove_placeholders = ConfigItem(
+        "Subtitle", "NeedRemovePlaceholders", False, BoolValidator()
+    )
+    need_normalize_quotes = ConfigItem(
+        "Subtitle", "NeedNormalizeQuotes", False, BoolValidator()
+    )
+    trim_trailing_punct = ConfigItem(
+        "Subtitle", "TrimTrailingPunct", True, BoolValidator()
+    )
+    need_fix_gaps = ConfigItem("Subtitle", "NeedFixGaps", False, BoolValidator())
+    max_gap_ms = RangeConfigItem("Subtitle", "MaxGapMs", 800, RangeValidator(100, 2000))
+    need_audit_speed = ConfigItem(
+        "Subtitle", "NeedAuditSpeed", False, BoolValidator()
+    )
+    max_cps_cjk = RangeConfigItem("Subtitle", "MaxCpsCjk", 11, RangeValidator(5, 30))
+    max_cps_latin = RangeConfigItem(
+        "Subtitle", "MaxCpsLatin", 20, RangeValidator(8, 40)
+    )
+    need_compress_fast = ConfigItem(
+        "Subtitle", "NeedCompressFast", False, BoolValidator()
+    )
+    need_qa_report = ConfigItem("Subtitle", "NeedQaReport", False, BoolValidator())
+
     # ------------------- 字幕合成配置 -------------------
     soft_subtitle = ConfigItem("Video", "SoftSubtitle", False, BoolValidator())
     need_video = ConfigItem("Video", "NeedVideo", True, BoolValidator())

@@ -78,6 +78,10 @@ class SettingInterface(ScrollArea):
         )
         # 翻译与优化组
         self.translateGroup = SettingCardGroup(self.tr("翻译与优化"), self.scrollWidget)
+        # 字幕后处理组
+        self.postprocessGroup = SettingCardGroup(
+            self.tr("字幕后处理"), self.scrollWidget
+        )
         # 字幕合成配置组
         self.subtitleGroup = SettingCardGroup(
             self.tr("字幕合成配置"), self.scrollWidget
@@ -123,6 +127,78 @@ class SettingInterface(ScrollArea):
             self.tr("选择翻译字幕的目标语言"),
             texts=[lang.value for lang in cfg.target_language.validator.options],  # type: ignore
             parent=self.translateGroup,
+        )
+
+        # 字幕后处理配置卡片（规则型清理与质量审计，默认全部关闭）
+        self.removePlaceholdersCard = SwitchSettingCard(
+            FIF.DELETE,
+            self.tr("占位符清理"),
+            self.tr("删除 [Music]/[音乐]/♪ 等非语义占位符行"),
+            cfg.need_remove_placeholders,
+            self.postprocessGroup,
+        )
+        self.normalizeQuotesCard = SwitchSettingCard(
+            FIF.LABEL,
+            self.tr("中文引号规范化"),
+            self.tr("将中文引号统一为「」/『』，并对中文行清理多余的弱尾标点"),
+            cfg.need_normalize_quotes,
+            self.postprocessGroup,
+        )
+        self.trimTrailingPunctCard = SwitchSettingCard(
+            FIF.FONT,
+            self.tr("清理行尾弱标点"),
+            self.tr("删除行尾的逗号、句号等弱标点（默认开启，关闭后保留原标点）"),
+            cfg.trim_trailing_punct,
+            self.postprocessGroup,
+        )
+        self.fixGapsCard = SwitchSettingCard(
+            FIF.STOP_WATCH,
+            self.tr("闪烁修复"),
+            self.tr("闭合相邻字幕之间的微小间隙，减少画面闪烁"),
+            cfg.need_fix_gaps,
+            self.postprocessGroup,
+        )
+        self.maxGapMsCard = RangeSettingCard(
+            cfg.max_gap_ms,
+            FIF.STOP_WATCH,
+            self.tr("最大闭合间隙 (ms)"),
+            self.tr("闪烁修复时闭合的最大间隙；音乐/节奏类内容建议 500"),
+            parent=self.postprocessGroup,
+        )
+        self.auditSpeedCard = SwitchSettingCard(
+            FIF.SPEED_HIGH,
+            self.tr("阅读速度审计"),
+            self.tr("检测阅读速度过快与时长异常的字幕（只报告，不自动修改）"),
+            cfg.need_audit_speed,
+            self.postprocessGroup,
+        )
+        self.maxCpsCjkCard = RangeSettingCard(
+            cfg.max_cps_cjk,
+            FIF.SPEED_HIGH,
+            self.tr("中文 CPS 硬限"),
+            self.tr("中文每秒字符数上限，超出记入硬警告"),
+            parent=self.postprocessGroup,
+        )
+        self.maxCpsLatinCard = RangeSettingCard(
+            cfg.max_cps_latin,
+            FIF.SPEED_HIGH,
+            self.tr("外文 CPS 硬限"),
+            self.tr("外文每秒字符数上限，超出记入硬警告"),
+            parent=self.postprocessGroup,
+        )
+        self.compressFastCard = SwitchSettingCard(
+            FIF.ROBOT,
+            self.tr("快速字幕压缩"),
+            self.tr("对超速的中文行做局部 LLM 压缩重译（需配置 LLM）"),
+            cfg.need_compress_fast,
+            self.postprocessGroup,
+        )
+        self.qaReportCard = SwitchSettingCard(
+            FIF.DOCUMENT,
+            self.tr("生成 QA 报告"),
+            self.tr("在输出目录生成 Markdown 质量报告（隐含开启阅读速度审计）"),
+            cfg.need_qa_report,
+            self.postprocessGroup,
         )
 
         # 字幕合成配置卡片
@@ -247,6 +323,17 @@ class SettingInterface(ScrollArea):
         self.translateGroup.addSettingCard(self.subtitleCorrectCard)
         self.translateGroup.addSettingCard(self.subtitleTranslateCard)
         self.translateGroup.addSettingCard(self.targetLanguageCard)
+
+        self.postprocessGroup.addSettingCard(self.removePlaceholdersCard)
+        self.postprocessGroup.addSettingCard(self.normalizeQuotesCard)
+        self.postprocessGroup.addSettingCard(self.trimTrailingPunctCard)
+        self.postprocessGroup.addSettingCard(self.fixGapsCard)
+        self.postprocessGroup.addSettingCard(self.maxGapMsCard)
+        self.postprocessGroup.addSettingCard(self.auditSpeedCard)
+        self.postprocessGroup.addSettingCard(self.maxCpsCjkCard)
+        self.postprocessGroup.addSettingCard(self.maxCpsLatinCard)
+        self.postprocessGroup.addSettingCard(self.compressFastCard)
+        self.postprocessGroup.addSettingCard(self.qaReportCard)
 
         self.subtitleGroup.addSettingCard(self.subtitleStyleCard)
         self.subtitleGroup.addSettingCard(self.subtitleLayoutCard)
@@ -785,6 +872,7 @@ class SettingInterface(ScrollArea):
         self.expandLayout.addWidget(self.llmGroup)
         self.expandLayout.addWidget(self.translate_serviceGroup)
         self.expandLayout.addWidget(self.translateGroup)
+        self.expandLayout.addWidget(self.postprocessGroup)
         self.expandLayout.addWidget(self.subtitleGroup)
         self.expandLayout.addWidget(self.saveGroup)
         self.expandLayout.addWidget(self.personalGroup)

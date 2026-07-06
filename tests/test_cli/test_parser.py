@@ -142,6 +142,40 @@ class TestTranscribeParser:
         assert overrides["transcribe"]["qwen"]["chunk_overlap_seconds"] == 12
         assert overrides["transcribe"]["qwen"]["compile_aligner"] is True
 
+    def test_subtitle_postprocess_flags_map_to_config(self):
+        overrides = _build_cli_overrides(
+            Namespace(
+                remove_placeholders=True,
+                normalize_quotes=True,
+                keep_trailing_punct=True,
+                fix_gaps=True,
+                max_gap_ms=500,
+                gap_mode="midpoint",
+                audit_speed=True,
+                max_cps_cjk=13.0,
+                max_cps_latin=22.0,
+                compress_fast=True,
+                qa_report=True,
+            )
+        )
+        sub = overrides["subtitle"]
+        assert sub["remove_placeholders"] is True
+        assert sub["normalize_quotes"] is True
+        assert sub["trim_trailing_punct"] is False  # --keep-trailing-punct inverts
+        assert sub["fix_gaps"] is True
+        assert sub["max_gap_ms"] == 500
+        assert sub["gap_mode"] == "midpoint"
+        assert sub["audit_reading_speed"] is True
+        assert sub["max_cps_cjk"] == 13.0
+        assert sub["max_cps_latin"] == 22.0
+        assert sub["compress_fast_subtitles"] is True
+        assert sub["qa_report"] is True
+
+    def test_subtitle_postprocess_defaults_absent_when_flags_unset(self):
+        overrides = _build_cli_overrides(Namespace())
+        # No postprocess overrides should be emitted so config-file/defaults win.
+        assert "remove_placeholders" not in overrides.get("subtitle", {})
+
     def test_transcribe_command_builds_qwen_config(self, tmp_path, monkeypatch):
         import videocaptioner.core.asr as asr_package
         from videocaptioner.cli.commands import transcribe as transcribe_cmd

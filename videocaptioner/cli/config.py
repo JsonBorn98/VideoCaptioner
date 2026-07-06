@@ -127,6 +127,23 @@ DEFAULTS: Dict[str, Any] = {
         "max_word_count_english": 12,
         "thread_num": 4,
         "batch_size": 20,
+        # Rule-based postprocess / audit options.
+        # keep in sync with core/postprocess/config.py (PostprocessConfig)
+        "remove_placeholders": False,
+        "normalize_quotes": False,
+        "trim_trailing_punct": True,
+        "fix_gaps": False,
+        "max_gap_ms": 800,
+        "gap_mode": "extend",
+        "audit_reading_speed": False,
+        "max_cps_cjk": 11.0,
+        "max_cps_latin": 20.0,
+        "comfort_cps_cjk": 9.0,
+        "comfort_cps_latin": 16.0,
+        "min_duration_ms": 1000,
+        "max_duration_ms": 7000,
+        "compress_fast_subtitles": False,
+        "qa_report": False,
     },
     "translate": {
         "service": "bing",

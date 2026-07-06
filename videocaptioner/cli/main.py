@@ -141,6 +141,39 @@ def _add_style_options(parser: argparse.ArgumentParser) -> None:
     grp.add_argument("--font-file", metavar="PATH", help="Custom font file (.ttf/.otf), overrides style font")
 
 
+def _add_postprocess_options(parser: argparse.ArgumentParser, *, hidden: bool = False) -> None:
+    """Add rule-based postprocess / audit options (shared by subtitle & process)."""
+    def h(text: str) -> str:
+        return argparse.SUPPRESS if hidden else text
+
+    grp = parser if hidden else parser.add_argument_group(
+        "Postprocess options",
+        description="Optional rule-based cleanup and quality audit. All off by default.",
+    )
+    grp.add_argument("--remove-placeholders", action="store_true",
+                     help=h("Remove placeholder lines like [Music], [Applause], ♪"))
+    grp.add_argument("--normalize-quotes", action="store_true",
+                     help=h("Normalize Chinese quotes to 「」/『』 (also trims extended weak punctuation)"))
+    grp.add_argument("--keep-trailing-punct", action="store_true",
+                     help=h("Keep trailing weak punctuation (disables default trimming)"))
+    grp.add_argument("--fix-gaps", action="store_true",
+                     help=h("Close short gaps between subtitles to reduce flicker"))
+    grp.add_argument("--max-gap-ms", type=int, metavar="N",
+                     help=h("Max gap in ms to close when --fix-gaps (default: 800; music: 500)"))
+    grp.add_argument("--gap-mode", choices=["extend", "midpoint"],
+                     help=h("Gap closing mode (default: extend)"))
+    grp.add_argument("--audit-speed", action="store_true",
+                     help=h("Audit reading speed (CPS) and long-duration anomalies (read-only)"))
+    grp.add_argument("--max-cps-cjk", type=float, metavar="N",
+                     help=h("Hard CPS limit for Chinese (default: 11)"))
+    grp.add_argument("--max-cps-latin", type=float, metavar="N",
+                     help=h("Hard CPS limit for Latin text (default: 20)"))
+    grp.add_argument("--compress-fast", action="store_true",
+                     help=h("LLM-compress over-fast Chinese lines (needs LLM)"))
+    grp.add_argument("--qa-report", action="store_true",
+                     help=h("Write a Markdown QA report next to the output (implies --audit-speed)"))
+
+
 def _add_common_options(parser: argparse.ArgumentParser) -> None:
     """Add options common to all commands."""
     parser.add_argument("--config", metavar="FILE", help="Path to config file")
@@ -260,6 +293,8 @@ def _build_subtitle_parser(subparsers) -> None:
         choices=["target-above", "source-above", "target-only", "source-only"],
         help="Subtitle layout for bilingual output (default: target-above)",
     )
+
+    _add_postprocess_options(p)
 
     # Hidden: --prompt-file (use --prompt instead)
     p.add_argument("--prompt-file", metavar="FILE", help=argparse.SUPPRESS)
@@ -453,6 +488,8 @@ def _build_process_parser(subparsers) -> None:
     p.add_argument("--rewrite-too-long", dest="rewrite_too_long", action="store_true", help=argparse.SUPPRESS)
 
     _add_style_options(p)
+
+    _add_postprocess_options(p)
 
     p.set_defaults(func=_run_process)
 
@@ -649,6 +686,26 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
     _set("subtitle.max_word_count_english", getattr(args, "max_english", None))
     _set("subtitle.thread_num", getattr(args, "thread_num", None))
     _set("subtitle.batch_size", getattr(args, "batch_size", None))
+
+    # Subtitle postprocess / audit
+    if getattr(args, "remove_placeholders", False):
+        _set("subtitle.remove_placeholders", True)
+    if getattr(args, "normalize_quotes", False):
+        _set("subtitle.normalize_quotes", True)
+    if getattr(args, "keep_trailing_punct", False):
+        _set("subtitle.trim_trailing_punct", False)
+    if getattr(args, "fix_gaps", False):
+        _set("subtitle.fix_gaps", True)
+    _set("subtitle.max_gap_ms", getattr(args, "max_gap_ms", None))
+    _set("subtitle.gap_mode", getattr(args, "gap_mode", None))
+    if getattr(args, "audit_speed", False):
+        _set("subtitle.audit_reading_speed", True)
+    _set("subtitle.max_cps_cjk", getattr(args, "max_cps_cjk", None))
+    _set("subtitle.max_cps_latin", getattr(args, "max_cps_latin", None))
+    if getattr(args, "compress_fast", False):
+        _set("subtitle.compress_fast_subtitles", True)
+    if getattr(args, "qa_report", False):
+        _set("subtitle.qa_report", True)
 
     # Translate
     _set("translate.service", getattr(args, "translator", None))

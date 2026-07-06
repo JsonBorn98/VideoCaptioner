@@ -268,6 +268,17 @@ class TaskFactory:
             target_language=cfg.target_language.value,
             # 字幕提示
             custom_prompt_text=cfg.custom_prompt_text.value,
+            # 规则型后处理 / 审计
+            remove_placeholders=cfg.need_remove_placeholders.value,
+            normalize_quotes=cfg.need_normalize_quotes.value,
+            trim_trailing_punct=cfg.trim_trailing_punct.value,
+            fix_gaps=cfg.need_fix_gaps.value,
+            max_gap_ms=cfg.max_gap_ms.value,
+            audit_reading_speed=cfg.need_audit_speed.value,
+            max_cps_cjk=float(cfg.max_cps_cjk.value),
+            max_cps_latin=float(cfg.max_cps_latin.value),
+            compress_fast_subtitles=cfg.need_compress_fast.value,
+            qa_report=cfg.need_qa_report.value,
         )
 
         task = SubtitleTask(

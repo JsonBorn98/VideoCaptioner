@@ -48,6 +48,7 @@ jobs:
           uv run pytest
           tests/test_cli
           tests/test_dubbing
+          tests/test_optimize
           tests/test_asr/test_mimo_qwen_asr.py
           tests/test_asr/test_qwen_runtime_manager.py
           -q

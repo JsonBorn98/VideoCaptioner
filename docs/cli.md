@@ -101,9 +101,25 @@ videocaptioner subtitle <字幕文件> [选项]
 | `--api-base` | LLM API 地址（或设置 `OPENAI_BASE_URL` 环境变量） |
 | `--model` | LLM 模型名（如 gpt-4o-mini） |
 
----
+#### 字幕后处理选项（可选，默认全部关闭）
 
-### `synthesize` — 字幕合成到视频
+规则型清理与质量审计，`subtitle` 与 `process` 子命令均可用；不指定时输出与旧版逐字节一致。
+
+| 选项 | 说明 |
+|------|------|
+| `--remove-placeholders` | 删除 `[Music]`/`[音乐]`/`♪` 等占位符行 |
+| `--normalize-quotes` | 中文引号统一为 `「」`/`『』`，并对中文行清理扩展弱尾标点 |
+| `--keep-trailing-punct` | 保留行尾弱标点（关闭默认的尾标点清理） |
+| `--fix-gaps` | 闭合相邻字幕的微小间隙以减少闪烁 |
+| `--max-gap-ms N` | `--fix-gaps` 闭合的最大间隙（默认 800；音乐类建议 500） |
+| `--gap-mode` | 间隙闭合模式：`extend`(默认) 或 `midpoint` |
+| `--audit-speed` | 审计阅读速度（CPS）与时长异常（只报告，不修改） |
+| `--max-cps-cjk N` | 中文每秒字符硬限（默认 11） |
+| `--max-cps-latin N` | 外文每秒字符硬限（默认 20） |
+| `--compress-fast` | 对超速中文行做局部 LLM 压缩重译（需 LLM） |
+| `--qa-report` | 在输出旁生成 Markdown 质量报告（隐含开启 `--audit-speed`） |
+
+
 
 将字幕烧录到视频中，支持美观的样式化字幕。
 

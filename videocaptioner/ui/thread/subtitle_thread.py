@@ -20,6 +20,13 @@ from videocaptioner.core.llm.context import (
     update_stage,
 )
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
+from videocaptioner.core.postprocess import (
+    PostprocessConfig,
+    build_qa_report,
+    run_normalize_stage,
+    run_post_stage,
+    run_pre_stage,
+)
 from videocaptioner.core.split.split import SubtitleSplitter
 from videocaptioner.core.translate.factory import TranslatorFactory
 from videocaptioner.core.translate.types import TranslatorType
@@ -33,6 +40,24 @@ SERVICE_TO_TYPE = {
 }
 
 logger = setup_logger("subtitle_optimization_thread")
+
+
+def build_postprocess_config(config: SubtitleConfig) -> PostprocessConfig:
+    """从 SubtitleConfig 构造后处理配置。"""
+    return PostprocessConfig(
+        remove_placeholders=config.remove_placeholders,
+        normalize_quotes=config.normalize_quotes,
+        trim_trailing_punct=config.trim_trailing_punct,
+        fix_gaps=config.fix_gaps,
+        max_gap_ms=config.max_gap_ms,
+        gap_mode=config.gap_mode,
+        audit_reading_speed=config.audit_reading_speed,
+        max_cps_cjk=config.max_cps_cjk,
+        max_cps_latin=config.max_cps_latin,
+        compress_fast_subtitles=config.compress_fast_subtitles,
+        llm_model=config.llm_model or None,
+        qa_report=config.qa_report,
+    )
 
 
 def create_translator_from_config(
@@ -125,6 +150,13 @@ class SubtitleThread(QThread):
                 layout=subtitle_config.subtitle_layout,
             )
 
+            # 规则型后处理配置与报告累加器
+            pp_cfg = build_postprocess_config(subtitle_config)
+            pp_report = None
+            pp_finalized = False
+            # 加载后、断句前：占位符清理
+            asr_data, pp_report = run_pre_stage(asr_data, pp_cfg, pp_report)
+
             # 1. 分割成字词级时间戳（对于非断句字幕且开启分割选项）
             if subtitle_config.need_split and not asr_data.is_word_timestamp():
                 asr_data.split_to_word_segments()
@@ -173,7 +205,7 @@ class SubtitleThread(QThread):
                     update_callback=self.callback,
                 )
                 asr_data = optimizer.optimize_subtitle(asr_data)
-                asr_data.remove_punctuation()
+                asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)
                 self.update_all.emit(asr_data.to_json())
 
             # 4. 翻译字幕
@@ -193,7 +225,10 @@ class SubtitleThread(QThread):
                 asr_data = translator.translate_subtitle(asr_data)
 
                 # 移除末尾标点符号
-                asr_data.remove_punctuation()
+                asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)
+                # 保存前最终化：压缩 → 闭合间隙 → 审计（在多布局保存之前完成）
+                asr_data, pp_report = run_post_stage(asr_data, pp_cfg, pp_report)
+                pp_finalized = True
                 self.update_all.emit(asr_data.to_json())
 
                 # 保存翻译结果(单语、双语)
@@ -211,6 +246,9 @@ class SubtitleThread(QThread):
                         logger.info(f"翻译字幕保存到：{save_path}")
 
             # 5. 保存字幕
+            if not pp_finalized:
+                asr_data, pp_report = run_post_stage(asr_data, pp_cfg, pp_report)
+                pp_finalized = True
             asr_data.save(
                 save_path=self.task.output_path or "",
                 ass_style=subtitle_config.subtitle_style or "",
@@ -219,6 +257,19 @@ class SubtitleThread(QThread):
                 video_height=ass_video_height,
             )
             logger.info(f"字幕保存到 {self.task.output_path}")
+
+            # 5.1 生成 QA 报告
+            if pp_cfg.qa_report and pp_report is not None and self.task.output_path:
+                try:
+                    pp_report.source_path = self.task.subtitle_path
+                    pp_report.output_path = self.task.output_path
+                    pp_report.segment_count = len(asr_data.segments)
+                    qa_path = str(Path(self.task.output_path).with_suffix(".qa.md"))
+                    Path(qa_path).write_text(build_qa_report(pp_report), encoding="utf-8")
+                    logger.info(f"QA 报告保存到：{qa_path}")
+                    self.progress.emit(99, self.tr("QA 报告已生成"))
+                except Exception as exc:
+                    logger.warning(f"QA 报告生成失败：{exc}")
 
             # 6. 文件移动与清理
             if self.task.need_next_task and self.task.video_path:
