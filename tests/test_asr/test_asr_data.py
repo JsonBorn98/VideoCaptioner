@@ -372,6 +372,66 @@ class TestFormatConversionEdgeCases:
         srt4 = asr_data.to_srt(layout=SubtitleLayoutEnum.ONLY_TRANSLATE)
         assert "你好" in srt4
 
+    def test_srt_translate_on_top_roundtrip_preserves_roles_with_layout_hint(self):
+        """译文在上的双语 SRT 重新读入后，不应把原文和译文对调。"""
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+
+        asr_data = ASRData(
+            [
+                ASRDataSeg(
+                    "This is original text.",
+                    0,
+                    1000,
+                    translated_text="这是译文",
+                )
+            ]
+        )
+        srt_text = asr_data.to_srt(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP)
+
+        parsed = ASRData.from_srt(
+            srt_text,
+            layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP,
+        )
+        rerendered = parsed.to_ass(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP)
+        dialogue_lines = [
+            line for line in rerendered.splitlines() if line.startswith("Dialogue:")
+        ]
+
+        assert parsed.segments[0].text == "This is original text."
+        assert parsed.segments[0].translated_text == "这是译文"
+        assert dialogue_lines == [
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Secondary,,0,0,0,,This is original text.",
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,这是译文",
+        ]
+
+    def test_from_subtitle_file_passes_srt_layout_hint(self, tmp_path):
+        """视频合成/重新加载入口读 SRT 时应使用当前字幕布局提示。"""
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+
+        asr_data = ASRData(
+            [
+                ASRDataSeg(
+                    "This is original text.",
+                    0,
+                    1000,
+                    translated_text="这是译文",
+                )
+            ]
+        )
+        srt_path = tmp_path / "caption.srt"
+        srt_path.write_text(
+            asr_data.to_srt(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP),
+            encoding="utf-8",
+        )
+
+        parsed = ASRData.from_subtitle_file(
+            str(srt_path),
+            layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP,
+        )
+
+        assert parsed.segments[0].text == "This is original text."
+        assert parsed.segments[0].translated_text == "这是译文"
+
     def test_ass_translate_on_top_roundtrip_preserves_roles_with_layout_hint(self):
         """读回旧版译文在上 ASS 时不应把原文和译文对调。"""
         from videocaptioner.core.entities import SubtitleLayoutEnum

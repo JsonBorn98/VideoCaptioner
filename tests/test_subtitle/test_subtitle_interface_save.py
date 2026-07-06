@@ -1,7 +1,7 @@
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import SubtitleLayoutEnum
 from videocaptioner.ui.view import subtitle_interface
-from videocaptioner.ui.view.subtitle_interface import save_editor_asr_data
+from videocaptioner.ui.view.subtitle_interface import load_editor_asr_data, save_editor_asr_data
 
 
 def test_save_editor_asr_data_preserves_ass_style_reference(monkeypatch, tmp_path):
@@ -56,3 +56,30 @@ def test_save_editor_asr_data_keeps_non_ass_outputs_plain(tmp_path):
     srt_text = srt_path.read_text(encoding="utf-8")
     assert srt_text.startswith("1\n00:00:00,000 --> 00:00:01,000")
     assert "[Script Info]" not in srt_text
+
+
+def test_load_editor_asr_data_uses_translate_on_top_layout(tmp_path):
+    """编辑页重新加载 raw SRT 时，应按当前布局还原主副字幕语义。"""
+    asr_data = ASRData(
+        [
+            ASRDataSeg(
+                "This is original text.",
+                0,
+                1000,
+                translated_text="这是译文",
+            )
+        ]
+    )
+    srt_path = tmp_path / "raw.srt"
+    srt_path.write_text(
+        asr_data.to_srt(layout=SubtitleLayoutEnum.TRANSLATE_ON_TOP),
+        encoding="utf-8",
+    )
+
+    parsed = load_editor_asr_data(
+        str(srt_path),
+        SubtitleLayoutEnum.TRANSLATE_ON_TOP,
+    )
+
+    assert parsed.segments[0].text == "This is original text."
+    assert parsed.segments[0].translated_text == "这是译文"

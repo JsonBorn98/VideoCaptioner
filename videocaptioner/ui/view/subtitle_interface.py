@@ -82,6 +82,11 @@ def save_editor_asr_data(
         asr_data.save(save_path, layout=layout)
 
 
+def load_editor_asr_data(file_path: str, layout: SubtitleLayoutEnum) -> ASRData:
+    """Load subtitle data using the editor's current bilingual layout."""
+    return ASRData.from_subtitle_file(file_path, layout=layout)
+
+
 class SubtitleTableModel(QAbstractTableModel):
     def __init__(self, data: Union[str, Dict[str, Any]] = ""):
         super().__init__()
@@ -465,7 +470,12 @@ class SubtitleInterface(QWidget):
         if not self.task:
             return
         original_subtitle_save_path = Path(str(self.task.subtitle_path))
-        asr_data = ASRData.from_subtitle_file(str(original_subtitle_save_path))
+        layout = (
+            task.subtitle_config.subtitle_layout
+            if task.subtitle_config
+            else cfg.subtitle_layout.value
+        )
+        asr_data = load_editor_asr_data(str(original_subtitle_save_path), layout)
         self.model._data = asr_data.to_json()
         self.model.layoutChanged.emit()
         self.status_label.setText(self.tr("已加载文件"))
@@ -662,7 +672,7 @@ class SubtitleInterface(QWidget):
 
     def load_subtitle_file(self, file_path: str) -> None:
         self.subtitle_path = file_path
-        asr_data = ASRData.from_subtitle_file(file_path)
+        asr_data = load_editor_asr_data(file_path, cfg.subtitle_layout.value)
         self.model._data = asr_data.to_json()
         self.model.layoutChanged.emit()
         self.status_label.setText(self.tr("已加载文件"))
