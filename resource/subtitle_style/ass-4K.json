@@ -6,18 +6,24 @@
   "reference_height": 2160,
   "font_name": "霞鹜文楷 屏幕阅读版",
   "font_size": 152,
-  "primary_color": "#ffffff",
-  "outline_color": "#002040",
+  "primary_color": "#e9edf0",
+  "outline_color": "#2a313d",
   "outline_width": 10.0,
   "bold": true,
   "spacing": 3.2,
   "margin_bottom": 30,
+  "shadow": 0.0,
+  "margin_l": 10,
+  "margin_r": 10,
+  "wrap_style": 1,
   "secondary": {
     "font_name": "LXGW WenKai Screen",
     "font_size": 100,
-    "color": "#ffffff",
-    "outline_color": "#400020",
+    "color": "#e9edf0",
+    "outline_color": "#312520",
     "outline_width": 10.0,
-    "spacing": 0.8
+    "spacing": 0.8,
+    "shadow": 0.0,
+    "margin_bottom": null
   }
 }
