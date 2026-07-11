@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Tuple
 
+from ..entities import SubtitleLayoutEnum
 from ..utils.logger import setup_logger
 from ..utils.text_utils import is_mainly_cjk
 from .config import PostprocessConfig
@@ -141,6 +142,8 @@ def normalize_segments(
     asr_data: "ASRData",
     cfg: PostprocessConfig,
     report: QualityReport,
+    layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+    primary_side_only: bool = False,
 ) -> Tuple["ASRData", QualityReport]:
     """规范化所有段的 text / translated_text 双字段。
 
@@ -157,10 +160,28 @@ def normalize_segments(
     trans_quote_state = QuoteState()
 
     for seg in asr_data.segments:
-        for field_name, state in (
+        fields_to_process = [
             ("text", text_quote_state),
             ("translated_text", trans_quote_state),
+        ]
+        if (
+            primary_side_only
+            and seg.text.strip()
+            and seg.translated_text.strip()
+            and not cfg.optimize_both_sides
         ):
+            if cfg.speed_primary == "original":
+                fields_to_process = [("text", text_quote_state)]
+            elif cfg.speed_primary == "translate":
+                fields_to_process = [("translated_text", trans_quote_state)]
+            elif layout in (
+                SubtitleLayoutEnum.ONLY_TRANSLATE,
+                SubtitleLayoutEnum.TRANSLATE_ON_TOP,
+            ):
+                fields_to_process = [("translated_text", trans_quote_state)]
+            else:
+                fields_to_process = [("text", text_quote_state)]
+        for field_name, state in fields_to_process:
             value = getattr(seg, field_name)
             if not value:
                 continue

@@ -129,23 +129,13 @@ DEFAULTS: Dict[str, Any] = {
         "max_word_count_english": 12,
         "thread_num": 4,
         "batch_size": 20,
-        # Rule-based postprocess / audit options.
-        # keep in sync with core/postprocess/config.py (PostprocessConfig)
-        "remove_placeholders": False,
-        "normalize_quotes": False,
-        "trim_trailing_punct": True,
-        "fix_gaps": False,
-        "max_gap_ms": 800,
-        "gap_mode": "extend",
-        "audit_reading_speed": False,
-        "max_cps_cjk": 11.0,
-        "max_cps_latin": 20.0,
-        "comfort_cps_cjk": 9.0,
-        "comfort_cps_latin": 16.0,
-        "min_duration_ms": 1000,
-        "max_duration_ms": 7000,
-        "compress_fast_subtitles": False,
-        "qa_report": False,
+    },
+    "postprocess": {
+        # Complete workflows run the dedicated stage by default. The selected
+        # profile store remains the source of truth for capability defaults.
+        "enabled": True,
+        "profile": "balanced",
+        "media": "",
     },
     "translate": {
         "service": "bing",
@@ -232,6 +222,7 @@ def load_config_file(path: Optional[Path] = None) -> dict:
             return tomllib.load(f)
     except Exception as e:
         import sys
+
         print(f"! Warning: Failed to parse config file {path}: {e}", file=sys.stderr)
         print("  Run 'videocaptioner config init' to recreate it.", file=sys.stderr)
         return {}
@@ -347,12 +338,13 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        escaped = (value
-            .replace("\\", "\\\\")
+        escaped = (
+            value.replace("\\", "\\\\")
             .replace('"', '\\"')
             .replace("\n", "\\n")
             .replace("\r", "\\r")
-            .replace("\t", "\\t"))
+            .replace("\t", "\\t")
+        )
         return f'"{escaped}"'
     return f'"{value!s}"'
 

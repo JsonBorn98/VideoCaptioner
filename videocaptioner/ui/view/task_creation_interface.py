@@ -15,12 +15,14 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    ComboBox,
     FluentIcon,
     HyperlinkButton,
     InfoBar,
     InfoBarPosition,
     LineEdit,
     ProgressBar,
+    SwitchButton,
     ToolButton,
 )
 
@@ -35,6 +37,7 @@ from videocaptioner.core.entities import (
     SupportedAudioFormats,
     SupportedVideoFormats,
 )
+from videocaptioner.core.subtitle import StyleMode, list_styles
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.DonateDialog import DonateDialog
 from videocaptioner.ui.thread.video_download_thread import VideoDownloadThread
@@ -137,7 +140,67 @@ class TaskCreationInterface(QWidget):
         self.search_layout.addWidget(self.start_button)
         self.search_layout.setSpacing(10)
         self.main_layout.addLayout(self.search_layout)
+
+        # The task page owns workflow-stage selection; feature pages remain isolated.
+        postprocess_row = QHBoxLayout()
+        postprocess_row.setContentsMargins(90, 0, 90, 0)
+        postprocess_row.addStretch(1)
+        postprocess_row.addWidget(BodyLabel(self.tr("完成翻译后执行字幕后处理"), self))
+        self.postprocess_switch = SwitchButton(self)
+        self.postprocess_switch.setChecked(cfg.get(cfg.postprocess_enabled))
+        self.postprocess_switch.checkedChanged.connect(
+            lambda checked: cfg.set(cfg.postprocess_enabled, checked)
+        )
+        postprocess_row.addWidget(self.postprocess_switch)
+        postprocess_row.addStretch(1)
+        self.main_layout.addLayout(postprocess_row)
+
+        export_row = QHBoxLayout()
+        export_row.setContentsMargins(90, 0, 90, 0)
+        export_row.addStretch(1)
+        export_row.addWidget(BodyLabel(self.tr("每个字幕阶段自动导出"), self))
+        self.auto_export_switch = SwitchButton(self)
+        self.auto_export_switch.setChecked(cfg.get(cfg.workflow_auto_export))
+        export_row.addWidget(self.auto_export_switch)
+        self.export_format_combo = ComboBox(self)
+        self.export_format_combo.addItems(["ASS", "VTT"])
+        self.export_format_combo.setCurrentText(cfg.get(cfg.workflow_export_format).upper())
+        export_row.addWidget(self.export_format_combo)
+        self.export_style_combo = ComboBox(self)
+        style_names = [
+            style.name for style in list_styles() if style.mode is StyleMode.ASS
+        ]
+        self.export_style_combo.addItems(style_names or ["default"])
+        current_style = cfg.get(cfg.subtitle_style_name)
+        self.export_style_combo.setCurrentText(
+            current_style if current_style in style_names else self.export_style_combo.itemText(0)
+        )
+        export_row.addWidget(self.export_style_combo)
+        export_row.addStretch(1)
+        self.main_layout.addLayout(export_row)
+
+        self.auto_export_switch.checkedChanged.connect(self._on_auto_export_changed)
+        self.export_format_combo.currentTextChanged.connect(self._on_export_format_changed)
+        self.export_style_combo.currentTextChanged.connect(
+            lambda value: cfg.set(cfg.subtitle_style_name, value)
+        )
+        self._update_export_controls()
         self.main_layout.addSpacing(100)
+
+    def _on_auto_export_changed(self, checked: bool) -> None:
+        cfg.set(cfg.workflow_auto_export, checked)
+        self._update_export_controls()
+
+    def _on_export_format_changed(self, value: str) -> None:
+        cfg.set(cfg.workflow_export_format, value.lower())
+        self._update_export_controls()
+
+    def _update_export_controls(self) -> None:
+        enabled = self.auto_export_switch.isChecked()
+        self.export_format_combo.setEnabled(enabled)
+        self.export_style_combo.setEnabled(
+            enabled and self.export_format_combo.currentText().lower() == "ass"
+        )
 
     def setup_status_layout(self):
         self.status_layout = QVBoxLayout()

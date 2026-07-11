@@ -5,6 +5,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
+    from videocaptioner.core.asr.asr_data import ASRData
+    from videocaptioner.core.postprocess.models import PostprocessTask
     from videocaptioner.core.translate.types import TargetLanguage
 
 
@@ -733,20 +735,6 @@ class SubtitleConfig:
     subtitle_style_reference_width: int = 1280
     subtitle_style_reference_height: int = 720
     custom_prompt_text: Optional[str] = None
-    # 规则型后处理 / 审计选项
-    # keep in sync with core/postprocess/config.py (PostprocessConfig)
-    remove_placeholders: bool = False
-    normalize_quotes: bool = False
-    trim_trailing_punct: bool = True
-    fix_gaps: bool = False
-    max_gap_ms: int = 800
-    gap_mode: str = "extend"
-    audit_reading_speed: bool = False
-    max_cps_cjk: float = 11.0
-    max_cps_latin: float = 20.0
-    compress_fast_subtitles: bool = False
-    qa_report: bool = False
-
     def _mask_key(self, key: Optional[str]) -> str:
         """Mask sensitive key for display"""
         if not key or len(key) <= 8:
@@ -787,23 +775,6 @@ class SubtitleConfig:
             lines.append(f"  Batch Size: {self.batch_size}")
 
         lines.append(f"Layout: {self.subtitle_layout.value}")
-        postprocess = []
-        if self.remove_placeholders:
-            postprocess.append("placeholders")
-        if self.normalize_quotes:
-            postprocess.append("normalize-quotes")
-        if not self.trim_trailing_punct:
-            postprocess.append("keep-trailing-punct")
-        if self.fix_gaps:
-            postprocess.append(f"fix-gaps({self.gap_mode},{self.max_gap_ms}ms)")
-        if self.audit_reading_speed:
-            postprocess.append("audit-speed")
-        if self.compress_fast_subtitles:
-            postprocess.append("compress-fast")
-        if self.qa_report:
-            postprocess.append("qa-report")
-        if postprocess:
-            lines.append(f"Postprocess: {', '.join(postprocess)}")
         lines.append("=" * 48)
         return "\n".join(lines)
 
@@ -838,6 +809,26 @@ class SynthesisConfig:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class SubtitleExportPolicy:
+    """Frozen workflow-wide delivery export settings.
+
+    Every subtitle stage always writes its canonical SRT. When enabled, the
+    same stage snapshot is additionally exported once as ASS or VTT.
+    """
+
+    enabled: bool = False
+    format: Literal["ass", "vtt"] = "ass"
+    layout: SubtitleLayoutEnum = SubtitleLayoutEnum.TRANSLATE_ON_TOP
+    ass_style: str = ""
+    reference_width: int = 1280
+    reference_height: int = 720
+
+    def __post_init__(self) -> None:
+        if self.format not in ("ass", "vtt"):
+            raise ValueError("subtitle export format must be 'ass' or 'vtt'")
+
+
 @dataclass
 class TranscribeTask:
     """转录任务类"""
@@ -854,6 +845,9 @@ class TranscribeTask:
 
     # 输出字幕文件
     output_path: Optional[str] = None
+    workflow_base_name: str = ""
+    result_data: Optional["ASRData"] = field(default=None, repr=False)
+    export_policy: Optional[SubtitleExportPolicy] = None
 
     # 是否需要执行下一个任务（字幕处理）
     need_next_task: bool = False
@@ -877,6 +871,12 @@ class SubtitleTask:
 
     # 输入原始字幕文件
     subtitle_path: str = ""
+    # GUI 编辑器内存快照；存在时处理线程不得覆盖原始输入文件。
+    editor_data_json: Optional[dict] = None
+    input_data: Optional["ASRData"] = field(default=None, repr=False)
+    result_data: Optional["ASRData"] = field(default=None, repr=False)
+    workflow_base_name: str = ""
+    export_policy: Optional[SubtitleExportPolicy] = None
     # 输入原始视频文件
     video_path: Optional[str] = None
 
@@ -903,6 +903,7 @@ class SynthesisTask:
     # 输入
     video_path: Optional[str] = None
     subtitle_path: Optional[str] = None
+    input_data: Optional["ASRData"] = field(default=None, repr=False)
 
     # 输出
     output_path: Optional[str] = None
@@ -929,6 +930,9 @@ class TranscriptAndSubtitleTask:
 
     # 输出
     output_path: Optional[str] = None
+    workflow_base_name: str = ""
+    result_data: Optional["ASRData"] = field(default=None, repr=False)
+    export_policy: Optional[SubtitleExportPolicy] = None
 
     transcribe_config: Optional[TranscribeConfig] = None
     subtitle_config: Optional[SubtitleConfig] = None
@@ -949,9 +953,15 @@ class FullProcessTask:
     file_path: Optional[str] = None
     # 输出
     output_path: Optional[str] = None
+    workflow_base_name: str = ""
+    result_data: Optional["ASRData"] = field(default=None, repr=False)
+    export_policy: Optional[SubtitleExportPolicy] = None
 
     transcribe_config: Optional[TranscribeConfig] = None
     subtitle_config: Optional[SubtitleConfig] = None
+    # 任务创建时冻结的独立字幕后处理阶段；默认进入完整 workflow。
+    postprocess_enabled: bool = True
+    postprocess_task: Optional["PostprocessTask"] = None
     synthesis_config: Optional[SynthesisConfig] = None
 
 

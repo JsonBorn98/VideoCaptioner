@@ -3,7 +3,9 @@
 全面测试 SubtitleSplitter 类的核心方法和边缘情况
 """
 
-from videocaptioner.core.asr.asr_data import ASRDataSeg
+import time
+
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.split.split import (
     MAX_WORD_COUNT_CJK,
     MAX_WORD_COUNT_ENGLISH,
@@ -120,6 +122,41 @@ class TestSubtitleSplitterInit:
         splitter = SubtitleSplitter(thread_num=3, model="gpt-4o-mini")
         assert splitter.executor is not None
         assert splitter.executor._max_workers == 3
+
+
+class TestConcurrentSegmentProcessing:
+    def test_preserves_part_order_and_falls_back_without_dropping_text(self, monkeypatch):
+        progress = []
+        splitter = SubtitleSplitter(
+            thread_num=3,
+            model="gpt-4o-mini",
+            use_llm=True,
+            progress_callback=lambda completed, total: progress.append((completed, total)),
+        )
+        parts = [
+            ASRData([ASRDataSeg(text, index * 1000, (index + 1) * 1000)])
+            for index, text in enumerate(("first", "second", "third"))
+        ]
+
+        def process(part):
+            text = part.segments[0].text
+            if text == "first":
+                time.sleep(0.03)
+            if text == "second":
+                raise RuntimeError("request timed out")
+            return part.segments
+
+        monkeypatch.setattr(splitter, "_process_single_segment", process)
+
+        result = splitter._process_segments(parts)
+        splitter.stop()
+
+        assert [[segment.text for segment in group] for group in result] == [
+            ["first"],
+            ["second"],
+            ["third"],
+        ]
+        assert progress == [(1, 3), (2, 3), (3, 3)]
 
 
 class TestDetermineNumSegments:

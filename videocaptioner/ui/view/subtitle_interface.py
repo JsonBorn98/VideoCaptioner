@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -49,6 +50,13 @@ from videocaptioner.core.entities import (
     SupportedSubtitleFormats,
 )
 from videocaptioner.core.subtitle import get_subtitle_style
+from videocaptioner.core.subtitle.io import (
+    canonical_stage_path,
+    clone_subtitle_data,
+    export_subtitle_atomic,
+    import_subtitle,
+    save_canonical_srt,
+)
 from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.core.utils.platform_utils import open_folder, reveal_in_explorer
 from videocaptioner.ui.common.config import cfg
@@ -65,29 +73,25 @@ def save_editor_asr_data(
     style_name: str,
 ) -> None:
     """Save edited subtitle data while preserving ASS style settings."""
-    if save_path.lower().endswith(".ass"):
-        style_str = get_subtitle_style(style_name) or ""
-        reference_width, reference_height = TaskFactory.get_style_reference(
-            style_name,
-            SubtitleRenderModeEnum.ASS_STYLE,
-        )
-        asr_data.save(
-            save_path,
-            layout=layout,
-            ass_style=style_str,
-            video_width=reference_width,
-            video_height=reference_height,
-        )
-    else:
-        asr_data.save(save_path, layout=layout)
+    style_str = get_subtitle_style(style_name) or ""
+    reference = TaskFactory.get_style_reference(style_name, SubtitleRenderModeEnum.ASS_STYLE)
+    export_subtitle_atomic(
+        asr_data,
+        save_path,
+        layout=layout,
+        ass_style=style_str,
+        reference_resolution=reference,
+    )
 
 
 def load_editor_asr_data(file_path: str, layout: SubtitleLayoutEnum) -> ASRData:
     """Load subtitle data using the editor's current bilingual layout."""
-    return ASRData.from_subtitle_file(file_path, layout=layout)
+    return import_subtitle(file_path, layout_hint=layout).data
 
 
 class SubtitleTableModel(QAbstractTableModel):
+    edited = pyqtSignal()
+
     def __init__(self, data: Union[str, Dict[str, Any]] = ""):
         super().__init__()
         self._data: Dict[str, Any] = {}
@@ -117,17 +121,9 @@ class SubtitleTableModel(QAbstractTableModel):
 
         if role == Qt.DisplayRole or role == Qt.EditRole:  # type: ignore
             if col == 0:
-                return (
-                    QTime(0, 0)
-                    .addMSecs(segment["start_time"])
-                    .toString("hh:mm:ss.zzz")[:-2]
-                )
+                return QTime(0, 0).addMSecs(segment["start_time"]).toString("hh:mm:ss.zzz")[:-2]
             elif col == 1:
-                return (
-                    QTime(0, 0)
-                    .addMSecs(segment["end_time"])
-                    .toString("hh:mm:ss.zzz")[:-2]
-                )
+                return QTime(0, 0).addMSecs(segment["end_time"]).toString("hh:mm:ss.zzz")[:-2]
             elif col == 2:
                 return segment["original_subtitle"]
             elif col == 3:
@@ -157,6 +153,7 @@ class SubtitleTableModel(QAbstractTableModel):
                 return False
 
             self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])  # type: ignore
+            self.edited.emit()
             return True
         return False
 
@@ -172,11 +169,7 @@ class SubtitleTableModel(QAbstractTableModel):
                     self.tr("开始时间"),
                     self.tr("结束时间"),
                     self.tr("字幕内容"),
-                    (
-                        self.tr("翻译字幕")
-                        if cfg.need_translate.value
-                        else self.tr("优化字幕")
-                    ),
+                    (self.tr("翻译字幕") if cfg.need_translate.value else self.tr("优化字幕")),
                 ][section]
             elif orientation == Qt.Vertical:  # type: ignore
                 return str(section + 1)  # 显示行号
@@ -197,7 +190,7 @@ class SubtitleTableModel(QAbstractTableModel):
             return Qt.ItemIsEditable | Qt.ItemIsEnabled | Qt.ItemIsSelectable  # type: ignore
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable  # type: ignore
 
-    def update_data(self, new_data: Dict[str, str]) -> None:
+    def update_data(self, new_data: Dict[str, str], *, mark_dirty: bool = False) -> None:
         """更新字幕数据"""
         updated_rows = set()
 
@@ -215,11 +208,15 @@ class SubtitleTableModel(QAbstractTableModel):
             top_left = self.index(min_row, 2)
             bottom_right = self.index(max_row, 3)
             self.dataChanged.emit(top_left, bottom_right, [Qt.DisplayRole, Qt.EditRole])  # type: ignore
+            if mark_dirty:
+                self.edited.emit()
 
-    def update_all(self, data: Dict[str, Any]) -> None:
+    def update_all(self, data: Dict[str, Any], *, mark_dirty: bool = False) -> None:
         """更新所有数据"""
         self._data = data
         self.layoutChanged.emit()
+        if mark_dirty:
+            self.edited.emit()
 
 
 class SubtitleInterface(QWidget):
@@ -230,6 +227,8 @@ class SubtitleInterface(QWidget):
         self.setAcceptDrops(True)
         self.task: Optional[SubtitleTask] = None
         self.subtitle_path: Optional[str] = None
+        self.primary_srt_path: Optional[str] = None
+        self._dirty = False
         self.custom_prompt_text: str = cfg.custom_prompt_text.value
         self.setAttribute(Qt.WA_DeleteOnClose)  # type: ignore
         self._init_ui()
@@ -247,9 +246,7 @@ class SubtitleInterface(QWidget):
         self._setup_bottom_layout()
 
     def set_values(self):
-        self.layout_button.setText(
-            cfg.subtitle_layout.value.value
-        )  # Get enum's string value
+        self.layout_button.setText(cfg.subtitle_layout.value.value)  # Get enum's string value
         self.translate_button.setChecked(cfg.need_translate.value)
         self.optimize_button.setChecked(cfg.need_optimize.value)
         self.target_language_button.setText(cfg.target_language.value.value)
@@ -266,26 +263,23 @@ class SubtitleInterface(QWidget):
         )  # 设置图标和文字并排显示
         top_layout.addWidget(self.command_bar, 1)  # 设置stretch为1，使其尽可能占用空间
 
-        # 创建保存按钮的下拉菜单
-        save_menu = RoundMenu(parent=self)
-        save_menu.view.setMaxVisibleItems(8)  # 设置菜单最大高度
+        self.save_action = Action(FIF.SAVE, self.tr("保存"), triggered=self.save_primary_srt)
+        self.command_bar.addAction(self.save_action)
+
+        export_menu = RoundMenu(parent=self)
+        export_menu.view.setMaxVisibleItems(8)
         for format in OutputSubtitleFormatEnum:
             action = Action(text=format.value)
-            action.triggered.connect(
-                lambda checked, f=format.value: self.on_save_format_clicked(f)
-            )
-            save_menu.addAction(action)
+            action.triggered.connect(lambda checked, f=format.value: self.on_export_format_clicked(f))
+            export_menu.addAction(action)
 
-        # 添加保存按钮(带下拉菜单)
-        save_button = TransparentDropDownPushButton(self.tr("保存"), self, FIF.SAVE)
-        save_button.setMenu(save_menu)
-        save_button.setFixedHeight(34)
-        self.command_bar.addWidget(save_button)
+        export_button = TransparentDropDownPushButton(self.tr("导出"), self, FIF.SHARE)
+        export_button.setMenu(export_menu)
+        export_button.setFixedHeight(34)
+        self.command_bar.addWidget(export_button)
 
         # 添加字幕排布下拉按钮
-        self.layout_button = TransparentDropDownPushButton(
-            self.tr("字幕排布"), self, FIF.LAYOUT
-        )
+        self.layout_button = TransparentDropDownPushButton(self.tr("字幕排布"), self, FIF.LAYOUT)
         self.layout_button.setFixedHeight(34)
         self.layout_button.setMinimumWidth(125)
         self.layout_menu = RoundMenu(parent=self)
@@ -340,15 +334,13 @@ class SubtitleInterface(QWidget):
 
         self.command_bar.addWidget(self.target_language_button)
 
-        self.command_bar.addSeparator()
-
         # 添加文稿提示按钮
         self.prompt_button = Action(
             FIF.DOCUMENT, self.tr("Prompt"), triggered=self.show_prompt_dialog
         )
         self.command_bar.addAction(self.prompt_button)
 
-        # 添加设置按钮
+        # 这里只保留上游断句/单句上限；速度、标点和时间轴属于下一阶段。
         self.command_bar.addAction(
             Action(FIF.SETTING, "", triggered=self.show_subtitle_settings)
         )
@@ -357,16 +349,12 @@ class SubtitleInterface(QWidget):
         # self.command_bar.addAction(Action(FIF.VIDEO, "", triggered=self.show_video_player))
 
         # 添加打开文件夹按钮
-        self.command_bar.addAction(
-            Action(FIF.FOLDER, "", triggered=self.on_open_folder_clicked)
-        )
+        self.command_bar.addAction(Action(FIF.FOLDER, "", triggered=self.on_open_folder_clicked))
 
         self.command_bar.addSeparator()
 
         # 添加文件选择按钮
-        self.command_bar.addAction(
-            Action(FIF.FOLDER_ADD, "", triggered=self.on_file_select)
-        )
+        self.command_bar.addAction(Action(FIF.FOLDER_ADD, "", triggered=self.on_file_select))
 
         # 添加开始按钮到水平布局
         self.start_button = PrimaryPushButton(self.tr("开始"), self, icon=FIF.PLAY)
@@ -381,17 +369,14 @@ class SubtitleInterface(QWidget):
     def _setup_subtitle_table(self):
         self.subtitle_table = TableView(self)
         self.model = SubtitleTableModel("")
+        self.model.edited.connect(self._mark_dirty)
         self.subtitle_table.setModel(self.model)
         self.subtitle_table.setBorderVisible(True)
         self.subtitle_table.setBorderRadius(8)
         self.subtitle_table.setWordWrap(True)
         self.subtitle_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.subtitle_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Fixed
-        )
-        self.subtitle_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Fixed
-        )
+        self.subtitle_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.subtitle_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self.subtitle_table.setColumnWidth(0, 120)
         self.subtitle_table.setColumnWidth(1, 120)
 
@@ -432,12 +417,8 @@ class SubtitleInterface(QWidget):
     def _setup_signals(self) -> None:
         signalBus.subtitle_layout_changed.connect(self.on_subtitle_layout_changed)
         signalBus.target_language_changed.connect(self.on_target_language_changed)
-        signalBus.subtitle_optimization_changed.connect(
-            self.on_subtitle_optimization_changed
-        )
-        signalBus.subtitle_translation_changed.connect(
-            self.on_subtitle_translation_changed
-        )
+        signalBus.subtitle_optimization_changed.connect(self.on_subtitle_optimization_changed)
+        signalBus.subtitle_translation_changed.connect(self.on_subtitle_translation_changed)
         # self.subtitle_setting_button.clicked.connect(self.show_subtitle_settings)
         # self.video_player_button.clicked.connect(self.show_video_player)
 
@@ -449,9 +430,7 @@ class SubtitleInterface(QWidget):
 
     def _update_prompt_button_style(self) -> None:
         if self.custom_prompt_text.strip():
-            green_icon = FIF.DOCUMENT.colored(
-                QColor(76, 255, 165), QColor(76, 255, 165)
-            )
+            green_icon = FIF.DOCUMENT.colored(QColor(76, 255, 165), QColor(76, 255, 165))
             self.prompt_button.setIcon(green_icon)
         else:
             self.prompt_button.setIcon(FIF.DOCUMENT)
@@ -464,20 +443,27 @@ class SubtitleInterface(QWidget):
         self.task = task
         self.subtitle_path = task.subtitle_path
         self.update_info(task)
+        self.set_values()
 
     def update_info(self, task: SubtitleTask) -> None:
         """更新页面信息"""
         if not self.task:
             return
-        original_subtitle_save_path = Path(str(self.task.subtitle_path))
         layout = (
             task.subtitle_config.subtitle_layout
             if task.subtitle_config
             else cfg.subtitle_layout.value
         )
-        asr_data = load_editor_asr_data(str(original_subtitle_save_path), layout)
+        input_data = getattr(task, "input_data", None)
+        if input_data is not None:
+            asr_data = clone_subtitle_data(input_data)
+        else:
+            original_subtitle_save_path = Path(str(self.task.subtitle_path))
+            asr_data = load_editor_asr_data(str(original_subtitle_save_path), layout)
         self.model._data = asr_data.to_json()
         self.model.layoutChanged.emit()
+        self.primary_srt_path = str(getattr(task, "output_path", "") or "") or None
+        self._set_dirty(False)
         self.status_label.setText(self.tr("已加载文件"))
 
     def start_subtitle_optimization(self, need_create_task: bool = True) -> None:
@@ -497,34 +483,23 @@ class SubtitleInterface(QWidget):
         self.cancel_button.show()
 
         if need_create_task:
-            # 将当前表格状态写回原文件，保留用户的合并/删除/编辑
-            if self.model._data:
-                save_editor_asr_data(
-                    ASRData.from_json(self.model._data),
-                    self.subtitle_path,
-                    cfg.subtitle_layout.value,
-                    cfg.subtitle_style_name.value,
-                )
-            self.task = TaskFactory.create_subtitle_task(file_path=self.subtitle_path)
+            self.task = TaskFactory.create_subtitle_task(
+                file_path=self.subtitle_path,
+                video_path=None,
+            )
+            self.task.editor_data_json = deepcopy(self.model._data)
         if not self.task:
             self.start_button.setEnabled(True)
             self.cancel_button.hide()
             return
+        self.task.editor_data_json = deepcopy(self.model._data)
         self.subtitle_optimization_thread = SubtitleThread(self.task)
-        self.subtitle_optimization_thread.finished.connect(
-            self.on_subtitle_optimization_finished
-        )
-        self.subtitle_optimization_thread.progress.connect(
-            self.on_subtitle_optimization_progress
-        )
+        self.subtitle_optimization_thread.finished.connect(self.on_subtitle_optimization_finished)
+        self.subtitle_optimization_thread.progress.connect(self.on_subtitle_optimization_progress)
         self.subtitle_optimization_thread.update.connect(self.update_data)
         self.subtitle_optimization_thread.update_all.connect(self.update_all)
-        self.subtitle_optimization_thread.error.connect(
-            self.on_subtitle_optimization_error
-        )
-        self.subtitle_optimization_thread.set_custom_prompt_text(
-            self.custom_prompt_text
-        )
+        self.subtitle_optimization_thread.error.connect(self.on_subtitle_optimization_error)
+        self.subtitle_optimization_thread.set_custom_prompt_text(self.custom_prompt_text)
         self.subtitle_optimization_thread.start()
         InfoBar.info(
             self.tr("开始优化"),
@@ -538,17 +513,22 @@ class SubtitleInterface(QWidget):
         # 检查是否有任务
         self.start_subtitle_optimization(need_create_task=False)
 
-    def on_subtitle_optimization_finished(
-        self, video_path: str, output_path: str
-    ) -> None:
+    def on_subtitle_optimization_finished(self, video_path: str, output_path: str) -> None:
         self.start_button.setEnabled(True)
         self.cancel_button.hide()
         self.progress_bar.setValue(100)
+        self.primary_srt_path = output_path
+        self.subtitle_path = output_path
+        if Path(output_path).is_file():
+            self.load_subtitle_file(output_path, mark_clean=True)
+        else:
+            self.save_primary_srt(show_feedback=False)
         if self.task and self.task.need_next_task:
             self.finished.emit(video_path, output_path)
+        title = self.tr("优化完成")
         InfoBar.success(
-            self.tr("优化完成"),
-            self.tr("优化完成字幕..."),
+            title,
+            title,
             duration=INFOBAR_DURATION_SUCCESS,
             position=InfoBarPosition.BOTTOM,
             parent=self.parent(),
@@ -587,20 +567,53 @@ class SubtitleInterface(QWidget):
 
     def on_file_select(self) -> None:
         # 构建文件过滤器
-        subtitle_formats = " ".join(
-            f"*.{fmt.value}" for fmt in SupportedSubtitleFormats
-        )
+        subtitle_formats = " ".join(f"*.{fmt.value}" for fmt in SupportedSubtitleFormats)
         filter_str = f"{self.tr('字幕文件')} ({subtitle_formats})"
 
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, self.tr("选择字幕文件"), "", filter_str
-        )
+        file_path, _ = QFileDialog.getOpenFileName(self, self.tr("选择字幕文件"), "", filter_str)
         if file_path:
             self.subtitle_path = file_path
             self.load_subtitle_file(file_path)
 
-    def on_save_format_clicked(self, format: str) -> None:
-        """处理保存格式的选择"""
+    def _default_primary_path(self) -> Optional[str]:
+        if self.primary_srt_path:
+            return str(Path(self.primary_srt_path).with_suffix(".srt"))
+        if not self.subtitle_path:
+            return None
+        return str(canonical_stage_path(self.subtitle_path, "初版字幕"))
+
+    def save_primary_srt(self, _checked: bool = False, *, show_feedback: bool = True) -> bool:
+        """Persist the editable working draft to its canonical SRT artifact."""
+        save_path = self._default_primary_path()
+        if not save_path:
+            if show_feedback:
+                InfoBar.warning(
+                    self.tr("警告"), self.tr("请先加载字幕文件"),
+                    duration=INFOBAR_DURATION_WARNING, parent=self,
+                )
+            return False
+        try:
+            save_canonical_srt(
+                ASRData.from_json(self.model._data), save_path, layout=cfg.subtitle_layout.value
+            )
+            self.primary_srt_path = save_path
+            self._set_dirty(False)
+            if show_feedback:
+                InfoBar.success(
+                    self.tr("保存成功"), self.tr("工作稿已保存至:") + save_path,
+                    duration=INFOBAR_DURATION_SUCCESS, parent=self,
+                )
+            return True
+        except Exception as exc:
+            if show_feedback:
+                InfoBar.error(
+                    self.tr("保存失败"), self.tr("保存工作稿失败: ") + str(exc),
+                    duration=INFOBAR_DURATION_ERROR, parent=self,
+                )
+            return False
+
+    def on_export_format_clicked(self, format: str) -> None:
+        """Export a derived copy without changing the canonical SRT artifact."""
         if not self.subtitle_path:
             InfoBar.warning(
                 self.tr("警告"),
@@ -611,7 +624,7 @@ class SubtitleInterface(QWidget):
             return
 
         # 获取保存路径
-        default_name = Path(self.subtitle_path).stem
+        default_name = Path(self._default_primary_path() or self.subtitle_path).stem
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             self.tr("保存字幕文件"),
@@ -620,6 +633,8 @@ class SubtitleInterface(QWidget):
         )
         if not file_path:
             return
+        if Path(file_path).suffix.lower() != f".{format.lower()}":
+            file_path = str(Path(file_path).with_suffix(f".{format.lower()}"))
 
         try:
             # 转换并保存字幕
@@ -662,20 +677,33 @@ class SubtitleInterface(QWidget):
         if self.task.output_path:
             output_path = Path(self.task.output_path)
             target_dir = str(
-                output_path.parent
-                if output_path.exists()
-                else Path(self.task.subtitle_path).parent
+                output_path.parent if output_path.exists() else Path(self.task.subtitle_path).parent
             )
         else:
             target_dir = str(Path(self.task.subtitle_path).parent)
         open_folder(target_dir)
 
-    def load_subtitle_file(self, file_path: str) -> None:
+    # Compatibility for extensions and older tests that still call the former slot.
+    on_save_format_clicked = on_export_format_clicked
+
+    def load_subtitle_file(self, file_path: str, *, mark_clean: bool = True) -> None:
         self.subtitle_path = file_path
         asr_data = load_editor_asr_data(file_path, cfg.subtitle_layout.value)
         self.model._data = asr_data.to_json()
         self.model.layoutChanged.emit()
+        if mark_clean:
+            self._set_dirty(False)
         self.status_label.setText(self.tr("已加载文件"))
+
+    def _mark_dirty(self) -> None:
+        self._set_dirty(True)
+
+    def _set_dirty(self, dirty: bool) -> None:
+        self._dirty = dirty
+        if dirty and not self._is_processing():
+            self.status_label.setText(self.tr("有未保存的修改"))
+        elif self.model._data:
+            self.status_label.setText(self.tr("已保存"))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         event.accept() if event.mimeData().hasUrls() else event.ignore()
@@ -717,9 +745,8 @@ class SubtitleInterface(QWidget):
         super().closeEvent(event)
 
     def show_subtitle_settings(self) -> None:
-        """显示字幕设置对话框"""
-        dialog = SubtitleSettingDialog(self.window())
-        dialog.exec_()
+        """Show settings owned by the upstream optimization stage."""
+        SubtitleSettingDialog(self.window()).exec_()
 
     def show_video_player(self) -> None:
         """显示视频播放器窗口"""
@@ -760,11 +787,7 @@ class SubtitleInterface(QWidget):
         row = index.row()
         item = list(self.model._data.values())[row]
         start_time = item["start_time"]  # 毫秒
-        end_time = (
-            item["end_time"] - 50
-            if item["end_time"] - 50 > start_time
-            else item["end_time"]
-        )
+        end_time = item["end_time"] - 50 if item["end_time"] - 50 > start_time else item["end_time"]
         signalBus.play_video_segment(start_time, end_time)
 
     def show_context_menu(self, pos) -> None:
@@ -856,7 +879,7 @@ class SubtitleInterface(QWidget):
 
         # 更新模型数据
         self.subtitle_table.clearSelection()
-        self.model.update_all(new_data)
+        self.model.update_all(new_data, mark_dirty=True)
 
         # 显示成功提示
         InfoBar.success(
@@ -882,11 +905,14 @@ class SubtitleInterface(QWidget):
                 new_data[new_key] = data[key]
 
         self.subtitle_table.clearSelection()
-        self.model.update_all(new_data)
+        self.model.update_all(new_data, mark_dirty=True)
 
     def _is_processing(self) -> bool:
         """是否有任何处理任务正在运行"""
-        if hasattr(self, "subtitle_optimization_thread") and self.subtitle_optimization_thread.isRunning():  # type: ignore
+        if (
+            hasattr(self, "subtitle_optimization_thread")
+            and self.subtitle_optimization_thread.isRunning()
+        ):  # type: ignore
             return True
         if hasattr(self, "_retranslate_thread") and self._retranslate_thread.isRunning():
             return True
@@ -904,9 +930,7 @@ class SubtitleInterface(QWidget):
         selected_data = {all_keys[row]: self.model._data[all_keys[row]] for row in rows}
 
         # 获取当前翻译配置
-        subtitle_task = TaskFactory.create_subtitle_task(
-            file_path=self.subtitle_path or ""
-        )
+        subtitle_task = TaskFactory.create_subtitle_task(file_path=self.subtitle_path or "")
         config = subtitle_task.subtitle_config
         if not config:
             return
@@ -925,7 +949,7 @@ class SubtitleInterface(QWidget):
 
     def _on_retranslate_finished(self, result: dict) -> None:
         self.start_button.setEnabled(True)
-        self.model.update_data(result)
+        self.model.update_data(result, mark_dirty=True)
         self.progress_bar.setValue(100)
         self.status_label.setText(self.tr("重新翻译完成"))
         InfoBar.success(

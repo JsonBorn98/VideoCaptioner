@@ -201,3 +201,17 @@ class TestSplitByLLM:
 
         assert result == ["Hello world"]
         assert calls["count"] == split_by_llm_module.LLM_SPLIT_MAX_ATTEMPTS
+
+    def test_split_requests_have_a_bounded_timeout(self, monkeypatch):
+        observed = []
+
+        def fake_call_llm(*args, **kwargs):
+            observed.append(kwargs.get("timeout"))
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="Hello<br>world"))]
+            )
+
+        monkeypatch.setattr(split_by_llm_module, "call_llm", fake_call_llm)
+
+        assert split_by_llm("Hello world", model="gpt-4o-mini") == ["Hello", "world"]
+        assert observed == [split_by_llm_module.LLM_SPLIT_REQUEST_TIMEOUT_SECONDS]

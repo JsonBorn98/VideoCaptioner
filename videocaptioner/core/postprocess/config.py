@@ -8,7 +8,7 @@ CLI (`cli/config.py` DEFAULTS)、GUI (`ui/common/config.py` qconfig) 与
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 
 
 @dataclass
@@ -64,6 +64,99 @@ class PostprocessConfig:
     llm_model: Optional[str] = None
     """压缩重译使用的 LLM 模型名（由调用方从各自配置注入）。"""
 
+    # ---- 统一字幕速度优化 ----
+    speed_optimize: bool = False
+    """启用统一结构级速度优化；开启时不再叠加旧速度管线。"""
+    speed_mode: Literal["apply", "analyze"] = "apply"
+    """apply 写入后处理结果；analyze 使整个后处理阶段只读。"""
+    speed_profile: str = "balanced"
+    """内置或自定义速度方案 ID。首版接入三种内置方案。"""
+    speed_profile_file: Optional[str] = None
+    """可选的版本化 profile JSON；用于 CLI/自动化中的便携任务配置。"""
+    speed_primary: Literal["translate", "original", "layout"] = "translate"
+    """translate / original / layout，默认以译文体验为主。"""
+    speed_overrides: dict[str, Any] = field(default_factory=dict)
+    """相对所选 profile 的任务级高级覆盖。"""
+    speed_reference_audit: bool = False
+    speed_semantic_repair: bool = True
+    """对确定性阶段仍未解决的硬超速，启用受验证约束的局部 LLM 修复。"""
+    speed_semantic_window: int = 5
+    """语义修复上下文窗口大小；写回仍以非重叠事务执行。"""
+    speed_llm_uncertain_review: bool = True
+    """确定性校验不能判定时，调用独立语义复核。"""
+    optimize_both_sides: bool = False
+    """双语字幕默认只改写译文；开启后允许文本能力分别处理原文与译文。"""
+    precise_timing: bool = False
+    """请求使用关联媒体生成精准时间证据；runner 本身不隐式加载模型。"""
+    save_timing_sidecar: bool = False
+    """精准时间证据可用时，请求调用方保存可复用的 sidecar。"""
+
+    def __post_init__(self) -> None:
+        bool_fields = (
+            "remove_placeholders",
+            "normalize_quotes",
+            "trim_trailing_punct",
+            "fix_gaps",
+            "audit_reading_speed",
+            "qa_report",
+            "compress_fast_subtitles",
+            "speed_optimize",
+            "speed_reference_audit",
+            "speed_semantic_repair",
+            "speed_llm_uncertain_review",
+            "optimize_both_sides",
+            "precise_timing",
+            "save_timing_sidecar",
+        )
+        for field_name in bool_fields:
+            if type(getattr(self, field_name)) is not bool:
+                raise ValueError(f"{field_name} must be a boolean")
+        int_fields = (
+            "max_gap_ms",
+            "min_gap_ms",
+            "min_duration_ms",
+            "max_duration_ms",
+            "short_text_max_chars",
+            "short_text_max_duration_ms",
+            "speed_semantic_window",
+        )
+        for field_name in int_fields:
+            if type(getattr(self, field_name)) is not int:
+                raise ValueError(f"{field_name} must be an integer")
+        for field_name in (
+            "max_cps_cjk",
+            "max_cps_latin",
+            "comfort_cps_cjk",
+            "comfort_cps_latin",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError(f"{field_name} must be a positive number")
+        if not isinstance(self.extra_placeholder_patterns, list) or not all(
+            isinstance(item, str) for item in self.extra_placeholder_patterns
+        ):
+            raise ValueError("extra_placeholder_patterns must be an array of strings")
+        if not isinstance(self.speed_overrides, dict):
+            raise ValueError("speed_overrides must be an object")
+        if self.speed_mode not in ("apply", "analyze"):
+            raise ValueError("speed_mode must be 'apply' or 'analyze'")
+        if self.speed_primary not in ("translate", "original", "layout"):
+            raise ValueError("speed_primary must be translate, original, or layout")
+        if not 1 <= self.speed_semantic_window <= 15:
+            raise ValueError("speed_semantic_window must be between 1 and 15")
+        if self.gap_mode not in ("extend", "midpoint"):
+            raise ValueError("gap_mode must be 'extend' or 'midpoint'")
+        if self.min_gap_ms < 0 or self.max_gap_ms < self.min_gap_ms:
+            raise ValueError("gap limits must satisfy 0 <= min_gap_ms <= max_gap_ms")
+        if self.min_duration_ms <= 0 or self.max_duration_ms < self.min_duration_ms:
+            raise ValueError("duration limits must be positive and ordered")
+        if self.short_text_max_chars <= 0 or self.short_text_max_duration_ms <= 0:
+            raise ValueError("short-text limits must be positive")
+        if self.comfort_cps_cjk > self.max_cps_cjk:
+            raise ValueError("comfort_cps_cjk cannot exceed max_cps_cjk")
+        if self.comfort_cps_latin > self.max_cps_latin:
+            raise ValueError("comfort_cps_latin cannot exceed max_cps_latin")
+
     def audit_enabled(self) -> bool:
         """是否需要执行审计（审计开关 / QA 报告 / 压缩重译任一开启）。"""
         return self.audit_reading_speed or self.qa_report or self.compress_fast_subtitles
@@ -76,4 +169,5 @@ class PostprocessConfig:
             or self.trim_trailing_punct
             or self.fix_gaps
             or self.audit_enabled()
+            or self.speed_optimize
         )

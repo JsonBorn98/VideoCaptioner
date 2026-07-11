@@ -36,8 +36,11 @@ uv run videocaptioner transcribe video.mp4 --asr bijian
 # 字幕翻译（免费必应翻译）
 uv run videocaptioner subtitle input.srt --translator bing --target-language en
 
-# 全流程：转录 → 优化 → 翻译 → 合成
+# 全流程：转录 → 优化 → 翻译 → 后处理 → 合成
 uv run videocaptioner process video.mp4 --target-language ja
+
+# 独立处理已经成型的字幕（输出规范 SRT）
+uv run videocaptioner postprocess input.srt --profile balanced
 
 # 字幕烧录到视频
 uv run videocaptioner synthesize video.mp4 -s subtitle.srt
@@ -64,6 +67,7 @@ videocaptioner config set llm.model gpt-4o-mini
 | `gui` | 打开桌面版。也可以直接运行 `videocaptioner-gui` |
 | `transcribe` | 语音转字幕。引擎：`faster-whisper`、`whisper-api`、`bijian`（免费）、`jianying`（免费）、`whisper-cpp` |
 | `subtitle` | 字幕优化/翻译。翻译服务：`llm`、`bing`（免费）、`google`（免费） |
+| `postprocess` | 独立字幕后处理：阅读速度平滑、时间轴、标点和质量审计 |
 | `dub` | 根据字幕生成配音音轨或配音视频 |
 | `synthesize` | 字幕烧录到视频（软字幕/硬字幕） |
 | `process` | 全流程处理 |

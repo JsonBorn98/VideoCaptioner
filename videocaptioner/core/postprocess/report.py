@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from ..utils.text_utils import is_mainly_cjk
+
+if TYPE_CHECKING:
+    from ..speed.pipeline import SpeedOptimizationResult
 
 _MAX_SAMPLES = 20
 _MAX_TABLE_ROWS = 40
@@ -105,6 +108,7 @@ class QualityReport:
     placeholder_review: List[str] = field(default_factory=list)
     #  压缩重译未能自动完成、已保留原文的条目
     compress_failures: List[str] = field(default_factory=list)
+    speed: Optional["SpeedOptimizationResult"] = None
 
     def stage(self, name: str) -> StageReport:
         report = self.stages.get(name)
@@ -134,6 +138,13 @@ _STAGE_LABELS = {
 def build_qa_report(report: QualityReport) -> str:
     """将 QualityReport 渲染为 Markdown QA 报告。"""
 
+    if report.speed is not None:
+        from ..speed.report import build_speed_qa
+
+        speed_report = build_speed_qa(report.speed)
+    else:
+        speed_report = ""
+
     lines: List[str] = ["# 字幕质量 QA 报告\n\n"]
 
     # 1. 文件信息
@@ -162,7 +173,10 @@ def build_qa_report(report: QualityReport) -> str:
     audit = report.audit
     lines.append("\n## 校验摘要\n\n")
     if audit is None:
-        lines.append("- 未启用阅读速度审计。\n")
+        if report.speed is not None:
+            lines.append("- 已启用统一字幕速度优化，详细 M3 结果见文末。\n")
+        else:
+            lines.append("- 未启用阅读速度审计。\n")
     else:
         c = audit.counts()
         cjk_hard = sum(1 for w in audit.hard if w.is_cjk)
@@ -216,6 +230,9 @@ def build_qa_report(report: QualityReport) -> str:
     lines.append("- 优先检查中文主行的可读性。\n")
     lines.append("- 外文辅行常因源时轴天然偏快，可能属正常现象。\n")
     lines.append("- 长时长行需人工判断是否为有意为之（标题卡 / 歌词 / 持续在屏文本）。\n")
+
+    if speed_report:
+        lines.extend(["\n---\n\n", speed_report])
 
     return "".join(lines)
 

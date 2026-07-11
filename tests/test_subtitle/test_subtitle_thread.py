@@ -7,6 +7,7 @@ This module tests the subtitle processing thread which handles:
 """
 
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -103,9 +104,7 @@ def run_thread_with_timeout(thread, timeout_ms=60000):
 @pytest.fixture
 def subtitle_file():
     """Load test subtitle file from fixtures."""
-    fixture_path = (
-        Path(__file__).parent.parent / "fixtures" / "subtitle" / "sample_en.srt"
-    )
+    fixture_path = Path(__file__).parent.parent / "fixtures" / "subtitle" / "sample_en.srt"
     assert fixture_path.exists(), f"Fixture not found: {fixture_path}"
     return str(fixture_path)
 
@@ -160,7 +159,7 @@ class TestSubtitleThreadLlmRouting:
 
         assert thread.need_llm(config, asr_data)
 
-    def test_compress_fast_needs_llm_even_without_other_llm_steps(self, base_config):
+    def test_postprocess_llm_options_do_not_affect_translation_thread(self, base_config):
         config = base_config
         config.need_split = False
         config.need_optimize = False
@@ -169,15 +168,67 @@ class TestSubtitleThreadLlmRouting:
         asr_data = ASRData([ASRDataSeg(text="你好", start_time=0, end_time=1000)])
         thread = SubtitleThread(SubtitleTask(subtitle_path="", subtitle_config=config))
 
-        assert thread.need_llm(config, asr_data)
+        assert not thread.need_llm(config, asr_data)
 
 
 class TestSubtitleThreadSplit:
     """Test subtitle splitting functionality."""
 
-    def test_split_sentence(
-        self, subtitle_file, output_dir, base_config, mock_llm_client
+    def test_cue_level_subtitle_uses_legacy_split_option(
+        self, output_dir, base_config, mock_llm_client
     ):
+        input_path = Path(output_dir) / "cue-level.srt"
+        output_path = Path(output_dir) / "cue-level-output.srt"
+        source = ASRData(
+            [
+                ASRDataSeg("This is an existing sentence cue.", 0, 2000),
+                ASRDataSeg("This cue structure should be preserved.", 2200, 4500),
+            ]
+        )
+        source.save(str(input_path), layout=SubtitleLayoutEnum.ONLY_ORIGINAL)
+        config = base_config
+        config.need_split = True
+        config.llm_model = get_test_model()
+        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        config.api_key = os.getenv("OPENAI_API_KEY")
+        task = SubtitleTask(
+            subtitle_path=str(input_path),
+            subtitle_config=config,
+            output_path=str(output_path),
+        )
+
+        results = run_thread_with_timeout(SubtitleThread(task))
+        saved = ASRData.from_subtitle_file(str(output_path))
+
+        assert "error" not in results
+        assert saved.segments
+        saved_text = "".join(segment.text for segment in saved.segments)
+        source_text = "".join(segment.text for segment in source.segments)
+        assert re.sub(r"\W", "", saved_text) == re.sub(r"\W", "", source_text)
+
+    def test_translation_stage_does_not_apply_postprocess_text_rules(
+        self, output_dir, base_config
+    ):
+        input_path = Path(output_dir) / "punctuation.srt"
+        output_path = Path(output_dir) / "initial.srt"
+        input_path.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\n译文。\n",
+            encoding="utf-8",
+        )
+        config = base_config
+        config.trim_trailing_punct = True
+        task = SubtitleTask(
+            subtitle_path=str(input_path),
+            subtitle_config=config,
+            output_path=str(output_path),
+        )
+
+        results = run_thread_with_timeout(SubtitleThread(task))
+
+        assert "error" not in results
+        assert "译文。" in output_path.read_text(encoding="utf-8")
+
+    def test_split_sentence(self, subtitle_file, output_dir, base_config, mock_llm_client):
         """Test sentence-based splitting (using mock LLM)."""
         config = base_config
         config.need_split = True
@@ -201,9 +252,7 @@ class TestSubtitleThreadSplit:
         assert "output" in results
         assert Path(results["output"]).exists()
 
-    def test_split_semantic(
-        self, subtitle_file, output_dir, base_config, mock_llm_client
-    ):
+    def test_split_semantic(self, subtitle_file, output_dir, base_config, mock_llm_client):
         """Test semantic-based splitting (using mock LLM)."""
         config = base_config
         config.need_split = True
@@ -227,9 +276,7 @@ class TestSubtitleThreadSplit:
 class TestSubtitleThreadOptimize:
     """Test subtitle optimization functionality."""
 
-    def test_optimize_with_llm(
-        self, subtitle_file, output_dir, base_config, mock_llm_client
-    ):
+    def test_optimize_with_llm(self, subtitle_file, output_dir, base_config, mock_llm_client):
         """Test LLM-based subtitle optimization (using mock LLM)."""
         config = base_config
         config.need_optimize = True
@@ -297,9 +344,7 @@ class TestSubtitleThreadTranslate:
         assert "error" not in results, f"Failed: {results.get('error')}"
         assert "output" in results
 
-    def test_translate_llm(
-        self, subtitle_file, output_dir, base_config, mock_llm_client
-    ):
+    def test_translate_llm(self, subtitle_file, output_dir, base_config, mock_llm_client):
         """Test LLM translation (using mock LLM)."""
         config = base_config
         config.need_translate = True
@@ -325,9 +370,7 @@ class TestSubtitleThreadTranslate:
 class TestSubtitleThreadFullPipeline:
     """Test complete subtitle processing pipeline."""
 
-    def test_split_and_translate(
-        self, subtitle_file, output_dir, base_config, mock_llm_client
-    ):
+    def test_split_and_translate(self, subtitle_file, output_dir, base_config, mock_llm_client):
         """Test split + translate pipeline (using mock LLM)."""
         config = base_config
         config.need_split = True
@@ -350,9 +393,7 @@ class TestSubtitleThreadFullPipeline:
         assert "error" not in results, f"Failed: {results.get('error')}"
         assert "output" in results
 
-    def test_optimize_and_translate(
-        self, subtitle_file, output_dir, base_config, mock_llm_client
-    ):
+    def test_optimize_and_translate(self, subtitle_file, output_dir, base_config, mock_llm_client):
         """Test optimize + translate pipeline (using mock LLM)."""
         config = base_config
         config.need_optimize = True
@@ -376,11 +417,10 @@ class TestSubtitleThreadFullPipeline:
         assert "output" in results
 
 
-class TestSubtitleThreadAssOutput:
-    """Test ASS output settings from the subtitle processing thread."""
+class TestSubtitleThreadCanonicalOutput:
+    """The content-processing thread always publishes a canonical SRT."""
 
-    def test_ass_output_uses_configured_style_reference(self, tmp_path, base_config):
-        """翻译/处理线程保存 ASS 时应保留样式的基准分辨率。"""
+    def test_explicit_ass_path_is_normalized_to_srt(self, tmp_path, base_config):
         subtitle_path = tmp_path / "input.srt"
         subtitle_path.write_text(
             "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
@@ -414,9 +454,11 @@ class TestSubtitleThreadAssOutput:
         results = run_thread_with_timeout(thread, timeout_ms=5000)
 
         assert "error" not in results, f"Failed: {results.get('error')}"
-        ass_text = output_path.read_text(encoding="utf-8")
-        assert "PlayResX: 1920" in ass_text
-        assert "PlayResY: 1080" in ass_text
+        canonical = output_path.with_suffix(".srt")
+        assert task.output_path == str(canonical)
+        assert canonical.is_file()
+        assert not output_path.exists()
+        assert "Hello" in canonical.read_text(encoding="utf-8")
 
 
 class TestSubtitleThreadError:
@@ -424,9 +466,7 @@ class TestSubtitleThreadError:
 
     def test_missing_file(self, output_dir, base_config):
         """Test handling of missing subtitle file."""
-        task = SubtitleTask(
-            subtitle_path="/nonexistent/file.srt", subtitle_config=base_config
-        )
+        task = SubtitleTask(subtitle_path="/nonexistent/file.srt", subtitle_config=base_config)
         thread = SubtitleThread(task)
         results = run_thread_with_timeout(thread, timeout_ms=5000)
 

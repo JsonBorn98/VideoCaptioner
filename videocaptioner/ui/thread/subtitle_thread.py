@@ -20,17 +20,12 @@ from videocaptioner.core.llm.context import (
     update_stage,
 )
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
-from videocaptioner.core.postprocess import (
-    PostprocessConfig,
-    build_qa_report,
-    run_normalize_stage,
-    run_post_stage,
-    run_pre_stage,
-)
 from videocaptioner.core.split.split import SubtitleSplitter
+from videocaptioner.core.subtitle import clone_subtitle_data
 from videocaptioner.core.translate.factory import TranslatorFactory
 from videocaptioner.core.translate.types import TranslatorType
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.ui.task_factory import TaskFactory
 
 SERVICE_TO_TYPE = {
     TranslatorServiceEnum.OPENAI: TranslatorType.OPENAI,
@@ -40,24 +35,6 @@ SERVICE_TO_TYPE = {
 }
 
 logger = setup_logger("subtitle_optimization_thread")
-
-
-def build_postprocess_config(config: SubtitleConfig) -> PostprocessConfig:
-    """从 SubtitleConfig 构造后处理配置。"""
-    return PostprocessConfig(
-        remove_placeholders=config.remove_placeholders,
-        normalize_quotes=config.normalize_quotes,
-        trim_trailing_punct=config.trim_trailing_punct,
-        fix_gaps=config.fix_gaps,
-        max_gap_ms=config.max_gap_ms,
-        gap_mode=config.gap_mode,
-        audit_reading_speed=config.audit_reading_speed,
-        max_cps_cjk=config.max_cps_cjk,
-        max_cps_latin=config.max_cps_latin,
-        compress_fast_subtitles=config.compress_fast_subtitles,
-        llm_model=config.llm_model or None,
-        qa_report=config.qa_report,
-    )
 
 
 def create_translator_from_config(
@@ -142,22 +119,17 @@ class SubtitleThread(QThread):
 
             subtitle_config = self.task.subtitle_config
             assert subtitle_config is not None, self.tr("字幕配置为空")
-            ass_video_width = subtitle_config.subtitle_style_reference_width
-            ass_video_height = subtitle_config.subtitle_style_reference_height
+            if self.task.input_data is not None:
+                asr_data = clone_subtitle_data(self.task.input_data)
+            elif self.task.editor_data_json is not None:
+                asr_data = ASRData.from_json(self.task.editor_data_json)
+            else:
+                asr_data = ASRData.from_subtitle_file(
+                    subtitle_path,
+                    layout=subtitle_config.subtitle_layout,
+                )
 
-            asr_data = ASRData.from_subtitle_file(
-                subtitle_path,
-                layout=subtitle_config.subtitle_layout,
-            )
-
-            # 规则型后处理配置与报告累加器
-            pp_cfg = build_postprocess_config(subtitle_config)
-            pp_report = None
-            pp_finalized = False
-            # 加载后、断句前：占位符清理
-            asr_data, pp_report = run_pre_stage(asr_data, pp_cfg, pp_report)
-
-            # 1. 分割成字词级时间戳（对于非断句字幕且开启分割选项）
+            # 普通 cue 级字幕仍按原流程生成估算词级时间戳，供上游断句器重组。
             if subtitle_config.need_split and not asr_data.is_word_timestamp():
                 asr_data.split_to_word_segments()
                 self.update_all.emit(asr_data.to_json())
@@ -167,12 +139,13 @@ class SubtitleThread(QThread):
                 self.progress.emit(2, self.tr("开始验证 LLM 配置..."))
                 subtitle_config = self._setup_llm_config()
 
-            # 2. 重新断句（对于字词级字幕）
-            # 单词级字幕默认先走本地规则快速合并；只有用户开启断句时才调用LLM语义断句。
+            # 字词级字幕按用户选择执行语义断句或本地快速合并。
             if asr_data.is_word_timestamp():
                 update_stage("split")
                 use_llm_split = subtitle_config.need_split
-                split_message = self.tr("字幕断句...") if use_llm_split else self.tr("快速合并字幕...")
+                split_message = (
+                    self.tr("字幕断句...") if use_llm_split else self.tr("快速合并字幕...")
+                )
                 self.progress.emit(5, split_message)
                 logger.info("正在%s", "LLM字幕断句" if use_llm_split else "快速合并字幕")
                 splitter = SubtitleSplitter(
@@ -181,8 +154,17 @@ class SubtitleThread(QThread):
                     max_word_count_cjk=subtitle_config.max_word_count_cjk,
                     max_word_count_english=subtitle_config.max_word_count_english,
                     use_llm=use_llm_split,
+                    progress_callback=lambda completed, total: self.progress.emit(
+                        5 + int(completed / max(total, 1) * 10),
+                        self.tr("字幕断句 {0}/{1}").format(completed, total),
+                    ),
                 )
-                asr_data = splitter.split_subtitle(asr_data)
+                self.splitter = splitter
+                try:
+                    asr_data = splitter.split_subtitle(asr_data)
+                finally:
+                    splitter.stop()
+                    self.splitter = None
                 self.update_all.emit(asr_data.to_json())
 
             # 3. 优化字幕
@@ -203,14 +185,8 @@ class SubtitleThread(QThread):
                     model=subtitle_config.llm_model,
                     custom_prompt=custom_prompt or "",
                     update_callback=self.callback,
-                    extra_rules=(
-                        "中文引号使用「」/『』；不要在中文行尾输出弱标点（，。；：等）。"
-                        if pp_cfg.normalize_quotes
-                        else ""
-                    ),
                 )
                 asr_data = optimizer.optimize_subtitle(asr_data)
-                asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)
                 self.update_all.emit(asr_data.to_json())
 
             # 4. 翻译字幕
@@ -228,77 +204,26 @@ class SubtitleThread(QThread):
                 )
 
                 asr_data = translator.translate_subtitle(asr_data)
-
-                # 移除末尾标点符号
-                asr_data, pp_report = run_normalize_stage(asr_data, pp_cfg, pp_report)
-                # 保存前最终化：压缩 → 闭合间隙 → 审计（在多布局保存之前完成）
-                asr_data, pp_report = run_post_stage(asr_data, pp_cfg, pp_report)
-                pp_finalized = True
                 self.update_all.emit(asr_data.to_json())
 
-                # 保存翻译结果(单语、双语)
-                if self.task.need_next_task and self.task.video_path:
-                    for layout in SubtitleLayoutEnum:
-                        save_path = str(
-                            Path(self.task.subtitle_path).parent
-                            / f"{Path(self.task.video_path).stem}-{layout.value}.srt"
-                        )
-                        asr_data.save(
-                            save_path=save_path,
-                            ass_style=subtitle_config.subtitle_style or "",
-                            layout=layout,
-                        )
-                        logger.info(f"翻译字幕保存到：{save_path}")
-
-            # 5. 保存字幕
-            if not pp_finalized:
-                asr_data, pp_report = run_post_stage(asr_data, pp_cfg, pp_report)
-                pp_finalized = True
-            asr_data.save(
-                save_path=self.task.output_path or "",
-                ass_style=subtitle_config.subtitle_style or "",
+            # 5. 发布内存快照，并强制保存当前阶段唯一的规范 SRT。
+            self.task.result_data = clone_subtitle_data(asr_data)
+            canonical, exported, warning = TaskFactory.save_stage_subtitle(
+                asr_data,
+                self.task.output_path or "",
                 layout=subtitle_config.subtitle_layout or SubtitleLayoutEnum.ONLY_TRANSLATE,
-                video_width=ass_video_width,
-                video_height=ass_video_height,
+                export_policy=(self.task.export_policy if self.task.need_next_task else None),
             )
-            logger.info(f"字幕保存到 {self.task.output_path}")
+            self.task.output_path = canonical
+            if exported:
+                logger.info("初版字幕自动导出到 %s", exported)
+            if warning:
+                logger.warning("初版字幕自动导出失败，继续 workflow: %s", warning)
+            logger.info("初版字幕保存到 %s", canonical)
 
-            # 5.1 生成 QA 报告
-            if pp_cfg.qa_report and pp_report is not None and self.task.output_path:
-                try:
-                    pp_report.source_path = self.task.subtitle_path
-                    pp_report.output_path = self.task.output_path
-                    pp_report.segment_count = len(asr_data.segments)
-                    qa_path = str(Path(self.task.output_path).with_suffix(".qa.md"))
-                    Path(qa_path).write_text(build_qa_report(pp_report), encoding="utf-8")
-                    logger.info(f"QA 报告保存到：{qa_path}")
-                    self.progress.emit(99, self.tr("QA 报告已生成"))
-                except Exception as exc:
-                    logger.warning(f"QA 报告生成失败：{exc}")
-
-            # 6. 文件移动与清理
-            if self.task.need_next_task and self.task.video_path:
-                # 保存srt/ass文件到视频目录（对于全流程任务）
-                save_srt_path = (
-                    Path(self.task.video_path).parent / f"{Path(self.task.video_path).stem}.srt"
-                )
-                asr_data.to_srt(
-                    save_path=str(save_srt_path),
-                    layout=subtitle_config.subtitle_layout,
-                )
-                save_ass_path = (
-                    Path(self.task.video_path).parent / f"{Path(self.task.video_path).stem}.ass"
-                )
-                asr_data.to_ass(
-                    save_path=str(save_ass_path),
-                    layout=subtitle_config.subtitle_layout,
-                    style_str=subtitle_config.subtitle_style,
-                    video_width=ass_video_width,
-                    video_height=ass_video_height,
-                )
-
-            self.progress.emit(100, self.tr("优化完成"))
-            logger.info("优化完成")
+            completed_message = self.tr("优化完成")
+            self.progress.emit(100, completed_message)
+            logger.info(completed_message)
             self.finished.emit(self.task.video_path, self.task.output_path)
 
         except Exception as e:
@@ -311,7 +236,6 @@ class SubtitleThread(QThread):
     def need_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
         return (
             subtitle_config.need_optimize
-            or subtitle_config.compress_fast_subtitles
             or (subtitle_config.need_split and asr_data.is_word_timestamp())
             or (
                 subtitle_config.need_translate
@@ -327,7 +251,9 @@ class SubtitleThread(QThread):
     def callback(self, result: List[SubtitleProcessData]):
         self.finished_subtitle_length += len(result)
         # 简单计算当前进度（0-100%）
-        progress = min(int((self.finished_subtitle_length / max(self.subtitle_length, 1)) * 100), 100)
+        progress = min(
+            int((self.finished_subtitle_length / max(self.subtitle_length, 1)) * 100), 100
+        )
         self.progress.emit(progress, self.tr("{0}% 处理字幕").format(progress))
         # 转换为字典格式供UI使用
         result_dict = {
@@ -340,6 +266,12 @@ class SubtitleThread(QThread):
         """停止所有处理"""
         try:
             # 先停止优化器
+            if hasattr(self, "splitter") and self.splitter:
+                try:
+                    self.splitter.stop()
+                except Exception as e:
+                    logger.error(f"停止断句器时出错：{str(e)}")
+
             if hasattr(self, "optimizer") and self.optimizer:
                 try:
                     self.optimizer.stop()  # type: ignore
@@ -412,10 +344,7 @@ class RetranslateThread(QThread):
 
             # 构建 {原始行号: translated_text} 映射
             keys = list(self.selected_data.keys())
-            result = {
-                keys[i]: seg.translated_text
-                for i, seg in enumerate(asr_data.segments)
-            }
+            result = {keys[i]: seg.translated_text for i, seg in enumerate(asr_data.segments)}
             self.finished.emit(result)
 
         except Exception as e:

@@ -6,6 +6,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.entities import SynthesisTask
+from videocaptioner.core.subtitle import clone_subtitle_data
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.video_utils import add_subtitles, add_subtitles_with_style
 
@@ -52,10 +53,14 @@ class VideoSynthesisThread(QThread):
             crf = video_quality.get_crf()
             preset = video_quality.get_preset()
 
-            # 读取字幕数据
-            asr_data = ASRData.from_subtitle_file(
-                subtitle_file,
-                layout=config.subtitle_layout,
+            # 完整 workflow 直接消费上游内存快照；独立调用才读取 SRT。
+            asr_data = (
+                clone_subtitle_data(self.task.input_data)
+                if self.task.input_data is not None
+                else ASRData.from_subtitle_file(
+                    subtitle_file,
+                    layout=config.subtitle_layout,
+                )
             )
 
             if config.soft_subtitle:

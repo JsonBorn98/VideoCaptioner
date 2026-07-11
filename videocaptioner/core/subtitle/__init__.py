@@ -24,6 +24,16 @@ from .font_utils import (
     iter_font_files,
     iter_system_font_files,
 )
+from .io import (
+    SubtitleExportFormat,
+    SubtitleImportResult,
+    canonical_stage_path,
+    clone_subtitle_data,
+    export_subtitle_atomic,
+    import_subtitle,
+    read_videocaptioner_layout,
+    save_canonical_srt,
+)
 from .rounded_renderer import render_preview, render_rounded_video
 from .style_manager import (
     SecondaryStyle,
@@ -81,4 +91,12 @@ __all__ = [
     "hex_to_rgba",
     "is_mainly_cjk",
     "wrap_text",
+    "SubtitleExportFormat",
+    "SubtitleImportResult",
+    "canonical_stage_path",
+    "clone_subtitle_data",
+    "export_subtitle_atomic",
+    "import_subtitle",
+    "read_videocaptioner_layout",
+    "save_canonical_srt",
 ]

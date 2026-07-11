@@ -12,12 +12,20 @@ from videocaptioner.core.asr import transcribe
 from videocaptioner.core.asr.qwen_local_asr import close_qwen_worker_pool
 from videocaptioner.core.asr.qwen_runtime import clear_qwen_model_cache
 from videocaptioner.core.entities import (
+    SubtitleLayoutEnum,
     TranscribeModelEnum,
     TranscribeOutputFormatEnum,
     TranscribeTask,
 )
+from videocaptioner.core.subtitle import (
+    clone_subtitle_data,
+    export_subtitle_atomic,
+    import_subtitle,
+    save_canonical_srt,
+)
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.video_utils import video2audio
+from videocaptioner.ui.task_factory import TaskFactory
 
 logger = setup_logger("transcript_thread")
 
@@ -246,7 +254,17 @@ class TranscriptThread(QThread):
             return False
 
         subtitle_file = downloaded_subtitles[0]
-        self.task.output_path = str(subtitle_file)
+        imported = import_subtitle(subtitle_file)
+        self.task.result_data = clone_subtitle_data(imported.data)
+        canonical, _exported, warning = TaskFactory.save_stage_subtitle(
+            imported.data,
+            self.task.output_path or "",
+            layout=imported.layout,
+            export_policy=self.task.export_policy if self.task.need_next_task else None,
+        )
+        self.task.output_path = canonical
+        if warning:
+            logger.warning("转录字幕自动导出失败，继续 workflow: %s", warning)
         logger.info(f"字幕文件已下载，跳过转录。找到下载的字幕文件：{subtitle_file}")
         self.progress.emit(100, self.tr("字幕已下载"))
         self.finished.emit(self.task)
@@ -337,7 +355,27 @@ class TranscriptThread(QThread):
         assert self.task.transcribe_config is not None
         assert self.task.output_path is not None
 
+        self.task.result_data = clone_subtitle_data(asr_data)
         output_path = Path(self.task.output_path)
+        if self.task.need_next_task:
+            canonical, _exported, warning = TaskFactory.save_stage_subtitle(
+                asr_data,
+                str(output_path),
+                layout=(
+                    self.task.export_policy.layout
+                    if self.task.export_policy
+                    else SubtitleLayoutEnum.ONLY_ORIGINAL
+                ),
+                export_policy=self.task.export_policy,
+            )
+            self.task.output_path = canonical
+            if warning:
+                logger.warning("转录字幕自动导出失败，继续 workflow: %s", warning)
+            return
+
+        # Standalone transcription keeps its format choices, but canonical SRT
+        # is always written first and cannot be disabled.
+        save_canonical_srt(asr_data, output_path)
         output_format_enum = (
             self.task.transcribe_config.output_format or TranscribeOutputFormatEnum.SRT
         )
@@ -352,14 +390,26 @@ class TranscriptThread(QThread):
         else:
             formats_to_export = [output_format_enum.value.lower()]
 
-        if self.task.need_next_task:
-            formats_to_export.append(TranscribeOutputFormatEnum.SRT.value.lower())
         formats_to_export = list(set(formats_to_export))
 
         for fmt in formats_to_export:
             self._raise_if_cancelled()
             save_path = f"{base_path}.{fmt}"
-            asr_data.save(save_path)
+            if fmt == "srt":
+                continue
+            policy = self.task.export_policy
+            export_subtitle_atomic(
+                asr_data,
+                save_path,
+                export_format=fmt,
+                layout=(policy.layout if policy else SubtitleLayoutEnum.ONLY_ORIGINAL),
+                ass_style=(policy.ass_style if policy else None),
+                reference_resolution=(
+                    (policy.reference_width, policy.reference_height)
+                    if policy
+                    else (1280, 720)
+                ),
+            )
             logger.info("%s 字幕文件已保存到: %s", fmt.upper(), save_path)
 
     def progress_callback(self, value, message):

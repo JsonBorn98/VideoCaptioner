@@ -7,6 +7,7 @@ from qfluentwidgets import (
     BoolValidator,
     ConfigItem,
     ConfigSerializer,
+    ConfigValidator,
     EnumSerializer,
     FolderValidator,
     OptionsConfigItem,
@@ -32,8 +33,13 @@ from videocaptioner.core.entities import (
     VideoQualityEnum,
     WhisperModelEnum,
 )
+from videocaptioner.core.postprocess.config import PostprocessConfig
+from videocaptioner.core.speed import available_speed_presets, get_speed_policy
 from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.core.utils.platform_utils import get_available_transcribe_models
+
+_BALANCED_SPEED_POLICY = get_speed_policy()
+_POSTPROCESS_DEFAULTS = PostprocessConfig()
 
 
 class Language(Enum):
@@ -71,6 +77,22 @@ class PlatformAwareTranscribeModelValidator(OptionsValidator):
 
     def correct(self, value):
         return value if self.validate(value) else self._options[0]
+
+
+class SpeedProfileValidator(ConfigValidator):
+    """Keep persisted custom IDs valid while exposing dynamic combo-box options."""
+
+    def __init__(self):
+        self.options = list(available_speed_presets())
+
+    def validate(self, value):
+        return isinstance(value, str) and bool(value) and len(value) <= 64
+
+    def correct(self, value):
+        return value if self.validate(value) else "balanced"
+
+    def set_options(self, options):
+        self.options = list(dict.fromkeys(options))
 
 
 class Config(QConfig):
@@ -315,6 +337,188 @@ class Config(QConfig):
         "Subtitle", "NeedCompressFast", False, BoolValidator()
     )
     need_qa_report = ConfigItem("Subtitle", "NeedQaReport", False, BoolValidator())
+
+    # ------------------- 独立字幕后处理阶段 -------------------
+    # 完整 workflow 默认执行；任务创建与批量编排可关闭整个阶段。
+    postprocess_enabled = ConfigItem(
+        "Postprocess", "Enabled", True, BoolValidator()
+    )
+    # 完整方案 ID。模板和自定义方案由 PostprocessProfileStore 校验。
+    postprocess_profile = OptionsConfigItem(
+        "Postprocess", "Profile", "balanced", SpeedProfileValidator()
+    )
+    postprocess_optimize_both_sides = ConfigItem(
+        "Postprocess", "OptimizeBothSides", False, BoolValidator()
+    )
+    workflow_auto_export = ConfigItem(
+        "SubtitleDelivery", "AutoExport", False, BoolValidator()
+    )
+    workflow_export_format = OptionsConfigItem(
+        "SubtitleDelivery",
+        "ExportFormat",
+        "ass",
+        OptionsValidator(["ass", "vtt"]),
+    )
+
+    # ------------------- 字幕速度优化 -------------------
+    # SpeedPolicy 是算法参数的唯一权威默认值；这里仅声明 qconfig 持久化映射。
+    speed_activation = OptionsConfigItem(
+        "SubtitleSpeed",
+        "Activation",
+        "auto",
+        OptionsValidator(["auto", "on", "off"]),
+    )
+    speed_profile = OptionsConfigItem(
+        "SubtitleSpeed",
+        "Profile",
+        _POSTPROCESS_DEFAULTS.speed_profile,
+        SpeedProfileValidator(),
+    )
+    speed_mode = OptionsConfigItem(
+        "SubtitleSpeed",
+        "Mode",
+        _POSTPROCESS_DEFAULTS.speed_mode,
+        OptionsValidator(["apply", "analyze"]),
+    )
+    speed_primary = OptionsConfigItem(
+        "SubtitleSpeed",
+        "PrimarySide",
+        _POSTPROCESS_DEFAULTS.speed_primary,
+        OptionsValidator(["translate", "layout", "original"]),
+    )
+    speed_precise_timing = ConfigItem(
+        "SubtitleSpeed", "PreciseTiming", False, BoolValidator()
+    )
+    speed_reference_hard_audit = ConfigItem(
+        "SubtitleSpeed", "ReferenceHardAudit", False, BoolValidator()
+    )
+
+    speed_comfort_cps_cjk = ConfigItem(
+        "SubtitleSpeed",
+        "ComfortCpsCjk",
+        _BALANCED_SPEED_POLICY.comfort_cps_cjk,
+        RangeValidator(1.0, 40.0),
+    )
+    speed_hard_cps_cjk = ConfigItem(
+        "SubtitleSpeed",
+        "HardCpsCjk",
+        _BALANCED_SPEED_POLICY.hard_cps_cjk,
+        RangeValidator(1.0, 40.0),
+    )
+    speed_comfort_cps_latin = ConfigItem(
+        "SubtitleSpeed",
+        "ComfortCpsLatin",
+        _BALANCED_SPEED_POLICY.comfort_cps_latin,
+        RangeValidator(1.0, 60.0),
+    )
+    speed_hard_cps_latin = ConfigItem(
+        "SubtitleSpeed",
+        "HardCpsLatin",
+        _BALANCED_SPEED_POLICY.hard_cps_latin,
+        RangeValidator(1.0, 60.0),
+    )
+    speed_adjacent_p90_target = ConfigItem(
+        "SubtitleSpeed",
+        "AdjacentP90Target",
+        _BALANCED_SPEED_POLICY.adjacent_p90_target,
+        RangeValidator(1.0, 5.0),
+    )
+    speed_adjacent_emergency_limit = ConfigItem(
+        "SubtitleSpeed",
+        "AdjacentEmergencyLimit",
+        _BALANCED_SPEED_POLICY.adjacent_emergency_limit,
+        RangeValidator(1.0, 8.0),
+    )
+    speed_whitespace_weight = ConfigItem(
+        "SubtitleSpeed",
+        "WhitespaceWeight",
+        _BALANCED_SPEED_POLICY.whitespace_weight,
+        RangeValidator(0.0, 2.0),
+    )
+    speed_weak_punctuation_weight = ConfigItem(
+        "SubtitleSpeed",
+        "WeakPunctuationWeight",
+        _BALANCED_SPEED_POLICY.weak_punctuation_weight,
+        RangeValidator(0.0, 2.0),
+    )
+    speed_strong_punctuation_weight = ConfigItem(
+        "SubtitleSpeed",
+        "StrongPunctuationWeight",
+        _BALANCED_SPEED_POLICY.strong_punctuation_weight,
+        RangeValidator(0.0, 2.0),
+    )
+    speed_min_duration_ms = RangeConfigItem(
+        "SubtitleSpeed",
+        "MinDurationMs",
+        round(_BALANCED_SPEED_POLICY.min_duration_seconds * 1000),
+        RangeValidator(500, 5000),
+    )
+    speed_max_duration_ms = RangeConfigItem(
+        "SubtitleSpeed",
+        "MaxDurationMs",
+        round(_BALANCED_SPEED_POLICY.max_duration_seconds * 1000),
+        RangeValidator(1000, 12000),
+    )
+    speed_local_window_radius = RangeConfigItem(
+        "SubtitleSpeed",
+        "LocalWindowRadius",
+        _BALANCED_SPEED_POLICY.local_window_radius,
+        RangeValidator(1, 12),
+    )
+    speed_rhythm_reset_ms = RangeConfigItem(
+        "SubtitleSpeed",
+        "RhythmResetMs",
+        _BALANCED_SPEED_POLICY.rhythm_reset_ms,
+        RangeValidator(100, 3000),
+    )
+    speed_hard_rhythm_reset_ms = RangeConfigItem(
+        "SubtitleSpeed",
+        "HardRhythmResetMs",
+        _BALANCED_SPEED_POLICY.hard_rhythm_reset_ms,
+        RangeValidator(200, 6000),
+    )
+    speed_low_boundary_shift_ms = RangeConfigItem(
+        "SubtitleSpeed",
+        "LowBoundaryShiftMs",
+        _BALANCED_SPEED_POLICY.low_confidence_boundary_shift_ms,
+        RangeValidator(0, 2000),
+    )
+    speed_medium_boundary_shift_ms = RangeConfigItem(
+        "SubtitleSpeed",
+        "MediumBoundaryShiftMs",
+        _BALANCED_SPEED_POLICY.medium_confidence_boundary_shift_ms,
+        RangeValidator(0, 3000),
+    )
+    speed_high_boundary_shift_ms = RangeConfigItem(
+        "SubtitleSpeed",
+        "HighBoundaryShiftMs",
+        _BALANCED_SPEED_POLICY.high_confidence_boundary_shift_ms,
+        RangeValidator(0, 5000),
+    )
+    speed_bidirectional_smoothing = ConfigItem(
+        "SubtitleSpeed",
+        "BidirectionalSmoothing",
+        _BALANCED_SPEED_POLICY.bidirectional_smoothing,
+        BoolValidator(),
+    )
+    speed_semantic_repair = ConfigItem(
+        "SubtitleSpeed",
+        "SemanticRepair",
+        _POSTPROCESS_DEFAULTS.speed_semantic_repair,
+        BoolValidator(),
+    )
+    speed_semantic_window = RangeConfigItem(
+        "SubtitleSpeed", "SemanticWindow", 5, RangeValidator(1, 15)
+    )
+    speed_llm_uncertain_review = ConfigItem(
+        "SubtitleSpeed", "LlmUncertainReview", True, BoolValidator()
+    )
+    speed_qa_report = ConfigItem(
+        "SubtitleSpeed", "QaReport", _POSTPROCESS_DEFAULTS.qa_report, BoolValidator()
+    )
+    speed_save_timing_sidecar = ConfigItem(
+        "SubtitleSpeed", "SaveTimingSidecar", False, BoolValidator()
+    )
 
     # ------------------- 字幕合成配置 -------------------
     soft_subtitle = ConfigItem("Video", "SoftSubtitle", False, BoolValidator())

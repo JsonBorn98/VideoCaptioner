@@ -2,7 +2,7 @@ import webbrowser
 
 from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtWidgets import QFileDialog, QLabel, QWidget
+from PyQt5.QtWidgets import QFileDialog, QWidget
 from qfluentwidgets import (
     ComboBoxSettingCard,
     CustomColorSettingCard,
@@ -16,6 +16,7 @@ from qfluentwidgets import (
     ScrollArea,
     SettingCardGroup,
     SwitchSettingCard,
+    TitleLabel,
     setTheme,
     setThemeColor,
 )
@@ -36,6 +37,7 @@ from videocaptioner.core.entities import (
 from videocaptioner.core.llm import check_whisper_connection
 from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
 from videocaptioner.core.llm.check_mimo_asr import check_mimo_asr_connection
+from videocaptioner.core.postprocess import PostprocessProfileStore
 from videocaptioner.core.utils.cache import disable_cache, enable_cache
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
@@ -53,7 +55,7 @@ class SettingInterface(ScrollArea):
         self.setWindowTitle(self.tr("设置"))
         self.scrollWidget = QWidget()
         self.expandLayout = ExpandLayout(self.scrollWidget)
-        self.settingLabel = QLabel(self.tr("设置"), self)
+        self.settingLabel = TitleLabel(self.tr("设置"), self)
 
         # 初始化所有设置组
         self.__initGroups()
@@ -129,75 +131,12 @@ class SettingInterface(ScrollArea):
             parent=self.translateGroup,
         )
 
-        # 字幕后处理配置卡片（规则型清理与质量审计，默认全部关闭）
-        self.removePlaceholdersCard = SwitchSettingCard(
-            FIF.DELETE,
-            self.tr("占位符清理"),
-            self.tr("删除 [Music]/[音乐]/♪ 等非语义占位符行"),
-            cfg.need_remove_placeholders,
-            self.postprocessGroup,
-        )
-        self.normalizeQuotesCard = SwitchSettingCard(
-            FIF.LABEL,
-            self.tr("中文引号规范化"),
-            self.tr("将中文引号统一为「」/『』，并对中文行清理多余的弱尾标点"),
-            cfg.need_normalize_quotes,
-            self.postprocessGroup,
-        )
-        self.trimTrailingPunctCard = SwitchSettingCard(
-            FIF.FONT,
-            self.tr("清理行尾弱标点"),
-            self.tr("删除行尾的逗号、句号等弱标点（默认开启，关闭后保留原标点）"),
-            cfg.trim_trailing_punct,
-            self.postprocessGroup,
-        )
-        self.fixGapsCard = SwitchSettingCard(
-            FIF.STOP_WATCH,
-            self.tr("闪烁修复"),
-            self.tr("闭合相邻字幕之间的微小间隙，减少画面闪烁"),
-            cfg.need_fix_gaps,
-            self.postprocessGroup,
-        )
-        self.maxGapMsCard = RangeSettingCard(
-            cfg.max_gap_ms,
-            FIF.STOP_WATCH,
-            self.tr("最大闭合间隙 (ms)"),
-            self.tr("闪烁修复时闭合的最大间隙；音乐/节奏类内容建议 500"),
-            parent=self.postprocessGroup,
-        )
-        self.auditSpeedCard = SwitchSettingCard(
+        self.speedSettingsCard = HyperlinkCard(
+            "",
+            self.tr("打开"),
             FIF.SPEED_HIGH,
-            self.tr("阅读速度审计"),
-            self.tr("检测阅读速度过快与时长异常的字幕（只报告，不自动修改）"),
-            cfg.need_audit_speed,
-            self.postprocessGroup,
-        )
-        self.maxCpsCjkCard = RangeSettingCard(
-            cfg.max_cps_cjk,
-            FIF.SPEED_HIGH,
-            self.tr("中文 CPS 硬限"),
-            self.tr("中文每秒字符数上限，超出记入硬警告"),
-            parent=self.postprocessGroup,
-        )
-        self.maxCpsLatinCard = RangeSettingCard(
-            cfg.max_cps_latin,
-            FIF.SPEED_HIGH,
-            self.tr("外文 CPS 硬限"),
-            self.tr("外文每秒字符数上限，超出记入硬警告"),
-            parent=self.postprocessGroup,
-        )
-        self.compressFastCard = SwitchSettingCard(
-            FIF.ROBOT,
-            self.tr("快速字幕压缩"),
-            self.tr("对超速的中文行做局部 LLM 压缩重译（需配置 LLM）"),
-            cfg.need_compress_fast,
-            self.postprocessGroup,
-        )
-        self.qaReportCard = SwitchSettingCard(
-            FIF.DOCUMENT,
-            self.tr("生成 QA 报告"),
-            self.tr("在输出目录生成 Markdown 质量报告（隐含开启阅读速度审计）"),
-            cfg.need_qa_report,
+            self.tr("字幕后处理设置"),
+            self.tr("文本、速度、时间轴、语义修复、精准对齐与报告集中管理"),
             self.postprocessGroup,
         )
 
@@ -324,16 +263,7 @@ class SettingInterface(ScrollArea):
         self.translateGroup.addSettingCard(self.subtitleTranslateCard)
         self.translateGroup.addSettingCard(self.targetLanguageCard)
 
-        self.postprocessGroup.addSettingCard(self.removePlaceholdersCard)
-        self.postprocessGroup.addSettingCard(self.normalizeQuotesCard)
-        self.postprocessGroup.addSettingCard(self.trimTrailingPunctCard)
-        self.postprocessGroup.addSettingCard(self.fixGapsCard)
-        self.postprocessGroup.addSettingCard(self.maxGapMsCard)
-        self.postprocessGroup.addSettingCard(self.auditSpeedCard)
-        self.postprocessGroup.addSettingCard(self.maxCpsCjkCard)
-        self.postprocessGroup.addSettingCard(self.maxCpsLatinCard)
-        self.postprocessGroup.addSettingCard(self.compressFastCard)
-        self.postprocessGroup.addSettingCard(self.qaReportCard)
+        self.postprocessGroup.addSettingCard(self.speedSettingsCard)
 
         self.subtitleGroup.addSettingCard(self.subtitleStyleCard)
         self.subtitleGroup.addSettingCard(self.subtitleLayoutCard)
@@ -812,8 +742,6 @@ class SettingInterface(ScrollArea):
 
         # 初始化样式表
         self.scrollWidget.setObjectName("scrollWidget")
-        self.settingLabel.setObjectName("settingLabel")
-
         # 初始化转录模型配置卡片的显示状态
         self.__onTranscribeModelChanged(self.transcribeModelCard.comboBox.currentText())
 
@@ -830,11 +758,6 @@ class SettingInterface(ScrollArea):
             QScrollArea {
                 border: none;
                 background-color: transparent;
-            }
-            QLabel#settingLabel {
-                font: 33px 'Microsoft YaHei';
-                background-color: transparent;
-                color: white;
             }
         """
         )
@@ -926,6 +849,17 @@ class SettingInterface(ScrollArea):
         self.subtitleLayoutCard.linkButton.clicked.connect(
             lambda: self.window().switchTo(self.window().subtitleStyleInterface)  # type: ignore
         )
+        self.speedSettingsCard.linkButton.clicked.connect(
+            lambda: self.window().switchTo(self.window().postprocessSettingInterface)  # type: ignore
+        )
+        for item in (
+            cfg.postprocess_enabled,
+            cfg.postprocess_profile,
+            cfg.speed_mode,
+            cfg.speed_primary,
+        ):
+            item.valueChanged.connect(self.__updateSpeedSettingsSummary)
+        self.__updateSpeedSettingsSummary()
 
         # 个性化
         self.cacheEnabledCard.checkedChanged.connect(self.__onCacheEnabledChanged)
@@ -967,6 +901,28 @@ class SettingInterface(ScrollArea):
             duration=INFOBAR_DURATION_SUCCESS,
             parent=self,
         )
+
+    def __updateSpeedSettingsSummary(self, _value=None):
+        profile_id = cfg.get(cfg.postprocess_profile)
+        try:
+            profile_name = PostprocessProfileStore().get(profile_id).name
+        except Exception:
+            profile_name = profile_id
+        modeNames = {"apply": self.tr("应用"), "analyze": self.tr("仅分析")}
+        primaryNames = {
+            "translate": self.tr("译文主侧"),
+            "layout": self.tr("布局主侧"),
+            "original": self.tr("原文主侧"),
+        }
+        summary = " · ".join(
+            (
+                self.tr("默认启用") if cfg.get(cfg.postprocess_enabled) else self.tr("默认跳过"),
+                profile_name,
+                modeNames.get(cfg.get(cfg.speed_mode), ""),
+                primaryNames.get(cfg.get(cfg.speed_primary), ""),
+            )
+        )
+        self.speedSettingsCard.setContent(summary)
 
     def __onsavePathCardClicked(self):
         """处理保存路径卡片点击事件"""

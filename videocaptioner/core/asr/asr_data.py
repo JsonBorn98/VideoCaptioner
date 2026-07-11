@@ -239,6 +239,8 @@ class ASRData:
 
         if save_path.endswith(".srt"):
             self.to_srt(save_path=save_path, layout=layout)
+        elif save_path.endswith(".vtt"):
+            self.to_vtt(save_path=save_path, layout=layout)
         elif save_path.endswith(".txt"):
             self.to_txt(save_path=save_path, layout=layout)
         elif save_path.endswith(".json"):
@@ -425,7 +427,11 @@ class ASRData:
                 f.write(ass_content)
         return ass_content
 
-    def to_vtt(self, save_path=None) -> str:
+    def to_vtt(
+        self,
+        layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        save_path=None,
+    ) -> str:
         """Convert to WebVTT subtitle format
 
         Args:
@@ -434,25 +440,28 @@ class ASRData:
         Returns:
             WebVTT format subtitle content
         """
-        raise NotImplementedError("WebVTT format is not supported")
-        # # WebVTT头部
-        # vtt_lines = ["WEBVTT\n"]
+        vtt_lines = ["WEBVTT\n"]
+        for n, seg in enumerate(self.segments, 1):
+            original = seg.text
+            translated = seg.translated_text
+            if layout == SubtitleLayoutEnum.ORIGINAL_ON_TOP:
+                text = f"{original}\n{translated}" if translated else original
+            elif layout == SubtitleLayoutEnum.TRANSLATE_ON_TOP:
+                text = f"{translated}\n{original}" if translated else original
+            elif layout == SubtitleLayoutEnum.ONLY_ORIGINAL:
+                text = original
+            else:
+                text = translated if translated else original
+            start_time = seg._ms_to_srt_time(seg.start_time).replace(",", ".")
+            end_time = seg._ms_to_srt_time(seg.end_time).replace(",", ".")
+            vtt_lines.append(f"{n}\n{start_time} --> {end_time}\n{text}\n")
 
-        # for n, seg in enumerate(self.segments, 1):
-        #     # 转换时间戳格式从毫秒到 HH:MM:SS.mmm
-        #     start_time = seg._ms_to_srt_time(seg.start_time).replace(",", ".")
-        #     end_time = seg._ms_to_srt_time(seg.end_time).replace(",", ".")
-
-        #     # 添加序号（可选）和时间戳
-        #     vtt_lines.append(f"{n}\n{start_time} --> {end_time}\n{seg.transcript}\n")
-
-        # vtt_text = "\n".join(vtt_lines)
-
-        # if save_path:
-        #     with open(save_path, "w", encoding="utf-8") as f:
-        #         f.write(vtt_text)
-
-        # return vtt_text
+        vtt_text = "\n".join(vtt_lines)
+        if save_path:
+            save_path = handle_long_path(save_path)
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(vtt_text)
+        return vtt_text
 
     def merge_segments(
         self, start_index: int, end_index: int, merged_text: Optional[str] = None
@@ -563,7 +572,7 @@ class ASRData:
         elif suffix == ".vtt":
             if "<c>" in content:
                 return ASRData.from_youtube_vtt(content)
-            return ASRData.from_vtt(content)
+            return ASRData.from_vtt(content, layout=layout)
         elif suffix == ".ass":
             return ASRData.from_ass(content, layout=layout)
         elif suffix == ".json":
@@ -670,7 +679,10 @@ class ASRData:
         return ASRData(segments)
 
     @staticmethod
-    def from_vtt(vtt_str: str) -> "ASRData":
+    def from_vtt(
+        vtt_str: str,
+        layout: Optional[SubtitleLayoutEnum] = None,
+    ) -> "ASRData":
         """Create ASRData from VTT format string.
 
         Args:
@@ -730,13 +742,32 @@ class ASRData:
                 time_parts[6] * 1000 + time_parts[7]
             )
 
-            text_line = "\n".join(lines[text_start:])
+            text_lines = lines[text_start:]
+            text_line = "\n".join(text_lines)
             # Remove VTT inline tags: timestamps, <c>, <b>, <i>, <u>, <ruby>, etc.
             cleaned_text = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", text_line)
             cleaned_text = re.sub(r"</?[a-zA-Z][^>]*>", "", cleaned_text)
             cleaned_text = cleaned_text.strip()
 
-            if cleaned_text and cleaned_text != " ":
+            cleaned_lines = [
+                re.sub(r"</?[a-zA-Z][^>]*>", "", line).strip()
+                for line in text_lines
+                if line.strip()
+            ]
+            if (
+                layout
+                in (
+                    SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+                    SubtitleLayoutEnum.TRANSLATE_ON_TOP,
+                )
+                and len(cleaned_lines) == 2
+            ):
+                if layout == SubtitleLayoutEnum.TRANSLATE_ON_TOP:
+                    original, translated = cleaned_lines[1], cleaned_lines[0]
+                else:
+                    original, translated = cleaned_lines[0], cleaned_lines[1]
+                segments.append(ASRDataSeg(original, start_time, end_time, translated))
+            elif cleaned_text and cleaned_text != " ":
                 segments.append(ASRDataSeg(cleaned_text, start_time, end_time))
 
         return ASRData(segments)

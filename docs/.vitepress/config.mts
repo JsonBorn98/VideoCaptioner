@@ -266,6 +266,7 @@ export default defineConfig({
               text: '高级功能',
               items: [
                 { text: '批量处理', link: '/guide/batch-processing' },
+                { text: '字幕后处理', link: '/guide/subtitle-postprocessing' },
                 { text: '字幕样式', link: '/guide/subtitle-style' },
                 { text: '文稿匹配', link: '/guide/manuscript' }
               ]
@@ -356,6 +357,7 @@ export default defineConfig({
               text: 'Advanced Features',
               items: [
                 { text: 'Batch Processing', link: '/en/guide/batch-processing' },
+                { text: 'Subtitle Postprocessing', link: '/en/guide/subtitle-postprocessing' },
                 { text: 'Subtitle Style', link: '/en/guide/subtitle-style' },
                 { text: 'Manuscript Matching', link: '/en/guide/manuscript' }
               ]

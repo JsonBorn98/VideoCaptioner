@@ -14,12 +14,14 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     Action,
+    BodyLabel,
     ComboBox,
     InfoBar,
     InfoBarPosition,
     ProgressBar,
     PushButton,
     RoundMenu,
+    SwitchButton,
     TableWidget,
 )
 from qfluentwidgets import (
@@ -38,7 +40,9 @@ from videocaptioner.core.entities import (
     SupportedSubtitleFormats,
     SupportedVideoFormats,
 )
+from videocaptioner.core.subtitle import StyleMode, list_styles
 from videocaptioner.core.utils.platform_utils import open_folder
+from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.thread.batch_process_thread import (
     BatchProcessThread,
     BatchTask,
@@ -83,14 +87,49 @@ class BatchProcessInterface(QWidget):
         self.add_file_btn = PushButton(self.tr("添加文件"), icon=FIF.ADD)
         self.start_all_btn = PushButton(self.tr("开始处理"), icon=FIF.PLAY)
         self.clear_btn = PushButton(self.tr("清空列表"), icon=FIF.DELETE)
+        self.postprocess_switch = SwitchButton()
+        self.postprocess_switch.setChecked(cfg.get(cfg.postprocess_enabled))
+        self.postprocess_switch.checkedChanged.connect(
+            lambda checked: cfg.set(cfg.postprocess_enabled, checked)
+        )
 
         # 添加到顶部布局
         top_layout.addWidget(self.task_type_combo)
         top_layout.addWidget(self.add_file_btn)
         top_layout.addWidget(self.clear_btn)
+        top_layout.addWidget(BodyLabel(self.tr("字幕后处理")))
+        top_layout.addWidget(self.postprocess_switch)
 
         top_layout.addStretch()
         top_layout.addWidget(self.start_all_btn)
+
+        export_layout = QHBoxLayout()
+        export_layout.addWidget(BodyLabel(self.tr("每个字幕阶段自动导出")))
+        self.auto_export_switch = SwitchButton()
+        self.auto_export_switch.setChecked(cfg.get(cfg.workflow_auto_export))
+        export_layout.addWidget(self.auto_export_switch)
+        self.export_format_combo = ComboBox()
+        self.export_format_combo.addItems(["ASS", "VTT"])
+        self.export_format_combo.setCurrentText(cfg.get(cfg.workflow_export_format).upper())
+        export_layout.addWidget(self.export_format_combo)
+        self.export_style_combo = ComboBox()
+        style_names = [
+            style.name for style in list_styles() if style.mode is StyleMode.ASS
+        ]
+        self.export_style_combo.addItems(style_names or ["default"])
+        current_style = cfg.get(cfg.subtitle_style_name)
+        self.export_style_combo.setCurrentText(
+            current_style if current_style in style_names else self.export_style_combo.itemText(0)
+        )
+        export_layout.addWidget(self.export_style_combo)
+        export_layout.addStretch(1)
+
+        self.auto_export_switch.checkedChanged.connect(self._on_auto_export_changed)
+        self.export_format_combo.currentTextChanged.connect(self._on_export_format_changed)
+        self.export_style_combo.currentTextChanged.connect(
+            lambda value: cfg.set(cfg.subtitle_style_name, value)
+        )
+        self._update_export_controls()
 
         # 创建任务表格
         self.task_table = TableWidget()
@@ -123,6 +162,7 @@ class BatchProcessInterface(QWidget):
 
         # 添加到主布局
         main_layout.addLayout(top_layout)
+        main_layout.addLayout(export_layout)
         main_layout.addWidget(self.task_table)
 
         # 连接信号
@@ -130,6 +170,21 @@ class BatchProcessInterface(QWidget):
         self.start_all_btn.clicked.connect(self.start_all_tasks)
         self.clear_btn.clicked.connect(self.clear_tasks)
         self.task_type_combo.currentTextChanged.connect(self.on_task_type_changed)
+
+    def _on_auto_export_changed(self, checked: bool) -> None:
+        cfg.set(cfg.workflow_auto_export, checked)
+        self._update_export_controls()
+
+    def _on_export_format_changed(self, value: str) -> None:
+        cfg.set(cfg.workflow_export_format, value.lower())
+        self._update_export_controls()
+
+    def _update_export_controls(self) -> None:
+        enabled = self.auto_export_switch.isChecked()
+        self.export_format_combo.setEnabled(enabled)
+        self.export_style_combo.setEnabled(
+            enabled and self.export_format_combo.currentText().lower() == "ass"
+        )
 
     def setup_connections(self):
         # 批处理线程信号连接
@@ -415,7 +470,11 @@ class BatchProcessInterface(QWidget):
             status = self.task_table.item(row, 2).text()
             if status == str(BatchTaskStatus.WAITING):
                 task_type = BatchTaskType(self.task_type_combo.currentText())
-                batch_task = BatchTask(file_path, task_type)
+                batch_task = BatchTask(
+                    file_path,
+                    task_type,
+                    postprocess_enabled=self.postprocess_switch.isChecked(),
+                )
                 self.batch_thread.add_task(batch_task)
 
     def start_task(self, file_path: str):
@@ -431,7 +490,11 @@ class BatchProcessInterface(QWidget):
 
         # 创建并添加单个任务
         task_type = BatchTaskType(self.task_type_combo.currentText())
-        batch_task = BatchTask(file_path, task_type)
+        batch_task = BatchTask(
+            file_path,
+            task_type,
+            postprocess_enabled=self.postprocess_switch.isChecked(),
+        )
         self.batch_thread.add_task(batch_task)
 
     def cancel_task(self, file_path: str):
@@ -447,6 +510,7 @@ class BatchProcessInterface(QWidget):
         self.task_table.setRowCount(0)
 
     def on_task_type_changed(self, task_type: str):
+        self.postprocess_switch.setEnabled(task_type != str(BatchTaskType.TRANSCRIBE))
         # 显示任务类型说明
         description = self.task_type_descriptions.get(task_type, "")
         if description:

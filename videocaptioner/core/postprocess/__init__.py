@@ -13,14 +13,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Tuple
 
+from ..entities import SubtitleLayoutEnum
 from ..utils.logger import setup_logger
 from .config import PostprocessConfig
 from .report import AuditResult, QualityReport, StageReport, build_qa_report
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
+    from ..speed.timing_evidence import TimingEvidenceWindow
 
 logger = setup_logger("postprocess")
 
@@ -33,6 +36,12 @@ __all__ = [
     "run_pre_stage",
     "run_normalize_stage",
     "run_post_stage",
+    "PostprocessLayoutMode",
+    "PostprocessProfile",
+    "PostprocessProfileStore",
+    "PostprocessResult",
+    "PostprocessTask",
+    "run_postprocess_task",
 ]
 
 
@@ -63,13 +72,17 @@ def run_normalize_stage(
     asr_data: "ASRData",
     cfg: PostprocessConfig,
     report: Optional[QualityReport] = None,
+    layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+    primary_side_only: bool = False,
 ) -> Tuple["ASRData", QualityReport]:
     """优化后 / 翻译后：文本规范化（取代 remove_punctuation）。可重复调用。"""
     report = _new_report(asr_data, report)
     try:
         from .normalize import normalize_segments
 
-        asr_data, report = normalize_segments(asr_data, cfg, report)
+        asr_data, report = normalize_segments(
+            asr_data, cfg, report, layout, primary_side_only
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("文本规范化失败，已跳过: %s", exc)
     return asr_data, report
@@ -80,6 +93,8 @@ def run_post_stage(
     cfg: PostprocessConfig,
     report: Optional[QualityReport] = None,
     llm_ctx: Optional[dict] = None,
+    layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+    timing_windows: Iterable["TimingEvidenceWindow"] = (),
 ) -> Tuple["ASRData", QualityReport]:
     """保存前：[必要时规范化] → [压缩重译] → 闭合间隙 → 审计。
 
@@ -89,8 +104,10 @@ def run_post_stage(
 
     # 允许用户只开启规则后处理（例如 --normalize-quotes --no-optimize --no-translate）。
     # 默认 trim_trailing_punct=True 仅复刻旧 LLM 后处理路径，不在纯透传路径里单独改字节。
-    if cfg.normalize_quotes or cfg.compress_fast_subtitles:
-        asr_data, report = run_normalize_stage(asr_data, cfg, report)
+    if cfg.normalize_quotes or cfg.trim_trailing_punct or cfg.compress_fast_subtitles:
+        asr_data, report = run_normalize_stage(
+            asr_data, cfg, report, layout, primary_side_only=True
+        )
 
     if cfg.compress_fast_subtitles:
         try:
@@ -108,6 +125,49 @@ def run_post_stage(
         except Exception as exc:  # noqa: BLE001
             logger.warning("闭合间隙失败，已跳过: %s", exc)
 
+    if cfg.speed_optimize:
+        from ..speed.pipeline import optimize_speed
+        from ..speed.profiles import load_speed_profile, resolve_speed_policy
+
+        try:
+            policy = resolve_speed_policy(
+                cfg.speed_profile,
+                cfg.speed_overrides,
+                profile_file=cfg.speed_profile_file,
+            )
+            resolved_profile_id = (
+                load_speed_profile(cfg.speed_profile_file).profile_id
+                if cfg.speed_profile_file
+                else cfg.speed_profile
+            )
+        except (KeyError, ValueError) as exc:
+            logger.warning("速度方案不可用，回退到均衡方案: %s", exc)
+            policy = resolve_speed_policy("balanced", cfg.speed_overrides)
+            resolved_profile_id = "balanced"
+        asr_data, report.speed = optimize_speed(
+            asr_data,
+            policy=policy,
+            profile_id=resolved_profile_id,
+            mode=cfg.speed_mode,
+            layout=layout,
+            primary_side=cfg.speed_primary,
+            timing_windows=timing_windows,
+            reference_audit=cfg.speed_reference_audit,
+            optimize_both_sides=cfg.optimize_both_sides,
+            semantic_repair=cfg.speed_semantic_repair,
+            semantic_model=cfg.llm_model,
+            semantic_window_size=cfg.speed_semantic_window,
+            semantic_uncertain_review=cfg.speed_llm_uncertain_review,
+        )
+        report.segment_count = len(asr_data.segments)
+
+    # 速度结构调整和语义修复都可能产生新文本。规范化是幂等操作，
+    # 在所有文本改写结束后再次执行，保证最终交付仍满足尾标点策略。
+    if cfg.normalize_quotes or cfg.trim_trailing_punct:
+        asr_data, report = run_normalize_stage(
+            asr_data, cfg, report, layout, primary_side_only=True
+        )
+
     if cfg.audit_enabled():
         try:
             from .audit import audit
@@ -118,3 +178,13 @@ def run_post_stage(
 
     report.segment_count = len(asr_data.segments)
     return asr_data, report
+
+
+# Public stage API.  Imports live after the functions so runner can reuse this
+# module without a circular initialization dependency.
+from .models import PostprocessLayoutMode as PostprocessLayoutMode  # noqa: E402
+from .models import PostprocessResult as PostprocessResult  # noqa: E402
+from .models import PostprocessTask as PostprocessTask  # noqa: E402
+from .profiles import PostprocessProfile as PostprocessProfile  # noqa: E402
+from .profiles import PostprocessProfileStore as PostprocessProfileStore  # noqa: E402
+from .runner import run_postprocess_task as run_postprocess_task  # noqa: E402

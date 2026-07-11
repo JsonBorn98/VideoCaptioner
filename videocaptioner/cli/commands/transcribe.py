@@ -188,6 +188,7 @@ def run(args: Namespace, config: dict) -> int:
 
         from videocaptioner.core.asr import transcribe
         asr_data = transcribe(audio_path, transcribe_config, callback=callback)
+        args.result_data = asr_data
 
         # Save output
         asr_data.save(save_path=output_path)

@@ -24,6 +24,7 @@ from videocaptioner.ui.thread.version_checker_thread import VersionChecker
 from videocaptioner.ui.view.batch_process_interface import BatchProcessInterface
 from videocaptioner.ui.view.home_interface import HomeInterface
 from videocaptioner.ui.view.llm_logs_interface import LLMLogsInterface
+from videocaptioner.ui.view.postprocess_setting_interface import PostprocessSettingInterface
 from videocaptioner.ui.view.setting_interface import SettingInterface
 from videocaptioner.ui.view.subtitle_style_interface import SubtitleStyleInterface
 
@@ -38,9 +39,14 @@ class MainWindow(FluentWindow):
         # 创建子界面
         self.homeInterface = HomeInterface(self)
         self.settingInterface = SettingInterface(self)
+        self.postprocessSettingInterface = PostprocessSettingInterface(self)
         self.subtitleStyleInterface = SubtitleStyleInterface(self)
         self.batchProcessInterface = BatchProcessInterface(self)
         self.llmLogsInterface = LLMLogsInterface(self)
+
+        # Dedicated postprocess settings are reached from Settings/Postprocess.
+        # They intentionally have no separate main-navigation item.
+        self.stackedWidget.addWidget(self.postprocessSettingInterface)
 
         # 初始化版本检查器
         self.versionChecker = VersionChecker()

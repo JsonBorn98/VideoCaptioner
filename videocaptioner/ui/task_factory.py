@@ -1,5 +1,6 @@
 import datetime
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -9,6 +10,8 @@ from videocaptioner.core.entities import (
     FullProcessTask,
     LLMServiceEnum,
     SubtitleConfig,
+    SubtitleExportPolicy,
+    SubtitleLayoutEnum,
     SubtitleRenderModeEnum,
     SubtitleTask,
     SynthesisConfig,
@@ -18,6 +21,10 @@ from videocaptioner.core.entities import (
     TranscribeTask,
     TranscriptAndSubtitleTask,
 )
+from videocaptioner.core.postprocess.config import PostprocessConfig
+from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
+from videocaptioner.core.postprocess.profiles import PostprocessProfileStore
+from videocaptioner.core.subtitle import export_subtitle_atomic, save_canonical_srt
 from videocaptioner.ui.common.config import cfg
 
 
@@ -36,9 +43,7 @@ class TaskFactory:
         from videocaptioner.core.subtitle.style_manager import StyleMode, load_style
 
         expected_mode = (
-            StyleMode.ROUNDED
-            if render_mode == SubtitleRenderModeEnum.ROUNDED_BG
-            else StyleMode.ASS
+            StyleMode.ROUNDED if render_mode == SubtitleRenderModeEnum.ROUNDED_BG else StyleMode.ASS
         )
         style = load_style(style_name, mode=expected_mode.value)
         if style is not None and style.mode == expected_mode:
@@ -62,7 +67,9 @@ class TaskFactory:
         return ""
 
     @staticmethod
-    def get_style_reference(style_name: str, render_mode: SubtitleRenderModeEnum) -> tuple[int, int]:
+    def get_style_reference(
+        style_name: str, render_mode: SubtitleRenderModeEnum
+    ) -> tuple[int, int]:
         """获取当前样式的设计基准分辨率。"""
         style = TaskFactory._load_style_for_render_mode(style_name, render_mode)
         if style is not None:
@@ -95,6 +102,50 @@ class TaskFactory:
         }
 
     @staticmethod
+    def create_subtitle_export_policy() -> SubtitleExportPolicy:
+        """Freeze the one workflow-wide delivery export choice."""
+        reference_width, reference_height = TaskFactory.get_style_reference(
+            cfg.subtitle_style_name.value,
+            SubtitleRenderModeEnum.ASS_STYLE,
+        )
+        return SubtitleExportPolicy(
+            enabled=cfg.get(cfg.workflow_auto_export),
+            format=cfg.get(cfg.workflow_export_format),
+            layout=cfg.subtitle_layout.value,
+            ass_style=TaskFactory.get_ass_style(cfg.subtitle_style_name.value),
+            reference_width=reference_width,
+            reference_height=reference_height,
+        )
+
+    @staticmethod
+    def save_stage_subtitle(
+        data,
+        output_path: str,
+        *,
+        layout: SubtitleLayoutEnum,
+        export_policy: Optional[SubtitleExportPolicy],
+    ) -> tuple[str, str | None, str | None]:
+        """Save mandatory SRT, then best-effort workflow delivery export."""
+        canonical = save_canonical_srt(data, output_path, layout=layout)
+        if export_policy is None or not export_policy.enabled:
+            return str(canonical), None, None
+        try:
+            exported = export_subtitle_atomic(
+                data,
+                canonical.with_suffix(f".{export_policy.format}"),
+                export_format=export_policy.format,
+                layout=export_policy.layout,
+                ass_style=export_policy.ass_style,
+                reference_resolution=(
+                    export_policy.reference_width,
+                    export_policy.reference_height,
+                ),
+            )
+        except Exception as exc:
+            return str(canonical), None, str(exc)
+        return str(canonical), str(exported), None
+
+    @staticmethod
     def create_transcribe_task(
         file_path: str = "",
         need_next_task: bool = False,
@@ -114,16 +165,11 @@ class TaskFactory:
 
         if need_next_task:
             need_word_time_stamp = cfg.need_split.value or transcribe_model in timestamp_models
-            output_path = str(
-                Path(cfg.work_dir.value)
-                / file_name
-                / "subtitle"
-                / f"【原始字幕】{file_name}-{cfg.transcribe_model.value.value}-{cfg.transcribe_language.value.value}.srt"
-            )
+            output_dir = Path(cfg.work_dir.value) / file_name / "subtitle"
         else:
             need_word_time_stamp = transcribe_model in timestamp_models
             output_dir = Path(file_path).parent if has_local_file else Path(cfg.work_dir.value)
-            output_path = str(output_dir / f"{file_name}.srt")
+        output_path = str(output_dir / f"【转录字幕】{file_name}.srt")
 
         config = TranscribeConfig(
             transcribe_model=cfg.transcribe_model.value,
@@ -172,6 +218,8 @@ class TaskFactory:
             output_path=output_path,
             transcribe_config=config,
             need_next_task=need_next_task,
+            workflow_base_name=file_name,
+            export_policy=TaskFactory.create_subtitle_export_policy(),
         )
         if task_id:
             task.task_id = task_id
@@ -183,24 +231,22 @@ class TaskFactory:
         video_path: Optional[str] = None,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        *,
+        workflow_base_name: Optional[str] = None,
+        input_data=None,
+        export_policy: Optional[SubtitleExportPolicy] = None,
     ) -> SubtitleTask:
         """创建字幕任务"""
-        output_name = (
-            Path(file_path).stem.replace("【原始字幕】", "").replace("【下载字幕】", "")
-        )
-        # 只在需要翻译时添加翻译服务后缀
-        suffix = (
+        output_name = Path(file_path).stem
+        for prefix in ("【原始字幕】", "【下载字幕】", "【初版字幕】", "【后处理字幕】"):
+            output_name = output_name.removeprefix(prefix)
+        output_name = workflow_base_name or output_name
+        translator_suffix = (
             f"-{cfg.translator_service.value.value}" if cfg.need_translate.value else ""
         )
-
-        if need_next_task:
-            output_path = str(
-                Path(file_path).parent / f"【样式字幕】{output_name}{suffix}.ass"
-            )
-        else:
-            output_path = str(
-                Path(file_path).parent / f"【字幕】{output_name}{suffix}.srt"
-            )
+        if translator_suffix and not output_name.endswith(translator_suffix):
+            output_name += translator_suffix
+        output_path = str(Path(file_path).parent / f"【初版字幕】{output_name}.srt")
 
         # 根据当前选择的LLM服务获取对应的配置
         current_service = cfg.llm_service.value
@@ -269,17 +315,6 @@ class TaskFactory:
             target_language=cfg.target_language.value,
             # 字幕提示
             custom_prompt_text=cfg.custom_prompt_text.value,
-            # 规则型后处理 / 审计
-            remove_placeholders=cfg.need_remove_placeholders.value,
-            normalize_quotes=cfg.need_normalize_quotes.value,
-            trim_trailing_punct=cfg.trim_trailing_punct.value,
-            fix_gaps=cfg.need_fix_gaps.value,
-            max_gap_ms=cfg.max_gap_ms.value,
-            audit_reading_speed=cfg.need_audit_speed.value,
-            max_cps_cjk=float(cfg.max_cps_cjk.value),
-            max_cps_latin=float(cfg.max_cps_latin.value),
-            compress_fast_subtitles=cfg.need_compress_fast.value,
-            qa_report=cfg.need_qa_report.value,
         )
 
         task = SubtitleTask(
@@ -289,6 +324,86 @@ class TaskFactory:
             output_path=output_path,
             subtitle_config=config,
             need_next_task=need_next_task,
+            input_data=input_data,
+            workflow_base_name=output_name,
+            export_policy=export_policy or TaskFactory.create_subtitle_export_policy(),
+        )
+        if task_id:
+            task.task_id = task_id
+        return task
+
+    @staticmethod
+    def create_postprocess_task(
+        subtitle_path: str,
+        video_path: Optional[str] = None,
+        *,
+        need_next_task: bool = False,
+        enabled: Optional[bool] = None,
+        layout_mode: PostprocessLayoutMode | str | None = None,
+        profile_id: Optional[str] = None,
+        config_snapshot: Optional[PostprocessConfig] = None,
+        task_id: Optional[str] = None,
+        workflow_base_name: Optional[str] = None,
+        input_data=None,
+        export_policy: Optional[SubtitleExportPolicy] = None,
+    ) -> PostprocessTask:
+        """Create an immutable-input subtitle postprocess task."""
+        profile_item = getattr(cfg, "postprocess_profile", cfg.speed_profile)
+        resolved_profile_id = str(profile_id or profile_item.value or "balanced")
+        profile_store = PostprocessProfileStore()
+        config = config_snapshot or profile_store.resolve_config(resolved_profile_id)
+
+        model_items = {
+            LLMServiceEnum.OPENAI: cfg.openai_model,
+            LLMServiceEnum.SILICON_CLOUD: cfg.silicon_cloud_model,
+            LLMServiceEnum.DEEPSEEK: cfg.deepseek_model,
+            LLMServiceEnum.OLLAMA: cfg.ollama_model,
+            LLMServiceEnum.LM_STUDIO: cfg.lm_studio_model,
+            LLMServiceEnum.GEMINI: cfg.gemini_model,
+            LLMServiceEnum.CHATGLM: cfg.chatglm_model,
+        }
+        model_item = model_items.get(cfg.llm_service.value)
+        if config.llm_model is None:
+            config = replace(config, llm_model=model_item.value if model_item else None)
+
+        source = Path(subtitle_path)
+        clean_name = source.name
+        for prefix in ("【初版字幕】", "【后处理字幕】", "【字幕】", "【样式字幕】"):
+            clean_name = clean_name.removeprefix(prefix)
+        resolved_base_name = workflow_base_name or _safe_file_stem_from_source(clean_name)
+        output_path = str(source.with_name(f"【后处理字幕】{resolved_base_name}.srt"))
+        enabled_item = getattr(cfg, "postprocess_enabled", None)
+        resolved_enabled = (
+            enabled
+            if enabled is not None
+            else enabled_item.value
+            if enabled_item is not None
+            else True
+        )
+        if layout_mode is None:
+            if need_next_task:
+                layout_mode = {
+                    SubtitleLayoutEnum.ORIGINAL_ON_TOP: PostprocessLayoutMode.ORIGINAL_ON_TOP,
+                    SubtitleLayoutEnum.TRANSLATE_ON_TOP: PostprocessLayoutMode.TRANSLATE_ON_TOP,
+                    SubtitleLayoutEnum.ONLY_ORIGINAL: PostprocessLayoutMode.ORIGINAL_ONLY,
+                    SubtitleLayoutEnum.ONLY_TRANSLATE: PostprocessLayoutMode.TRANSLATE_ONLY,
+                }[cfg.subtitle_layout.value]
+            else:
+                layout_mode = PostprocessLayoutMode.AUTO
+
+        task = PostprocessTask(
+            source_subtitle_path=subtitle_path,
+            initial_subtitle_path=subtitle_path,
+            postprocessed_subtitle_path=output_path,
+            media_path=video_path,
+            profile_id=resolved_profile_id,
+            config_snapshot=config,
+            layout_mode=layout_mode,
+            enabled=resolved_enabled,
+            need_next_task=need_next_task,
+            input_data=input_data,
+            workflow_base_name=resolved_base_name,
+            export_policy=export_policy or TaskFactory.create_subtitle_export_policy(),
         )
         if task_id:
             task.task_id = task_id
@@ -300,11 +415,11 @@ class TaskFactory:
         subtitle_path: str,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        *,
+        input_data=None,
     ) -> SynthesisTask:
         """创建视频合成任务"""
-        output_path = str(
-            Path(video_path).parent / f"【卡卡】{Path(video_path).stem}.mp4"
-        )
+        output_path = str(Path(video_path).parent / f"【卡卡】{Path(video_path).stem}.mp4")
 
         # 只有启用样式时才传入样式配置
         use_style = cfg.use_subtitle_style.value
@@ -342,6 +457,7 @@ class TaskFactory:
             output_path=output_path,
             synthesis_config=config,
             need_next_task=need_next_task,
+            input_data=input_data,
         )
         if task_id:
             task.task_id = task_id
@@ -356,14 +472,14 @@ class TaskFactory:
     ) -> TranscriptAndSubtitleTask:
         """创建转录和字幕任务"""
         if output_path is None:
-            output_path = str(
-                Path(file_path).parent / f"{Path(file_path).stem}_processed.srt"
-            )
+            output_path = str(Path(file_path).parent / f"{Path(file_path).stem}_processed.srt")
 
         return TranscriptAndSubtitleTask(
             queued_at=datetime.datetime.now(),
             file_path=file_path,
             output_path=output_path,
+            workflow_base_name=_safe_file_stem_from_source(file_path),
+            export_policy=TaskFactory.create_subtitle_export_policy(),
         )
 
     @staticmethod
@@ -377,12 +493,29 @@ class TaskFactory:
         """创建完整处理任务（转录+字幕+合成）"""
         if output_path is None:
             output_path = str(
-                Path(file_path).parent
-                / f"{Path(file_path).stem}_final{Path(file_path).suffix}"
+                Path(file_path).parent / f"{Path(file_path).stem}_final{Path(file_path).suffix}"
             )
 
-        return FullProcessTask(
+        workflow_base_name = _safe_file_stem_from_source(file_path)
+        export_policy = TaskFactory.create_subtitle_export_policy()
+        postprocess_task = TaskFactory.create_postprocess_task(
+            file_path,
+            file_path,
+            need_next_task=True,
+            workflow_base_name=workflow_base_name,
+            export_policy=export_policy,
+        )
+        task = FullProcessTask(
             queued_at=datetime.datetime.now(),
             file_path=file_path,
             output_path=output_path,
+            workflow_base_name=workflow_base_name,
+            export_policy=export_policy,
+            transcribe_config=transcribe_config,
+            subtitle_config=subtitle_config,
+            postprocess_enabled=postprocess_task.enabled,
+            postprocess_task=postprocess_task,
+            synthesis_config=synthesis_config,
         )
+        postprocess_task.task_id = task.task_id
+        return task

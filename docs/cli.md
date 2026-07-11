@@ -25,7 +25,10 @@ videocaptioner transcribe video.mp4 --asr bijian
 # 翻译字幕（免费必应翻译）
 videocaptioner subtitle input.srt --translator bing --target-language en
 
-# 全流程：转录 → 优化 → 翻译 → 合成
+# 独立处理已经成型的字幕
+videocaptioner postprocess input.srt --profile balanced
+
+# 全流程：转录 → 优化 → 翻译 → 后处理 → 合成
 videocaptioner process video.mp4 --asr bijian --translator bing --target-language ja
 
 # 给视频加字幕
@@ -55,7 +58,7 @@ videocaptioner transcribe <文件> [选项]
 |------|------|
 | `--asr` | ASR 引擎：`bijian`(默认,免费) `jianying`(免费) `faster-whisper` `whisper-api` `whisper-cpp` `mimo-asr` `qwen-local`。bijian/jianying 仅支持中英文，其他语言可用 whisper-api/faster-whisper/MiMo/Qwen |
 | `--language CODE` | 源语言 ISO 639-1 代码，如 `zh` `en` `ja`，或 `auto`（默认） |
-| `--word-timestamps` | 输出词级时间戳（配合字幕断句使用） |
+| `--word-timestamps` | 输出词级时间戳（完整流程会先做内部确定性聚合） |
 | `--audio-loudnorm` | 抽取视频音频时启用 EBU R128 loudnorm，适合音量忽大忽小的素材 |
 | `--whisper-api-key` | Whisper API 密钥（仅 `--asr whisper-api`） |
 | `--whisper-api-base` | Whisper API 地址 |
@@ -75,13 +78,19 @@ videocaptioner transcribe <文件> [选项]
 
 ### `subtitle` — 字幕优化与翻译
 
-处理字幕文件，支持三个步骤：
+处理已有字幕文件，支持以下步骤：
 
-1. **断句** — 按语义重新分割字幕（LLM）
-2. **优化** — 修正 ASR 错误、标点、格式（LLM）
+1. **拆分与断句** — 按现有字数上限和语义边界重组字幕
+2. **优化** — 修正 ASR 错误和翻译前文本（LLM）
 3. **翻译** — 翻译到其他语言（LLM / 必应 / 谷歌）
 
-默认开启优化和断句，翻译默认关闭。指定 `--translator` 或 `--target-language` 自动开启翻译。
+该命令只生成可直接使用的初版字幕，不执行标点清理、阅读速度优化、间隙修复或媒体对齐。
+普通 cue 级字幕继续沿用原有估算字词时间与重新断句逻辑。默认开启拆分和文本优化，翻译默认
+关闭；指定 `--translator` 或 `--target-language` 自动开启翻译。
+
+字幕处理阶段的主结果固定保存为 `【初版字幕】<名称>.srt`。即使输入是 ASS/VTT，
+或 `-o` 使用了其他扩展名，阶段交付文件仍会规范为 SRT；输入 ASS 的样式不会继承。
+其他观看格式应从完成的字幕工作稿另行导出。
 
 ```bash
 videocaptioner subtitle <字幕文件> [选项]
@@ -93,33 +102,50 @@ videocaptioner subtitle <字幕文件> [选项]
 | `--target-language CODE` | 目标语言 BCP 47 代码：`zh-Hans` `en` `ja` `ko` `fr` `de` 等 |
 | `--no-optimize` | 跳过优化 |
 | `--no-translate` | 跳过翻译 |
-| `--no-split` | 跳过断句 |
+| `--no-split` | 关闭 LLM 智能断句，使用本地快速合并 |
+| `--max-cjk N` | CJK 单段最大字符数 |
+| `--max-english N` | 英文单段最大单词数 |
 | `--reflect` | 反思式翻译（仅 LLM，质量更高但更慢） |
 | `--layout` | 双语布局：`target-above` `source-above` `target-only` `source-only` |
 | `--prompt TEXT` | 自定义提示词（辅助 LLM 优化/翻译） |
 | `--api-key` | LLM API 密钥（或设置 `OPENAI_API_KEY` 环境变量） |
 | `--api-base` | LLM API 地址（或设置 `OPENAI_BASE_URL` 环境变量） |
 | `--model` | LLM 模型名（如 gpt-4o-mini） |
+| `-o PATH` | 规范 SRT 输出文件或目录；其他扩展名会替换为 `.srt` |
 
-#### 字幕后处理选项（可选，默认全部关闭）
+### `postprocess` — 独立字幕后处理
 
-规则型清理与质量审计，`subtitle` 与 `process` 子命令均可用；不指定时输出与旧版逐字节一致。
+接收完整的单语或双语成型字幕，执行标点、阅读速度、结构、时间轴、语义修复和质量验收。
+输入文件永不覆盖，默认生成 `【后处理字幕】<名称>.srt`。输入 SRT/VTT/ASS 都会先
+规范化为纯文本字幕数据；ASS 样式、定位和特效不会继承。`-o` 使用非 SRT 扩展名时，
+扩展名会被替换为 `.srt`。
+
+```bash
+videocaptioner postprocess <字幕文件> [选项]
+```
 
 | 选项 | 说明 |
 |------|------|
+| `--layout` | 输入结构：`auto`、`target-above`、`source-above`、`target-only`、`source-only` |
 | `--remove-placeholders` | 删除 `[Music]`/`[音乐]`/`♪` 等占位符行 |
 | `--normalize-quotes` | 中文引号统一为 `「」`/`『』`，并对中文行清理扩展弱尾标点 |
 | `--keep-trailing-punct` | 保留行尾弱标点（关闭默认的尾标点清理） |
-| `--fix-gaps` | 闭合相邻字幕的微小间隙以减少闪烁 |
-| `--max-gap-ms N` | `--fix-gaps` 闭合的最大间隙（默认 800；音乐类建议 500） |
-| `--gap-mode` | 间隙闭合模式：`extend`(默认) 或 `midpoint` |
-| `--audit-speed` | 审计阅读速度（CPS）与时长异常（只报告，不修改） |
-| `--max-cps-cjk N` | 中文每秒字符硬限（默认 11） |
-| `--max-cps-latin N` | 外文每秒字符硬限（默认 20） |
-| `--compress-fast` | 对超速中文行做局部 LLM 压缩重译（需 LLM） |
-| `--qa-report` | 在输出旁生成 Markdown 质量报告（隐含开启 `--audit-speed`） |
+| `--speed-optimize` / `--no-speed-optimize` | 显式开启或关闭统一速度优化 |
+| `--mode apply\|analyze` | 应用修改，或只分析并生成结果 |
+| `--profile ID` | 使用 `loose`/`balanced`/`smooth` 模板或自定义后处理方案 |
+| `--speed-profile-file PATH` | 直接使用导出的版本化方案 JSON，不写入应用方案库 |
+| `--primary-side translate\|original\|layout` | 选择驱动阅读体验的显示侧 |
+| `--media PATH` | 关联可选视频或音频 |
+| `--precise-timing` | 对关联媒体运行 ForcedAligner；失败窗口局部降级 |
+| `--speed-save-timing-sidecar` | 保存可复用的 `.vctiming.json` 时间证据 |
+| `--speed-reference-audit` | 审计参考显示侧，不改写参考文本 |
+| `--speed-semantic-repair` / `--no-speed-semantic-repair` | 开关受验证约束的 LLM 局部修复 |
+| `--speed-semantic-window N` | 语义修复上下文大小，范围 1-15，默认 5 |
+| `--no-speed-llm-review` | 不把确定性校验无法裁决的候选交给 LLM 独立复核 |
+| `--qa-report` | 在输出旁生成统一 Markdown 质量报告 |
+| `-o PATH` | 规范 SRT 输出路径；其他扩展名会替换为 `.srt` |
 
-
+### `synthesize` — 字幕视频合成
 
 将字幕烧录到视频中，支持美观的样式化字幕。
 
@@ -219,7 +245,9 @@ videocaptioner dub input.srt --video video.mp4 \
 
 ### `process` — 全流程处理
 
-一键完成：转录 → 断句 → 优化 → 翻译 → 合成。支持上述所有命令的参数。
+一键完成：转录 → 断句 → 优化 → 翻译 → 字幕后处理 → 合成。后处理默认开启，每个实际
+字幕阶段固定保存规范 SRT：`【转录字幕】`、`【初版字幕】` 和 `【后处理字幕】`。
+阶段之间只使用 SRT 语义的数据，不把 ASS 作为模块交付；后处理失败自动回退初版字幕。
 
 ```bash
 videocaptioner process <音视频文件> [选项]
@@ -230,8 +258,12 @@ videocaptioner process <音视频文件> [选项]
 | 选项 | 说明 |
 |------|------|
 | `--no-synthesize` | 跳过视频合成（只输出字幕） |
+| `--no-postprocess` | 跳过字幕后处理，直接使用初版字幕 |
 | `--dub` | 在转录/处理字幕后生成配音音轨或配音视频 |
 | `--dub-only` | 只输出配音结果，跳过字幕烧录/嵌入 |
+
+`process` 的 `-o` 只控制最终视频、音频或输出目录，不改变各字幕阶段固定的 SRT 格式。
+CLI 完整流程本次不增加阶段自动导出格式矩阵。
 
 示例：
 
@@ -366,7 +398,8 @@ asr = "bijian"
 
 [subtitle]
 optimize = true
-split = true
+# split 仅供完整 ASR 流程对真实词级时间戳启用语义分组；直接字幕任务忽略该项
+split = false
 
 [translate]
 service = "bing"

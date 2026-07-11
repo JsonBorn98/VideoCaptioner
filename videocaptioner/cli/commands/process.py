@@ -1,4 +1,4 @@
-"""process command — full pipeline: transcribe → optimize → translate → synthesize/dub."""
+"""process command — transcribe → optimize/translate → postprocess → synthesize/dub."""
 
 from argparse import Namespace
 from pathlib import Path
@@ -6,21 +6,6 @@ from pathlib import Path
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
 from videocaptioner.cli.config import get
-
-
-def _postprocess_requested(config: dict) -> bool:
-    """Return True when process should run subtitle stage for explicit postprocess work."""
-    return any(
-        bool(get(config, f"subtitle.{key}", False))
-        for key in (
-            "remove_placeholders",
-            "normalize_quotes",
-            "fix_gaps",
-            "audit_reading_speed",
-            "compress_fast_subtitles",
-            "qa_report",
-        )
-    )
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -32,6 +17,9 @@ def run(args: Namespace, config: dict) -> int:
     no_translate = not get(config, "subtitle.translate", False)
     no_split = not get(config, "subtitle.split", True)
     no_synthesize = getattr(args, "no_synthesize", False)
+    postprocess_enabled = get(config, "postprocess.enabled", True) and not getattr(
+        args, "no_postprocess", False
+    )
     do_dub = getattr(args, "dub", False) or getattr(args, "dub_only", False)
     if getattr(args, "dub_only", False):
         no_synthesize = True
@@ -40,7 +28,7 @@ def run(args: Namespace, config: dict) -> int:
     if getattr(args, "translator", None) or getattr(args, "target_language", None):
         no_translate = False
 
-    run_subtitle_stage = not no_optimize or not no_translate or _postprocess_requested(config)
+    run_subtitle_stage = not no_optimize or not no_translate or not no_split
 
     # URL input not yet supported
     is_url = input_path.startswith("http://") or input_path.startswith("https://")
@@ -66,6 +54,7 @@ def run(args: Namespace, config: dict) -> int:
 
     # Pre-flight validation
     from videocaptioner.cli.validators import validate_dubbing, validate_process
+
     if not validate_process(config, no_synthesize=no_synthesize):
         return EXIT.USAGE_ERROR
     if do_dub and not validate_dubbing(
@@ -83,76 +72,155 @@ def run(args: Namespace, config: dict) -> int:
     else:
         out_dir = path.parent
 
-    total_steps = 1 + (1 if run_subtitle_stage else 0) + (0 if no_synthesize else 1) + (1 if do_dub else 0)
+    total_steps = 1 + sum(
+        (
+            1 if run_subtitle_stage else 0,
+            1 if postprocess_enabled else 0,
+            0 if no_synthesize else 1,
+            1 if do_dub else 0,
+        )
+    )
     current_step = 1
-    final_output_path = _resolve_final_output_path(out_arg, out_dir, path, do_dub, no_synthesize, is_audio_input)
+    final_output_path = _resolve_final_output_path(
+        out_arg, out_dir, path, do_dub, no_synthesize, is_audio_input
+    )
     dubbed_video_path: str | None = None
 
     # Step 1: Transcribe
     if not quiet:
         output.info(f"Step {current_step}/{total_steps}: Transcribing...")
-    subtitle_path = str(out_dir / f"{path.stem}.srt")
+    transcribed_path = str(out_dir / f"【转录字幕】{path.stem}.srt")
 
     # Word timestamps are useful for semantic splitting/optimization, but bad for
     # direct dubbing because they create word-level TTS fragments.
     need_word_ts = not (no_optimize and no_split)
     tr_args = Namespace(
-        input=str(path), output=subtitle_path, format="srt", word_timestamps=need_word_ts,
-        verbose=verbose, quiet=quiet, config=getattr(args, "config", None),
-        asr=getattr(args, "asr", None), language=getattr(args, "language", None),
-        fw_model=None, fw_device=None, fw_vad_method=None, fw_vad_threshold=None,
-        fw_voice_extraction=False, fw_prompt=None,
+        input=str(path),
+        output=transcribed_path,
+        format="srt",
+        word_timestamps=need_word_ts,
+        verbose=verbose,
+        quiet=quiet,
+        config=getattr(args, "config", None),
+        asr=getattr(args, "asr", None),
+        language=getattr(args, "language", None),
+        fw_model=None,
+        fw_device=None,
+        fw_vad_method=None,
+        fw_vad_threshold=None,
+        fw_voice_extraction=False,
+        fw_prompt=None,
         whisper_api_key=getattr(args, "whisper_api_key", None),
         whisper_api_base=getattr(args, "whisper_api_base", None),
-        whisper_model=None, whisper_prompt=None,
+        whisper_model=None,
+        whisper_prompt=None,
     )
     from videocaptioner.cli.commands.transcribe import run as transcribe_run
+
     ret = transcribe_run(tr_args, config)
     if ret != 0:
         return ret
     current_step += 1
+    active_data = getattr(tr_args, "result_data", None)
 
     # Step 2: Subtitle (optimize + translate)
     if run_subtitle_stage:
         if not quiet:
             output.info(f"Step {current_step}/{total_steps}: Processing subtitles...")
 
-        processed_path = str(out_dir / f"{path.stem}_processed.srt")
+        initial_path = str(out_dir / f"【初版字幕】{path.stem}.srt")
         sub_args = Namespace(
-            input=subtitle_path, output=processed_path,
-            format=get(config, "output.format", "srt"),
-            no_optimize=no_optimize, no_translate=no_translate, no_split=no_split,
-            verbose=verbose, quiet=quiet, config=getattr(args, "config", None),
+            input=transcribed_path,
+            output=initial_path,
+            from_process=True,
+            # Kept for direct command compatibility; subtitle.run always persists SRT.
+            format="srt",
+            no_optimize=no_optimize,
+            no_translate=no_translate,
+            no_split=no_split,
+            verbose=verbose,
+            quiet=quiet,
+            config=getattr(args, "config", None),
             api_key=getattr(args, "api_key", None),
             api_base=getattr(args, "api_base", None),
             model=getattr(args, "model", None),
             translator=getattr(args, "translator", None),
             target_language=getattr(args, "target_language", None),
             reflect=getattr(args, "reflect", False),
-            max_cjk=None, max_english=None,
+            max_cjk=None,
+            max_english=None,
             prompt=getattr(args, "prompt", None),
             prompt_file=getattr(args, "prompt_file", None),
             thread_num=getattr(args, "thread_num", None),
             batch_size=getattr(args, "batch_size", None),
             layout=getattr(args, "layout", None),
+            input_data=active_data,
         )
         from videocaptioner.cli.commands.subtitle import run as subtitle_run
+
         ret = subtitle_run(sub_args, config)
         if ret != 0:
             return ret
-        subtitle_path = processed_path
+        subtitle_path = initial_path
+        active_data = getattr(sub_args, "result_data", active_data)
+        current_step += 1
+    else:
+        subtitle_path = transcribed_path
+        if not quiet:
+            output.info("Subtitle optimization/translation skipped")
+
+    # Dedicated subtitle postprocessing. A module-level failure never destroys the
+    # initial subtitle and does not abort an otherwise valid complete workflow.
+    if postprocess_enabled:
+        if not quiet:
+            output.info(f"Step {current_step}/{total_steps}: Postprocessing subtitles...")
+        postprocessed_path = str(out_dir / f"【后处理字幕】{path.stem}.srt")
+        post_args = Namespace(
+            input=subtitle_path,
+            output=postprocessed_path,
+            layout=getattr(args, "layout", None) or get(
+                config, "synthesize.layout", "target-above"
+            ),
+            profile=getattr(args, "speed_profile", None),
+            speed_profile=getattr(args, "speed_profile", None),
+            mode=getattr(args, "speed_mode", None),
+            speed_mode=getattr(args, "speed_mode", None),
+            media=getattr(args, "speed_media", None) or str(path),
+            speed_media=getattr(args, "speed_media", None) or str(path),
+            precise_timing=getattr(args, "speed_precise_timing", False),
+            speed_precise_timing=getattr(args, "speed_precise_timing", False),
+            api_key=getattr(args, "api_key", None),
+            api_base=getattr(args, "api_base", None),
+            model=getattr(args, "model", None),
+            verbose=verbose,
+            quiet=quiet,
+            config=getattr(args, "config", None),
+            input_data=active_data,
+        )
+        from videocaptioner.cli.commands.postprocess import run as postprocess_run
+
+        ret = postprocess_run(post_args, config)
+        if ret == EXIT.SUCCESS:
+            subtitle_path = postprocessed_path
+            active_data = getattr(post_args, "result_data", active_data)
+        else:
+            output.warn(
+                "Subtitle postprocessing failed; continuing with the preserved initial subtitle"
+            )
         current_step += 1
     elif not quiet:
-        output.info("Subtitle processing skipped (optimization, translation, and postprocess disabled)")
+        output.info("Subtitle postprocessing skipped; using initial subtitle")
 
-    # Step 3: Dub
+    # Dub
     if do_dub:
         if not quiet:
             output.info(f"Step {current_step}/{total_steps}: Dubbing...")
 
         is_audio = path.suffix.lstrip(".").lower() in audio_extensions
         if not no_translate:
-            layout_for_dub = getattr(args, "layout", None) or get(config, "synthesize.layout", "target-above")
+            layout_for_dub = getattr(args, "layout", None) or get(
+                config, "synthesize.layout", "target-above"
+            )
             text_track = "second" if layout_for_dub == "source-above" else "first"
         else:
             text_track = "first"
@@ -203,28 +271,34 @@ def run(args: Namespace, config: dict) -> int:
             config=getattr(args, "config", None),
         )
         from videocaptioner.cli.commands.dub import run as dub_run
+
         ret = dub_run(dub_args, config)
         if ret != 0:
             return ret
         dubbed_video_path = dub_video_path
         current_step += 1
 
-    # Step 4: Synthesize
+    # Synthesize
     if not no_synthesize:
         if not quiet:
             output.info(f"Step {current_step}/{total_steps}: Synthesizing video...")
 
         synth_video = dubbed_video_path or str(path)
         syn_args = Namespace(
-            video=synth_video, subtitle=subtitle_path,
+            video=synth_video,
+            subtitle=subtitle_path,
             output=final_output_path,
             subtitle_mode=getattr(args, "subtitle_mode", None),
             quality=getattr(args, "quality", None),
-            style=None, layout=getattr(args, "layout", None),
-            format=None, verbose=verbose, quiet=quiet,
+            style=None,
+            layout=getattr(args, "layout", None),
+            format=None,
+            verbose=verbose,
+            quiet=quiet,
             config=getattr(args, "config", None),
         )
         from videocaptioner.cli.commands.synthesize import run as synthesize_run
+
         ret = synthesize_run(syn_args, config)
         if ret != 0:
             return ret

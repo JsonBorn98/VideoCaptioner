@@ -1,7 +1,7 @@
 import atexit
 import difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Union
+from typing import Callable, List, Union
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.split.split_by_llm import split_by_llm
@@ -126,6 +126,7 @@ class SubtitleSplitter:
         max_word_count_cjk: int = MAX_WORD_COUNT_CJK,
         max_word_count_english: int = MAX_WORD_COUNT_ENGLISH,
         use_llm: bool = True,
+        progress_callback: Callable[[int, int], None] | None = None,
     ):
         """初始化分割器
 
@@ -141,6 +142,7 @@ class SubtitleSplitter:
         self.max_word_count_cjk = max_word_count_cjk
         self.max_word_count_english = max_word_count_english
         self.use_llm = use_llm
+        self.progress_callback = progress_callback
         self.is_running = True
         self._init_thread_pool()
 
@@ -281,24 +283,33 @@ class SubtitleSplitter:
 
     def _process_segments(self, asr_data_list: List[ASRData]) -> List[List[ASRDataSeg]]:
         """并发处理AllSegments"""
-        futures = []
-        for asr_data in asr_data_list:
+        future_indices = {}
+        for index, asr_data in enumerate(asr_data_list):
             if not self.executor:
                 raise ValueError("Thread pool not initialized")
             future = self.executor.submit(self._process_single_segment, asr_data)
-            futures.append(future)
+            future_indices[future] = index
 
-        processed_segments = []
-        for future in as_completed(futures):
+        processed_segments: List[List[ASRDataSeg] | None] = [None] * len(asr_data_list)
+        completed = 0
+        for future in as_completed(future_indices):
             if not self.is_running:
                 break
+            index = future_indices[future]
             try:
                 result = future.result()
-                processed_segments.append(result)
             except Exception as e:
-                logger.error(f"Segment processing failed:{str(e)}")
+                logger.error("Segment %s processing failed, falling back to rules: %s", index, e)
+                result = self._process_by_rules(asr_data_list[index].segments)
+            processed_segments[index] = result
+            completed += 1
+            if self.progress_callback:
+                self.progress_callback(completed, len(asr_data_list))
 
-        return processed_segments
+        for index, result in enumerate(processed_segments):
+            if result is None:
+                processed_segments[index] = self._process_by_rules(asr_data_list[index].segments)
+        return [result for result in processed_segments if result is not None]
 
     def _process_single_segment(self, asr_data_part: ASRData) -> List[ASRDataSeg]:
         """处理单个Segments(带重试和降级)"""

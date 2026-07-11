@@ -13,6 +13,7 @@ logger = setup_logger("split_by_llm")
 MAX_STEPS = 2  # Agent loop max retry count
 LLM_SPLIT_MAX_ATTEMPTS = 2
 LLM_SPLIT_RETRY_BASE_DELAY_SECONDS = 0.5
+LLM_SPLIT_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def split_by_llm(
@@ -85,6 +86,7 @@ def _split_with_agent_loop(
             messages=messages,
             model=model,
             temperature=0.1,
+            timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
         )
 
         result_text = response.choices[0].message.content

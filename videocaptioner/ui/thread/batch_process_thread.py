@@ -1,6 +1,7 @@
 import queue
 import time
 from functools import partial
+from pathlib import Path
 from typing import Dict, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -10,8 +11,11 @@ from videocaptioner.core.entities import (
     BatchTaskType,
     TranscribeTask,
 )
+from videocaptioner.core.postprocess import PostprocessProfileStore
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.task_factory import TaskFactory
+from videocaptioner.ui.thread.postprocess_thread import PostprocessThread
 from videocaptioner.ui.thread.subtitle_thread import SubtitleThread
 from videocaptioner.ui.thread.transcript_thread import TranscriptThread
 from videocaptioner.ui.thread.video_synthesis_thread import VideoSynthesisThread
@@ -20,13 +24,35 @@ logger = setup_logger("batch_process_thread")
 
 
 class BatchTask:
-    def __init__(self, file_path: str, task_type: BatchTaskType):
+    def __init__(
+        self,
+        file_path: str,
+        task_type: BatchTaskType,
+        *,
+        postprocess_enabled: bool | None = None,
+    ):
         self.file_path = file_path
         self.task_type = task_type
         self.status = BatchTaskStatus.WAITING
         self.progress = 0
         self.error_message = ""
         self.current_thread: Optional[QThread] = None
+        self.export_policy = TaskFactory.create_subtitle_export_policy()
+        self.workflow_base_name = Path(file_path).stem
+        for prefix in ("【转录字幕】", "【初版字幕】", "【后处理字幕】"):
+            self.workflow_base_name = self.workflow_base_name.removeprefix(prefix)
+        enabled = cfg.get(cfg.postprocess_enabled) if postprocess_enabled is None else postprocess_enabled
+        profile_id = cfg.get(cfg.postprocess_profile)
+        self.postprocess_task = TaskFactory.create_postprocess_task(
+            file_path,
+            file_path if task_type == BatchTaskType.FULL_PROCESS else None,
+            need_next_task=task_type == BatchTaskType.FULL_PROCESS,
+            enabled=enabled and task_type != BatchTaskType.TRANSCRIBE,
+            profile_id=profile_id,
+            config_snapshot=PostprocessProfileStore().resolve_config(profile_id),
+            workflow_base_name=self.workflow_base_name,
+            export_policy=self.export_policy,
+        )
 
 
 class BatchProcessThread(QThread):
@@ -112,29 +138,37 @@ class BatchProcessThread(QThread):
 
     def _handle_transcribe_task(self, batch_task: BatchTask):
         # self.max_concurrent_tasks = 3
-        task = self.factory.create_transcribe_task(batch_task.file_path)
+        task = self.factory.create_transcribe_task(batch_task.file_path, need_next_task=True)
+        task.export_policy = batch_task.export_policy
+        batch_task.workflow_base_name = task.workflow_base_name
         thread = TranscriptThread(task)
         batch_task.current_thread = thread
 
         # 保存线程引用
         self.threads.append(thread)
 
-        thread.progress.connect(  # type: ignore
-            partial(self._on_progress_wrapper, batch_task)  # type: ignore
+        thread.progress.connect(
+            lambda value, message: self.task_progress.emit(
+                batch_task.file_path, int(value * 0.7), message
+            )
         )
         thread.error.connect(  # type: ignore
             partial(self._on_error_wrapper, batch_task)  # type: ignore
         )
-        thread.finished.connect(  # type: ignore
-            partial(self._on_finished_wrapper, batch_task)  # type: ignore
-        )
+        thread.finished.connect(partial(self._on_finished_wrapper, batch_task))
 
         thread.start()
 
     def _handle_subtitle_task(self, batch_task: BatchTask):
         logger.info(f"开始处理字幕任务: {batch_task.file_path}")
 
-        task = self.factory.create_subtitle_task(batch_task.file_path)
+        task = self.factory.create_subtitle_task(
+            batch_task.file_path,
+            need_next_task=True,
+            workflow_base_name=batch_task.workflow_base_name,
+            export_policy=batch_task.export_policy,
+        )
+        batch_task.workflow_base_name = task.workflow_base_name
         thread = SubtitleThread(task)
         batch_task.current_thread = thread
 
@@ -147,9 +181,7 @@ class BatchProcessThread(QThread):
         thread.error.connect(  # type: ignore
             partial(self._on_error_wrapper, batch_task)  # type: ignore
         )
-        thread.finished.connect(  # type: ignore
-            partial(self._on_finished_wrapper, batch_task)  # type: ignore
-        )
+        thread.finished.connect(partial(self._start_postprocess, batch_task, False, task))
 
         thread.start()
 
@@ -157,6 +189,8 @@ class BatchProcessThread(QThread):
         trans_task = self.factory.create_transcribe_task(
             batch_task.file_path, need_next_task=True
         )
+        trans_task.export_policy = batch_task.export_policy
+        batch_task.workflow_base_name = trans_task.workflow_base_name
         thread = TranscriptThread(trans_task)
         batch_task.current_thread = thread
         self.current_tasks[batch_task.file_path] = batch_task
@@ -192,8 +226,14 @@ class BatchProcessThread(QThread):
         if not task.output_path:
             raise ValueError("Task output_path is None")
         subtitle_task = self.factory.create_subtitle_task(
-            task.output_path, batch_task.file_path, need_next_task=True
+            task.output_path,
+            batch_task.file_path,
+            need_next_task=True,
+            workflow_base_name=batch_task.workflow_base_name,
+            input_data=task.result_data,
+            export_policy=batch_task.export_policy,
         )
+        batch_task.workflow_base_name = subtitle_task.workflow_base_name
         thread = SubtitleThread(subtitle_task)
         batch_task.current_thread = thread
         self.current_tasks[batch_task.file_path] = batch_task
@@ -205,7 +245,9 @@ class BatchProcessThread(QThread):
             partial(self._on_trans_sub_subtitle_progress_wrapper, batch_task)
         )
         thread.error.connect(partial(self._on_error_wrapper, batch_task))
-        thread.finished.connect(partial(self._on_finished_wrapper, batch_task))
+        thread.finished.connect(
+            partial(self._start_postprocess, batch_task, False, subtitle_task)
+        )
 
         thread.start()
 
@@ -213,14 +255,66 @@ class BatchProcessThread(QThread):
         self, batch_task: BatchTask, progress: int, message: str
     ):
         """转录+字幕任务字幕进度包装器"""
-        progress = 50 + progress // 2  # 字幕处理占后50%进度
+        progress = 50 + int(progress * 0.3)
         self.task_progress.emit(batch_task.file_path, progress, message)
+
+    def _start_postprocess(
+        self,
+        batch_task: BatchTask,
+        full_process: bool,
+        subtitle_task,
+        video_path: str,
+        subtitle_path: str,
+    ):
+        """Run the optional stage; skipped and fallback results still continue."""
+        if batch_task.current_thread in self.threads:
+            self.threads.remove(batch_task.current_thread)
+        task = batch_task.postprocess_task
+        task.source_subtitle_path = subtitle_path
+        task.initial_subtitle_path = subtitle_path
+        task.active_subtitle_path = subtitle_path
+        task.input_data = subtitle_task.result_data
+        task.workflow_base_name = subtitle_task.workflow_base_name
+        task.export_policy = batch_task.export_policy
+        task.media_path = video_path or (batch_task.file_path if full_process else None)
+        source = Path(subtitle_path)
+        task.postprocessed_subtitle_path = str(
+            source.with_name(f"【后处理字幕】{subtitle_task.workflow_base_name}.srt")
+        )
+        thread = PostprocessThread(task)
+        batch_task.current_thread = thread
+        self.threads.append(thread)
+        thread.error.connect(partial(self._on_error_wrapper, batch_task))
+        thread.warning.connect(
+            lambda message: self.task_progress.emit(
+                batch_task.file_path, 74 if full_process else 99, message
+            )
+        )
+        if full_process:
+            thread.progress.connect(
+                lambda value, message: self.task_progress.emit(
+                    batch_task.file_path, 60 + int(value * 0.15), message
+                )
+            )
+            thread.finished.connect(
+                partial(self.on_full_process_postprocess_finished, batch_task)
+            )
+        else:
+            thread.progress.connect(
+                lambda value, message: self.task_progress.emit(
+                    batch_task.file_path, 80 + int(value * 0.2), message
+                )
+            )
+            thread.finished.connect(partial(self._on_finished_wrapper, batch_task))
+        thread.start()
 
     def _handle_full_process_task(self, batch_task: BatchTask):
         # 首先创建转录任务
         trans_task = self.factory.create_transcribe_task(
             batch_task.file_path, need_next_task=True
         )
+        trans_task.export_policy = batch_task.export_policy
+        batch_task.workflow_base_name = trans_task.workflow_base_name
         thread = TranscriptThread(trans_task)
         batch_task.current_thread = thread
 
@@ -238,7 +332,7 @@ class BatchProcessThread(QThread):
     ):
         """处理全流程任务的转录进度"""
         if batch_task.status == BatchTaskStatus.RUNNING:
-            progress_value = progress // 3  # 转录占33%进度
+            progress_value = int(progress * 0.3)
             self.task_progress.emit(batch_task.file_path, progress_value, message)
 
     def on_full_process_finished(self, batch_task: BatchTask, task: TranscribeTask):
@@ -253,7 +347,11 @@ class BatchProcessThread(QThread):
             task.output_path,
             batch_task.file_path,
             need_next_task=True,
+            workflow_base_name=batch_task.workflow_base_name,
+            input_data=task.result_data,
+            export_policy=batch_task.export_policy,
         )
+        batch_task.workflow_base_name = subtitle_task.workflow_base_name
         thread = SubtitleThread(subtitle_task)
         batch_task.current_thread = thread
 
@@ -265,7 +363,7 @@ class BatchProcessThread(QThread):
         )
         thread.error.connect(partial(self._on_error_wrapper, batch_task))
         thread.finished.connect(
-            partial(self.on_full_process_subtitle_finished, batch_task)
+            partial(self._start_postprocess, batch_task, True, subtitle_task)
         )
 
         thread.start()
@@ -275,18 +373,22 @@ class BatchProcessThread(QThread):
     ):
         """处理全流程任务中字幕部分的进度"""
         if batch_task.status == BatchTaskStatus.RUNNING:
-            progress_value = 33 + progress // 3  # 字幕处理占中间33%进度
+            progress_value = 30 + int(progress * 0.3)
             self.task_progress.emit(batch_task.file_path, progress_value, message)
 
-    def on_full_process_subtitle_finished(
+    def on_full_process_postprocess_finished(
         self, batch_task: BatchTask, video_path: str, subtitle_path: str
     ):
-        """处理字幕完成后开始视频合成任务"""
+        """后处理完成或回退后开始视频合成任务。"""
         if batch_task.current_thread in self.threads:
             self.threads.remove(batch_task.current_thread)
 
         # 字幕完成后创建视频合成任务
-        synthesis_task = self.factory.create_synthesis_task(video_path, subtitle_path)
+        synthesis_task = self.factory.create_synthesis_task(
+            video_path,
+            subtitle_path,
+            input_data=batch_task.postprocess_task.result_data,
+        )
         thread = VideoSynthesisThread(synthesis_task)
         batch_task.current_thread = thread
 
@@ -306,7 +408,7 @@ class BatchProcessThread(QThread):
     ):
         """处理全流程任务中视频合成部分的进度"""
         if batch_task.status == BatchTaskStatus.RUNNING:
-            progress_value = 66 + progress // 3  # 视频合成占最后34%进度
+            progress_value = 75 + int(progress * 0.25)
             self.task_progress.emit(batch_task.file_path, progress_value, message)
 
     def stop_task(self, file_path: str):

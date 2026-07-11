@@ -9,6 +9,7 @@ from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli.commands.process import _resolve_final_output_path
 from videocaptioner.cli.config import build_config
 from videocaptioner.cli.main import _build_cli_overrides, main
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import TranscribeModelEnum
 
 
@@ -45,6 +46,7 @@ class TestMainParser:
         assert "transcribe" in out
         assert "gui" in out
         assert "subtitle" in out
+        assert "postprocess" in out
         assert "synthesize" in out
         assert "process" in out
         assert "download" in out
@@ -144,39 +146,37 @@ class TestTranscribeParser:
         assert overrides["transcribe"]["qwen"]["chunk_overlap_seconds"] == 12
         assert overrides["transcribe"]["qwen"]["compile_aligner"] is True
 
-    def test_subtitle_postprocess_flags_map_to_config(self):
+    def test_postprocess_flags_map_to_dedicated_config(self):
         overrides = _build_cli_overrides(
             Namespace(
                 remove_placeholders=True,
                 normalize_quotes=True,
                 keep_trailing_punct=True,
-                fix_gaps=True,
-                max_gap_ms=500,
-                gap_mode="midpoint",
-                audit_speed=True,
-                max_cps_cjk=13.0,
-                max_cps_latin=22.0,
-                compress_fast=True,
                 qa_report=True,
+                speed_optimize=True,
+                speed_profile="custom-cinema",
+                speed_primary="translate",
+                speed_semantic_repair=True,
+                speed_semantic_window=7,
+                no_speed_llm_review=True,
             )
         )
-        sub = overrides["subtitle"]
-        assert sub["remove_placeholders"] is True
-        assert sub["normalize_quotes"] is True
-        assert sub["trim_trailing_punct"] is False  # --keep-trailing-punct inverts
-        assert sub["fix_gaps"] is True
-        assert sub["max_gap_ms"] == 500
-        assert sub["gap_mode"] == "midpoint"
-        assert sub["audit_reading_speed"] is True
-        assert sub["max_cps_cjk"] == 13.0
-        assert sub["max_cps_latin"] == 22.0
-        assert sub["compress_fast_subtitles"] is True
-        assert sub["qa_report"] is True
+        postprocess = overrides["postprocess"]
+        assert postprocess["remove_placeholders"] is True
+        assert postprocess["normalize_quotes"] is True
+        assert postprocess["trim_trailing_punct"] is False  # --keep-trailing-punct inverts
+        assert postprocess["qa_report"] is True
+        assert postprocess["speed_optimize"] is True
+        assert postprocess["profile"] == "custom-cinema"
+        assert postprocess["primary_side"] == "translate"
+        assert postprocess["semantic_repair"] is True
+        assert postprocess["semantic_window"] == 7
+        assert postprocess["llm_uncertain_review"] is False
 
-    def test_subtitle_postprocess_defaults_absent_when_flags_unset(self):
+    def test_postprocess_defaults_absent_when_flags_unset(self):
         overrides = _build_cli_overrides(Namespace())
         # No postprocess overrides should be emitted so config-file/defaults win.
-        assert "remove_placeholders" not in overrides.get("subtitle", {})
+        assert "remove_placeholders" not in overrides.get("postprocess", {})
 
     def test_transcribe_command_builds_qwen_config(self, tmp_path, monkeypatch):
         import videocaptioner.core.asr as asr_package
@@ -329,6 +329,37 @@ class TestSubtitleParser:
             main(["subtitle", "test.srt", "--format", "vtt"])
         assert exc.value.code == 2
 
+    def test_help_does_not_expose_postprocess_options(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["subtitle", "--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "--speed-optimize" not in out
+        assert "--normalize-quotes" not in out
+
+
+class TestPostprocessParser:
+    def test_missing_input(self):
+        with pytest.raises(SystemExit) as exc:
+            main(["postprocess"])
+        assert exc.value.code == 2
+
+    def test_file_not_found(self):
+        assert main(["postprocess", "/nonexistent/file.srt"]) == EXIT.FILE_NOT_FOUND
+
+    def test_accepts_layout_profile_and_media_options(self):
+        result = main([
+            "postprocess",
+            "/nonexistent/file.srt",
+            "--layout",
+            "target-above",
+            "--profile",
+            "smooth",
+            "--media",
+            "/nonexistent/video.mp4",
+        ])
+        assert result == EXIT.FILE_NOT_FOUND
+
 
 class TestSynthesizeParser:
     def test_missing_subtitle_flag(self):
@@ -377,19 +408,22 @@ class TestProcessParser:
         assert "--audio-mode" in out
         assert "--style-prompt" not in out
         assert "--tts-api-base" not in out
+        assert "--no-postprocess" in out
+        assert "--format" not in out
 
-    def test_process_runs_subtitle_stage_for_postprocess_only(
+    def test_process_runs_dedicated_postprocess_without_subtitle_stage(
         self,
         tmp_path,
         monkeypatch,
     ):
+        from videocaptioner.cli.commands import postprocess as postprocess_cmd
         from videocaptioner.cli.commands import process as process_cmd
         from videocaptioner.cli.commands import subtitle as subtitle_cmd
         from videocaptioner.cli.commands import transcribe as transcribe_cmd
 
         input_path = tmp_path / "talk.mp3"
         input_path.write_bytes(b"fake")
-        calls = {"subtitle": 0}
+        calls = {"subtitle": 0, "postprocess": 0}
 
         def fake_transcribe(args, config):
             Path(args.output).write_text(
@@ -403,15 +437,22 @@ class TestProcessParser:
             Path(args.output).write_text("", encoding="utf-8")
             return EXIT.SUCCESS
 
+        def fake_postprocess(args, config):
+            calls["postprocess"] += 1
+            Path(args.output).write_text("", encoding="utf-8")
+            return EXIT.SUCCESS
+
         monkeypatch.setattr(transcribe_cmd, "run", fake_transcribe)
         monkeypatch.setattr(subtitle_cmd, "run", fake_subtitle)
+        monkeypatch.setattr(postprocess_cmd, "run", fake_postprocess)
         config = build_config(
             cli_overrides={
                 "subtitle": {
                     "optimize": False,
                     "translate": False,
-                    "remove_placeholders": True,
-                }
+                    "split": False,
+                },
+                "postprocess": {"enabled": True},
             }
         )
 
@@ -432,7 +473,7 @@ class TestProcessParser:
         )
 
         assert ret == EXIT.SUCCESS
-        assert calls["subtitle"] == 1
+        assert calls == {"subtitle": 0, "postprocess": 1}
 
     def test_process_runs_subtitle_stage_when_cli_enables_translation(
         self,
@@ -445,9 +486,11 @@ class TestProcessParser:
 
         input_path = tmp_path / "talk.mp3"
         input_path.write_bytes(b"fake")
-        calls = {"subtitle": 0}
+        calls = {"subtitle": 0, "transcribe_output": None, "subtitle_input": None}
 
         def fake_transcribe(args, config):
+            calls["transcribe_output"] = args.output
+            args.result_data = ASRData([ASRDataSeg("Hello", 0, 1000)])
             Path(args.output).write_text(
                 "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
                 encoding="utf-8",
@@ -456,6 +499,11 @@ class TestProcessParser:
 
         def fake_subtitle(args, config):
             calls["subtitle"] += 1
+            calls["subtitle_input"] = args.input
+            assert args.input_data.segments[0].text == "Hello"
+            args.result_data = ASRData([ASRDataSeg("Hello", 0, 1000, "你好")])
+            assert args.output.endswith(".srt")
+            assert args.format == "srt"
             Path(args.output).write_text("", encoding="utf-8")
             return EXIT.SUCCESS
 
@@ -486,6 +534,8 @@ class TestProcessParser:
 
         assert ret == EXIT.SUCCESS
         assert calls["subtitle"] == 1
+        assert calls["transcribe_output"].endswith("【转录字幕】talk.srt")
+        assert calls["subtitle_input"] == calls["transcribe_output"]
 
     def test_process_skip_messages_do_not_use_unrun_step_numbers(
         self,
@@ -509,7 +559,8 @@ class TestProcessParser:
         monkeypatch.setattr(transcribe_cmd, "run", fake_transcribe)
         config = build_config(
             cli_overrides={
-                "subtitle": {"optimize": False, "translate": False},
+                "subtitle": {"optimize": False, "translate": False, "split": False},
+                "postprocess": {"enabled": False},
                 "transcribe": {"asr": "bijian"},
             }
         )

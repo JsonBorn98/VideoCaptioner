@@ -1,12 +1,73 @@
 import logging
 import logging.handlers
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Union
 
 from ...config import LOG_LEVEL, LOG_PATH
 
 LogLevel = Union[int, str]
+
+
+class _WindowsSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Rotate without surfacing transient Windows file-sharing errors.
+
+    A second VideoCaptioner process may still have ``app.log`` open when this
+    process reaches the rollover threshold.  Windows then rejects the rename.
+    Keep appending to the active log and retry later instead of printing a
+    logging-internal traceback to the user.
+    """
+
+    _ROLLOVER_RETRY_SECONDS = 60.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._rollover_retry_after = 0.0
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:  # noqa: N802
+        if time.monotonic() < self._rollover_retry_after:
+            return False
+        return bool(super().shouldRollover(record))
+
+    def doRollover(self) -> None:  # noqa: N802
+        try:
+            super().doRollover()
+        except (PermissionError, FileNotFoundError):
+            self._rollover_retry_after = time.monotonic() + self._ROLLOVER_RETRY_SECONDS
+        except OSError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in {13, 32}:
+                raise
+            self._rollover_retry_after = time.monotonic() + self._ROLLOVER_RETRY_SECONDS
+
+
+_FILE_HANDLERS: dict[str, _WindowsSafeRotatingFileHandler] = {}
+_FILE_HANDLERS_LOCK = threading.RLock()
+
+
+def _shared_file_handler(
+    log_file: str,
+    formatter: logging.Formatter,
+) -> _WindowsSafeRotatingFileHandler:
+    """Return the sole file handler for a path within this process."""
+
+    resolved_path = str(Path(log_file).resolve())
+    with _FILE_HANDLERS_LOCK:
+        handler = _FILE_HANDLERS.get(resolved_path)
+        if handler is None:
+            Path(resolved_path).parent.mkdir(parents=True, exist_ok=True)
+            handler = _WindowsSafeRotatingFileHandler(
+                resolved_path,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+                delay=True,
+            )
+            handler.setLevel(logging.NOTSET)
+            handler.setFormatter(formatter)
+            _FILE_HANDLERS[resolved_path] = handler
+        return handler
 
 
 def _coerce_log_level(value: LogLevel | None, default: int) -> int:
@@ -103,13 +164,7 @@ def setup_logger(
 
         # 文件处理器
         if log_file:
-            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-            file_handler = logging.handlers.RotatingFileHandler(
-                log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-            )
-            file_handler.setLevel(level)
-            file_handler.setFormatter(level_formatter)
-            logger.addHandler(file_handler)
+            logger.addHandler(_shared_file_handler(log_file, level_formatter))
 
     # 设置特定库的日志级别为ERROR以减少日志噪音
     error_loggers = [
