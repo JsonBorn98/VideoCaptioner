@@ -17,7 +17,6 @@ from qfluentwidgets import (
     MessageBox,
     MessageBoxBase,
     PushSettingCard,
-    RangeSettingCard,
     ScrollArea,
     SegmentedWidget,
     SettingCardGroup,
@@ -37,7 +36,10 @@ from videocaptioner.core.speed import (
     resolve_speed_policy,
 )
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.components.SpinBoxSettingCard import DoubleSpinBoxSettingCard
+from videocaptioner.ui.components.SpinBoxSettingCard import (
+    DoubleSpinBoxSettingCard,
+    SliderSpinBoxSettingCard,
+)
 
 
 class _SettingTab(ScrollArea):
@@ -536,11 +538,17 @@ class PostprocessSettingInterface(QWidget):
         content: str,
         getter: Callable[[SpeedPolicy], Any],
     ) -> None:
-        card = RangeSettingCard(
-            getattr(cfg, configName),
+        item = getattr(cfg, configName)
+        low, high = item.range
+        step = 1 if (high - low) <= 50 else 50
+        card = SliderSpinBoxSettingCard(
+            item,
             FIF.STOP_WATCH,
             self.tr(title),
             self.tr(content),
+            minimum=low,
+            maximum=high,
+            step=step,
             parent=group,
         )
         self._addPolicyReset(card, configName, getter)
@@ -633,11 +641,14 @@ class PostprocessSettingInterface(QWidget):
             cfg.need_fix_gaps,
             gapGroup,
         )
-        self.maxGapCard = RangeSettingCard(
+        self.maxGapCard = SliderSpinBoxSettingCard(
             cfg.max_gap_ms,
             FIF.STOP_WATCH,
             self.tr("最大闭合间隙 (ms)"),
-            self.tr("只处理不超过该时长的间隙"),
+            self.tr("闪轴闭合与尾部补偿的分界：此值以下闭合，以上补偿"),
+            minimum=100,
+            maximum=2000,
+            step=50,
             parent=gapGroup,
         )
         for card, item, field in (
@@ -647,6 +658,56 @@ class PostprocessSettingInterface(QWidget):
             self._addProfileReset(card, item, field)
             gapGroup.addSettingCard(card)
         tab.addGroup(gapGroup)
+
+        compGroup = SettingCardGroup(self.tr("尾部补偿"), tab.scrollWidget)
+        self.tailCompensationCard = SwitchSettingCard(
+            FIF.ALIGNMENT,
+            self.tr("尾部补偿"),
+            self.tr("停顿前为上一段结尾按补偿曲线追加显示时长，避免其过快消失；出厂默认关闭"),
+            cfg.need_tail_compensation,
+            compGroup,
+        )
+        self.minCompensationCard = SliderSpinBoxSettingCard(
+            cfg.min_compensation_ms,
+            FIF.STOP_WATCH,
+            self.tr("最小补偿 (ms)"),
+            self.tr("间隙刚超过最大闭合间隙时给予的补偿；不超过最大闭合间隙"),
+            minimum=0,
+            maximum=2000,
+            step=50,
+            parent=compGroup,
+        )
+        self.maxCompensationGapCard = SliderSpinBoxSettingCard(
+            cfg.max_compensation_gap_ms,
+            FIF.STOP_WATCH,
+            self.tr("最大补偿间隙 (ms)"),
+            self.tr("补偿达到上限的间隙；更大的间隙补偿不再增加"),
+            minimum=100,
+            maximum=10000,
+            step=100,
+            parent=compGroup,
+        )
+        self.maxCompensationCard = SliderSpinBoxSettingCard(
+            cfg.max_compensation_ms,
+            FIF.STOP_WATCH,
+            self.tr("最大补偿 (ms)"),
+            self.tr("单段结尾可获得的补偿上限"),
+            minimum=0,
+            maximum=5000,
+            step=50,
+            parent=compGroup,
+        )
+        for card, item, field in (
+            (self.tailCompensationCard, cfg.need_tail_compensation, "tail_compensation"),
+            (self.minCompensationCard, cfg.min_compensation_ms, "min_compensation_ms"),
+            (self.maxCompensationGapCard, cfg.max_compensation_gap_ms, "max_compensation_gap_ms"),
+            (self.maxCompensationCard, cfg.max_compensation_ms, "max_compensation_ms"),
+        ):
+            self._addProfileReset(card, item, field)
+            compGroup.addSettingCard(card)
+        tab.addGroup(compGroup)
+        self._connectCompensationClamp()
+        self._onCompensationChanged()  # 建立初始联动范围
 
         durationGroup = SettingCardGroup(self.tr("显示时长"), tab.scrollWidget)
         for args in (
@@ -707,11 +768,14 @@ class PostprocessSettingInterface(QWidget):
             cfg.speed_semantic_repair,
             group,
         )
-        self.semanticWindowCard = RangeSettingCard(
+        self.semanticWindowCard = SliderSpinBoxSettingCard(
             cfg.speed_semantic_window,
             FIF.ROBOT,
             self.tr("语义窗口大小"),
             self.tr("单次语义修复可查看的相邻字幕数量，不能跨保护或重置边界"),
+            minimum=cfg.speed_semantic_window.range[0],
+            maximum=cfg.speed_semantic_window.range[1],
+            step=1,
             parent=group,
         )
         self.uncertainReviewCard = SwitchSettingCard(
@@ -942,6 +1006,51 @@ class PostprocessSettingInterface(QWidget):
             return value / 1000
         return value
 
+    def _connectCompensationClamp(self) -> None:
+        """连动钳制尾部补偿四个旋钮，使其永远满足补偿曲线约束（见 docs/adr/0005）。"""
+        self._clampingCompensation = False
+        for item in (
+            cfg.max_gap_ms,
+            cfg.min_compensation_ms,
+            cfg.max_compensation_gap_ms,
+            cfg.max_compensation_ms,
+        ):
+            item.valueChanged.connect(self._onCompensationChanged)
+
+    def _onCompensationChanged(self, *_: Any) -> None:
+        """把四个旋钮规整到合法区（以最大闭合间隙为锚），并收紧各滑块可选范围。
+
+        规整为幂等操作：合法输入原样返回，故不会与持久化/应用流程形成死循环。
+        """
+        if self._applyingPolicy or getattr(self, "_clampingCompensation", False):
+            return
+        if not hasattr(self, "minCompensationCard"):
+            return
+        self._clampingCompensation = True
+        try:
+            mg = cfg.get(cfg.max_gap_ms)
+            mc = cfg.get(cfg.min_compensation_ms)
+            mcg = cfg.get(cfg.max_compensation_gap_ms)
+            mx = cfg.get(cfg.max_compensation_ms)
+            # 规整（顺序与 PostprocessConfig 约束一致；最大闭合间隙为锚）
+            mc = max(0, min(mc, mg))
+            mcg = max(mcg, mg + 1)
+            mx = max(mx, mc)
+            mx = min(mx, mc + (mcg - mg))
+            # 写回被调整的值（合法，persist 的 set_field 不会报错）
+            if mc != cfg.get(cfg.min_compensation_ms):
+                cfg.set(cfg.min_compensation_ms, mc)
+            if mcg != cfg.get(cfg.max_compensation_gap_ms):
+                cfg.set(cfg.max_compensation_gap_ms, mcg)
+            if mx != cfg.get(cfg.max_compensation_ms):
+                cfg.set(cfg.max_compensation_ms, mx)
+            # 收紧各滑块 / 输入框范围，令用户拖不出非法组合
+            self.minCompensationCard.setRange(0, min(mg, mx))
+            self.maxCompensationGapCard.setRange(mg + max(1, mx - mc), 10000)
+            self.maxCompensationCard.setRange(mc, mc + (mcg - mg))
+        finally:
+            self._clampingCompensation = False
+
     def _connectPolicyPersistence(self) -> None:
         for config_name, _, _ in self._POLICY_BINDINGS:
             item = getattr(cfg, config_name)
@@ -962,6 +1071,10 @@ class PostprocessSettingInterface(QWidget):
             (cfg.need_remove_placeholders, "remove_placeholders"),
             (cfg.need_fix_gaps, "fix_gaps"),
             (cfg.max_gap_ms, "max_gap_ms"),
+            (cfg.need_tail_compensation, "tail_compensation"),
+            (cfg.min_compensation_ms, "min_compensation_ms"),
+            (cfg.max_compensation_gap_ms, "max_compensation_gap_ms"),
+            (cfg.max_compensation_ms, "max_compensation_ms"),
             (cfg.postprocess_optimize_both_sides, "optimize_both_sides"),
         ):
             item.valueChanged.connect(
@@ -1041,11 +1154,16 @@ class PostprocessSettingInterface(QWidget):
                 (cfg.need_remove_placeholders, config.remove_placeholders),
                 (cfg.need_fix_gaps, config.fix_gaps),
                 (cfg.max_gap_ms, config.max_gap_ms),
+                (cfg.need_tail_compensation, config.tail_compensation),
+                (cfg.min_compensation_ms, config.min_compensation_ms),
+                (cfg.max_compensation_gap_ms, config.max_compensation_gap_ms),
+                (cfg.max_compensation_ms, config.max_compensation_ms),
                 (cfg.postprocess_optimize_both_sides, config.optimize_both_sides),
             ):
                 cfg.set(item, value)
         finally:
             self._applyingPolicy = False
+        self._onCompensationChanged()  # 依新方案刷新联动范围
 
     def _applyPolicy(self, policy: SpeedPolicy) -> None:
         self._applyingPolicy = True

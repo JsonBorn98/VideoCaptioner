@@ -6,7 +6,7 @@
 管线插入点（见 docs/dev/subtitle-optimizer-integration-plan.md §3.2）：
 - 加载后、断句前          → run_pre_stage       （占位符清理）
 - 优化后 / 翻译后          → run_normalize_stage （取代 remove_punctuation）
-- 保存前                   → run_post_stage      （必要时规范化 → 压缩 → 闭合间隙 → 审计）
+- 保存前                   → run_post_stage      （必要时规范化 → 压缩 → 闭合间隙 → 速度优化 → 尾部补偿 → 审计）
 
 任何步骤内部异常均捕获后记 warning 并跳过，绝不阻断主管线。
 """
@@ -96,9 +96,10 @@ def run_post_stage(
     layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
     timing_windows: Iterable["TimingEvidenceWindow"] = (),
 ) -> Tuple["ASRData", QualityReport]:
-    """保存前：[必要时规范化] → [压缩重译] → 闭合间隙 → 审计。
+    """保存前：[必要时规范化] → [压缩重译] → 闭合间隙 → [速度优化] → [尾部补偿] → 审计。
 
-    顺序保证删除段/压缩产生的新间隙被闭合，且审计看到的是最终时轴。
+    顺序保证删除段/压缩产生的新间隙被闭合，尾部补偿在速度优化确定最终时轴后执行，
+    且审计看到的是最终时轴。
     """
     report = _new_report(asr_data, report)
 
@@ -167,6 +168,16 @@ def run_post_stage(
         asr_data, report = run_normalize_stage(
             asr_data, cfg, report, layout, primary_side_only=True
         )
+
+    # 尾部补偿是最后一步时轴变换：在速度优化确定最终时轴后，对超过最大闭合间隙的间隙
+    # 按补偿曲线为上一段结尾追加显示时长，使审计看到的是最终交付时轴。
+    if cfg.tail_compensation:
+        try:
+            from .timing import apply_tail_compensation
+
+            asr_data, report = apply_tail_compensation(asr_data, cfg, report, layout)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("尾部补偿失败，已跳过: %s", exc)
 
     if cfg.audit_enabled():
         try:

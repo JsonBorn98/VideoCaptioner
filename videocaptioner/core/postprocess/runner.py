@@ -156,6 +156,7 @@ def run_postprocess_task(
             normalize_quotes=False,
             trim_trailing_punct=False,
             fix_gaps=False,
+            tail_compensation=False,
             compress_fast_subtitles=False,
         )
         _, report = run_post_stage(

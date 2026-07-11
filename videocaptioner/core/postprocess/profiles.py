@@ -111,19 +111,63 @@ def _validate_name(name: str) -> str:
     return value
 
 
+_LEGACY_DROP_FIELDS = frozenset(
+    {
+        "tail_dwell_short_ms",
+        "tail_dwell_long_ms",
+        "tail_dwell_long_gap_ms",
+        "tail_dwell_scene_cut_ms",
+        "tail_dwell_min_blank_ms",
+    }
+)
+
+
+def _migrate_legacy_config(data: Mapping[str, Any]) -> dict[str, Any]:
+    """把旧版 tail_dwell 分档字段迁移到尾部补偿曲线字段（见 docs/adr/0005）。
+
+    - ``tail_dwell`` → ``tail_compensation``（保留启用状态）
+    - ``tail_dwell_long_ms`` → ``max_compensation_ms``
+    - ``tail_dwell_long_gap_ms`` → ``max_compensation_gap_ms``
+    - short / scene_cut / min_blank 无对应项，丢弃（最小补偿取默认）
+
+    迁移值若与新约束冲突，由 :func:`_config_from_dict` 回退到默认补偿参数。
+    """
+    result = dict(data)
+    if "tail_dwell" in result and "tail_compensation" not in result:
+        result["tail_compensation"] = result["tail_dwell"]
+    result.pop("tail_dwell", None)
+    if "tail_dwell_long_ms" in result and "max_compensation_ms" not in result:
+        result["max_compensation_ms"] = result["tail_dwell_long_ms"]
+    if "tail_dwell_long_gap_ms" in result and "max_compensation_gap_ms" not in result:
+        result["max_compensation_gap_ms"] = result["tail_dwell_long_gap_ms"]
+    for key in _LEGACY_DROP_FIELDS:
+        result.pop(key, None)
+    return result
+
+
 def _config_from_dict(data: Any) -> PostprocessConfig:
     if not isinstance(data, Mapping):
         raise PostprocessProfileError("profile config must be an object")
-    unknown = sorted(set(data) - _CONFIG_FIELDS)
+    migrated = _migrate_legacy_config(data)
+    unknown = sorted(set(migrated) - _CONFIG_FIELDS)
     if unknown:
         raise PostprocessProfileError(f"Unknown config field: {unknown[0]}")
-    missing = sorted(_CONFIG_FIELDS - set(data))
-    if missing:
-        raise PostprocessProfileError(f"Missing config field: {missing[0]}")
+    # 向前兼容：新增后处理选项后，老版本持久化的 profile 会缺少这些字段。
+    # 用权威默认值补齐缺失字段，而非报错，避免既有 profile 集合无法加载。
+    defaults = asdict(PostprocessConfig())
+    merged = {**defaults, **deepcopy(dict(migrated))}
     try:
-        return PostprocessConfig(**deepcopy(dict(data)))
-    except (TypeError, ValueError) as exc:
-        raise PostprocessProfileError(str(exc)) from exc
+        return PostprocessConfig(**merged)
+    except (TypeError, ValueError):
+        # 迁移（或手改）得到的补偿参数可能违反新约束（如旧值与斜率约束冲突）；
+        # 回退这三个补偿数值到默认、保留其余（含启用状态），保证加载始终不中断。
+        # 非补偿相关的错误在重试时仍会抛出。
+        for key in ("min_compensation_ms", "max_compensation_gap_ms", "max_compensation_ms"):
+            merged[key] = defaults[key]
+        try:
+            return PostprocessConfig(**merged)
+        except (TypeError, ValueError) as exc:
+            raise PostprocessProfileError(str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -208,6 +252,15 @@ class PostprocessProfileStore:
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path is not None else DEFAULT_POSTPROCESS_PROFILES_PATH
+        self._profiles = self._load() if self.path.exists() else _template_profiles()
+
+    def reload(self) -> None:
+        """Re-read persisted profiles so edits by another store instance apply.
+
+        A long-lived store (held by a GUI page or the workflow) keeps the
+        in-memory snapshot taken at construction and would otherwise silently
+        ignore profile edits saved by the settings page's separate store.
+        """
         self._profiles = self._load() if self.path.exists() else _template_profiles()
 
     def _load(self) -> dict[str, PostprocessProfile]:

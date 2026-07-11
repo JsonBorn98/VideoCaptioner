@@ -131,6 +131,7 @@ _STAGE_LABELS = {
     "normalize_quotes": "引号规范化",
     "trim_trailing": "弱尾标点清理",
     "close_gaps": "闭合间隙",
+    "tail_compensation": "尾部补偿",
     "compress": "快速字幕压缩",
 }
 

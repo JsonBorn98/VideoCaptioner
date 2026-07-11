@@ -63,6 +63,33 @@ widget.close()
     )
 
 
+def test_postprocess_run_reloads_latest_saved_profile(tmp_path):
+    profile_path = repr(str(tmp_path / "profiles.json"))
+    srt = tmp_path / "in.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\nhello world\n", encoding="utf-8"
+    )
+    srt_path = repr(str(srt))
+    _run_qt_script(
+        f"""
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.core.postprocess import PostprocessProfileStore
+from videocaptioner.ui.view.postprocess_interface import PostprocessInterface
+
+app = QApplication([])
+store = PostprocessProfileStore({profile_path})
+widget = PostprocessInterface(profile_store=store)
+widget.select_profile('balanced')
+widget.subtitle_path = {srt_path}
+# 页面构造后，另一 store 实例（模拟设置页）改动同一 profile 并写盘
+PostprocessProfileStore({profile_path}).set_field('balanced', 'tail_compensation', True)
+task = widget._create_task()
+assert task.config_snapshot.tail_compensation is True, 'run must reload latest profile edits'
+widget.close()
+"""
+    )
+
+
 def test_setting_title_uses_theme_aware_colors():
     _run_qt_script(
         """

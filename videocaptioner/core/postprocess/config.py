@@ -34,11 +34,25 @@ class PostprocessConfig:
     fix_gaps: bool = False
     """闭合相邻段之间的微小间隙（消除闪烁）。"""
     max_gap_ms: int = 800
-    """闭合间隙的上限（音乐/节奏类内容建议 500）。"""
+    """最大闭合间隙：闪轴闭合的上限，同时是尾部补偿的下界（此值以下闭合，以上补偿）。"""
     min_gap_ms: int = 30
     """闭合间隙的下限（低于此值视为已连续）。"""
     gap_mode: str = "extend"
     """"extend"（技能语义：前段延长到后段开始）| "midpoint"（旧 optimize_timing 语义）。"""
+
+    # ---- 时轴：尾部补偿（单调钳制补偿曲线，见 docs/adr/0005）----
+    # 曲线由两拐点定义：下拐点 (max_gap_ms, min_compensation_ms)、
+    # 上拐点 (max_compensation_gap_ms, max_compensation_ms)。间隙 <= max_gap_ms 不补偿
+    # （归闪轴闭合）；跨过即给 min_compensation_ms，随间隙线性升到 max_compensation_ms 后封顶。
+    tail_compensation: bool = False
+    """启用尾部补偿：为超过最大闭合间隙的停顿前、上一段的显示结尾追加时长，避免其过快
+    消失。补偿量随间隙单调不降并封顶；最小留白 = max_gap_ms - min_compensation_ms。"""
+    min_compensation_ms: int = 200
+    """最小补偿：间隙刚跨过 max_gap_ms 时给予的补偿时长；须不超过 max_gap_ms。"""
+    max_compensation_gap_ms: int = 2000
+    """最大补偿间隙：补偿达到上限的间隙；更大的间隙补偿不再增加，只让留白继续张开。"""
+    max_compensation_ms: int = 800
+    """最大补偿：单段结尾可获得的补偿时长上限。"""
 
     # ---- 审计 / 报告 ----
     audit_reading_speed: bool = False
@@ -97,6 +111,7 @@ class PostprocessConfig:
             "normalize_quotes",
             "trim_trailing_punct",
             "fix_gaps",
+            "tail_compensation",
             "audit_reading_speed",
             "qa_report",
             "compress_fast_subtitles",
@@ -114,6 +129,9 @@ class PostprocessConfig:
         int_fields = (
             "max_gap_ms",
             "min_gap_ms",
+            "min_compensation_ms",
+            "max_compensation_gap_ms",
+            "max_compensation_ms",
             "min_duration_ms",
             "max_duration_ms",
             "short_text_max_chars",
@@ -148,6 +166,30 @@ class PostprocessConfig:
             raise ValueError("gap_mode must be 'extend' or 'midpoint'")
         if self.min_gap_ms < 0 or self.max_gap_ms < self.min_gap_ms:
             raise ValueError("gap limits must satisfy 0 <= min_gap_ms <= max_gap_ms")
+        for field_name in (
+            "min_compensation_ms",
+            "max_compensation_gap_ms",
+            "max_compensation_ms",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name} must not be negative")
+        # 补偿曲线约束（见 docs/adr/0005）：最小补偿 <= 最大闭合间隙 < 最大补偿间隙，
+        # 最大补偿 >= 最小补偿，且斜率 <= 1（保证补偿量与留白均随间隙单调、永不重叠）。
+        if self.min_compensation_ms > self.max_gap_ms:
+            raise ValueError("min_compensation_ms cannot exceed max_gap_ms")
+        if self.max_compensation_gap_ms <= self.max_gap_ms:
+            raise ValueError("max_compensation_gap_ms must exceed max_gap_ms")
+        if self.max_compensation_ms < self.min_compensation_ms:
+            raise ValueError("max_compensation_ms cannot be less than min_compensation_ms")
+        if (
+            self.max_compensation_ms - self.min_compensation_ms
+            > self.max_compensation_gap_ms - self.max_gap_ms
+        ):
+            raise ValueError(
+                "compensation ramp is too steep: "
+                "max_compensation_ms - min_compensation_ms must not exceed "
+                "max_compensation_gap_ms - max_gap_ms (slope <= 1)"
+            )
         if self.min_duration_ms <= 0 or self.max_duration_ms < self.min_duration_ms:
             raise ValueError("duration limits must be positive and ordered")
         if self.short_text_max_chars <= 0 or self.short_text_max_duration_ms <= 0:
@@ -168,6 +210,7 @@ class PostprocessConfig:
             or self.normalize_quotes
             or self.trim_trailing_punct
             or self.fix_gaps
+            or self.tail_compensation
             or self.audit_enabled()
             or self.speed_optimize
         )

@@ -411,6 +411,9 @@ class PostprocessInterface(QWidget):
             raise ValueError("subtitle path is required")
         profile_item = getattr(cfg, "postprocess_profile", cfg.speed_profile)
         profile_id = cfg.get(profile_item)
+        # 设置页用另一个 store 实例写盘；运行前重新读取，确保后处理设置的最新改动生效
+        # （否则本页构造时载入的内存快照会静默忽略之后的改动，直到重启）。
+        self._profile_store.reload()
         config = self._profile_store.resolve_config(profile_id)
         config.speed_mode = "analyze" if self.mode_button.text() == self.tr("仅分析") else "apply"
         try:

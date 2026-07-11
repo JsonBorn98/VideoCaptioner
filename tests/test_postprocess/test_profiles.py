@@ -48,3 +48,19 @@ def test_custom_profiles_cannot_be_created_without_one_of_three_templates(tmp_pa
         store.copy_template("unknown", "Invalid")
     with pytest.raises(FactoryTemplateError, match="cannot be deleted"):
         store.delete("balanced")
+
+
+def test_reload_picks_up_edits_from_another_store_instance(tmp_path):
+    """长期持有的 store 需 reload 才能看到另一实例（如设置页）保存的改动。"""
+    path = tmp_path / "profiles.json"
+    page_store = PostprocessProfileStore(path)
+    settings_store = PostprocessProfileStore(path)
+
+    settings_store.set_field("balanced", "tail_compensation", True)
+    settings_store.set_field("balanced", "max_gap_ms", 501)
+
+    # 未 reload 前，page_store 仍是构造时的内存快照
+    assert page_store.get("balanced").config.tail_compensation is False
+    page_store.reload()
+    assert page_store.get("balanced").config.tail_compensation is True
+    assert page_store.resolve_config("balanced").max_gap_ms == 501

@@ -326,6 +326,18 @@ class Config(QConfig):
     )
     need_fix_gaps = ConfigItem("Subtitle", "NeedFixGaps", False, BoolValidator())
     max_gap_ms = RangeConfigItem("Subtitle", "MaxGapMs", 800, RangeValidator(100, 2000))
+    need_tail_compensation = ConfigItem(
+        "Subtitle", "NeedTailCompensation", False, BoolValidator()
+    )
+    min_compensation_ms = RangeConfigItem(
+        "Subtitle", "MinCompensationMs", 200, RangeValidator(0, 2000)
+    )
+    max_compensation_gap_ms = RangeConfigItem(
+        "Subtitle", "MaxCompensationGapMs", 2000, RangeValidator(100, 10000)
+    )
+    max_compensation_ms = RangeConfigItem(
+        "Subtitle", "MaxCompensationMs", 800, RangeValidator(0, 5000)
+    )
     need_audit_speed = ConfigItem(
         "Subtitle", "NeedAuditSpeed", False, BoolValidator()
     )

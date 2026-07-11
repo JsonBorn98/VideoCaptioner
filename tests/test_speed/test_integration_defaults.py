@@ -43,6 +43,30 @@ def test_unified_speed_path_replaces_old_speed_steps():
     assert optimized.segments[0].end_time == optimized.segments[1].start_time
 
 
+def test_tail_compensation_runs_after_speed_on_final_timeline():
+    """尾部补偿在速度优化之后执行，按补偿曲线为超过最大闭合间隙的间隙追加时长。"""
+    data = ASRData(
+        [
+            ASRDataSeg("source one", 0, 2000, "正常字幕"),  # 舒适，速度优化不改
+            ASRDataSeg("source two", 3200, 5200, "下一句"),  # gap 1200，落在补偿斜坡
+        ]
+    )
+    config = PostprocessConfig(
+        speed_optimize=True,
+        tail_compensation=True,
+    )
+    optimized, report = run_post_stage(
+        data,
+        config,
+        layout=SubtitleLayoutEnum.ONLY_TRANSLATE,
+    )
+    assert report.speed is not None  # 速度优化已运行
+    assert report.stage("tail_compensation").changed == 1
+    # 舒适段被速度优化保留在 2000，尾部补偿再 +compensation_for_gap(1200)=400 至 2400
+    assert optimized.segments[0].end_time == 2400
+    assert optimized.segments[1].start_time == 3200
+
+
 def test_speed_cli_flags_map_to_unified_config():
     overrides = _build_cli_overrides(
         Namespace(
@@ -208,6 +232,29 @@ def test_speed_settings_lists_custom_profiles_offscreen(tmp_path, monkeypatch):
         assert not mode_reset.isEnabled()
     finally:
         cfg.set(cfg.speed_mode, original_mode)
+
+    # 尾部补偿卡片存在，且开关 / 数值写回所选 profile
+    assert widget.tailCompensationCard is not None
+    for card in (
+        widget.minCompensationCard,
+        widget.maxCompensationGapCard,
+        widget.maxCompensationCard,
+    ):
+        assert card is not None
+    profile_id = cfg.get(cfg.postprocess_profile)
+    original_enabled = cfg.get(cfg.need_tail_compensation)
+    original_min = cfg.get(cfg.min_compensation_ms)
+    try:
+        cfg.set(cfg.need_tail_compensation, True)
+        app.processEvents()
+        assert store.get(profile_id).config.tail_compensation is True
+        cfg.set(cfg.min_compensation_ms, 150)
+        app.processEvents()
+        assert store.get(profile_id).config.min_compensation_ms == 150
+    finally:
+        cfg.set(cfg.min_compensation_ms, original_min)
+        cfg.set(cfg.need_tail_compensation, original_enabled)
+
     for route_key, tab in widget._tabs.items():
         widget.pivot.items[route_key].click()
         app.processEvents()

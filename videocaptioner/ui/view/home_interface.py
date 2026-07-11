@@ -131,6 +131,12 @@ class HomeInterface(QWidget):
         if not self._postprocess_enabled:
             self.switch_to_video_synthesis(video_path, subtitle_path)
             return
+        # 后处理设置可能在漫长的上游阶段（转录/优化/翻译）期间才改动；在此重新读取所选
+        # 方案，确保用户在后处理运行前保存的改动生效，而非沿用 workflow 开始时的快照。
+        self._postprocess_profile_id = cfg.get(cfg.postprocess_profile)
+        self._postprocess_config_snapshot = PostprocessProfileStore().resolve_config(
+            self._postprocess_profile_id
+        )
         postprocess_task = TaskFactory.create_postprocess_task(
             subtitle_path,
             video_path,
