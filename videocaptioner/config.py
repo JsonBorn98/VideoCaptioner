@@ -113,7 +113,10 @@ _copy_missing_tree(BUNDLED_FONTS_PATH, FONTS_PATH)
 
 # Add bin paths to PATH. User-downloaded binaries take precedence over bundled
 # tools, while packaged ffmpeg/ffprobe still work out of the box.
-for _path in [FASTER_WHISPER_PATH, BIN_PATH, BUNDLED_BIN_PATH]:
+# Listed highest -> lowest precedence; prepend in reverse so the first entry
+# ends up first on PATH (a user-replaced BIN_PATH must win over the bundled one).
+_BIN_DIRS = [FASTER_WHISPER_PATH, BIN_PATH, BUNDLED_BIN_PATH]
+for _path in reversed(_BIN_DIRS):
     if _path.exists():
         os.environ["PATH"] = str(_path) + os.pathsep + os.environ["PATH"]
 
