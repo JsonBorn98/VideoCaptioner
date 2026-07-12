@@ -38,6 +38,24 @@ PresetType = Literal[
 logger = setup_logger("video_utils")
 LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
+# 容器后缀 -> 软字幕（-c:s）编码器；mp4 系走 mov_text，mkv 走 srt
+_SOFT_SUBTITLE_CODEC_BY_CONTAINER: dict[str, str] = {
+    ".mp4": "mov_text",
+    ".mov": "mov_text",
+    ".m4v": "mov_text",
+    ".mkv": "srt",
+}
+
+
+def _soft_subtitle_codec_for_output(output: str) -> str:
+    """根据输出容器后缀选择软字幕编码器
+
+    mp4/mov/m4v 容器要求 mov_text；mkv 容器不支持 mov_text，需用 srt。
+    未知容器回退 mov_text（保持历史行为）。
+    """
+    suffix = Path(output).suffix.lower()
+    return _SOFT_SUBTITLE_CODEC_BY_CONTAINER.get(suffix, "mov_text")
+
 
 @contextmanager
 def temporary_subtitle_file(subtitle_path: str):
@@ -219,7 +237,8 @@ def add_subtitles(
             logger.debug("WebM format, forcing hard subtitles")
 
         if soft_subtitle:
-            # 添加软字幕
+            # 添加软字幕（字幕编码器随输出容器选择：mp4/mov/m4v -> mov_text，mkv -> srt）
+            soft_subtitle_codec = _soft_subtitle_codec_for_output(output)
             cmd = [
                 "ffmpeg",
                 "-i",
@@ -231,7 +250,7 @@ def add_subtitles(
                 "-c:a",
                 "copy",
                 "-c:s",
-                "mov_text",
+                soft_subtitle_codec,
                 "-y",
                 output,
             ]
@@ -584,6 +603,7 @@ def add_subtitles_with_style(
             crf=crf,
             preset=preset,
             progress_callback=progress_callback,
+            encode_settings=encode_settings,
         )
     else:
         # ASS 样式模式
