@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 from PIL import Image, ImageDraw
 
 from videocaptioner.core.entities import SubtitleLayoutEnum
+from videocaptioner.core.synthesis.ffmpeg_env import get_ffmpeg_path
 from videocaptioner.core.utils.logger import setup_logger
 
 from .font_utils import FontType, get_font
@@ -38,7 +39,7 @@ def _normalize_reference_height(reference_height: ReferenceHeight) -> int:
 def _get_video_info(video_path: str) -> Tuple[int, int, float]:
     """获取视频分辨率和时长"""
     result = subprocess.run(
-        ["ffmpeg", "-i", video_path],
+        [get_ffmpeg_path(), "-i", video_path],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -436,10 +437,7 @@ def render_rounded_video(
                 from videocaptioner.core.synthesis.command_builder import (
                     build_ffmpeg_command_multi,
                 )
-                from videocaptioner.core.synthesis.ffmpeg_env import (
-                    get_ffmpeg_path,
-                    supports_fps_mode,
-                )
+                from videocaptioner.core.synthesis.ffmpeg_env import supports_fps_mode
 
                 ffmpeg = get_ffmpeg_path(encode_settings.ffmpeg_source)
                 vfr_flag = "-fps_mode" if supports_fps_mode(ffmpeg) else "-vsync"
@@ -456,7 +454,7 @@ def render_rounded_video(
                 )
             else:
                 cmd = [
-                    "ffmpeg",
+                    get_ffmpeg_path(),
                     "-y",
                     *input_args,
                     "-filter_complex",

@@ -16,6 +16,7 @@ from ..entities import (
 from ..subtitle.ass_renderer import render_ass_video
 from ..subtitle.ass_utils import auto_wrap_ass_file
 from ..subtitle.rounded_renderer import render_rounded_video
+from ..synthesis.ffmpeg_env import get_ffmpeg_path
 from ..utils.logger import setup_logger
 
 if TYPE_CHECKING:
@@ -107,7 +108,7 @@ def video2audio(
 
     logger.debug(f"Extracting audio track {audio_track_index}")
     cmd = [
-        "ffmpeg",
+        get_ffmpeg_path(),
         "-i",
         input_file,
         "-map",
@@ -163,7 +164,7 @@ def check_cuda_available() -> bool:
     try:
         # 首先检查ffmpeg是否支持cuda
         result = subprocess.run(
-            ["ffmpeg", "-hwaccels"],
+            [get_ffmpeg_path(), "-hwaccels"],
             capture_output=True,
             text=True,
             creationflags=(
@@ -176,7 +177,7 @@ def check_cuda_available() -> bool:
 
         # 进一步检查CUDA设备信息
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-init_hw_device", "cuda"],
+            [get_ffmpeg_path(), "-hide_banner", "-init_hw_device", "cuda"],
             capture_output=True,
             text=True,
             creationflags=(
@@ -240,7 +241,7 @@ def add_subtitles(
             # 添加软字幕（字幕编码器随输出容器选择：mp4/mov/m4v -> mov_text，mkv -> srt）
             soft_subtitle_codec = _soft_subtitle_codec_for_output(output)
             cmd = [
-                "ffmpeg",
+                get_ffmpeg_path(),
                 "-i",
                 input_file,
                 "-i",
@@ -297,7 +298,7 @@ def add_subtitles(
 
             # 检查CUDA是否可用
             use_cuda = check_cuda_available()
-            cmd = ["ffmpeg"]
+            cmd = [get_ffmpeg_path()]
             if use_cuda:
                 logger.debug("Using CUDA acceleration")
                 cmd.extend(["-hwaccel", "cuda"])
@@ -416,7 +417,7 @@ def get_video_info(
     try:
         # 执行 ffmpeg 获取视频信息
         result = subprocess.run(
-            ["ffmpeg", "-i", file_path],
+            [get_ffmpeg_path(), "-i", file_path],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -529,7 +530,7 @@ def _extract_thumbnail(video_path: str, seek_time: float, thumbnail_path: str) -
 
         result = subprocess.run(
             [
-                "ffmpeg",
+                get_ffmpeg_path(),
                 "-ss",
                 timestamp,
                 "-i",

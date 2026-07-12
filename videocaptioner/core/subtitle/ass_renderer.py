@@ -12,6 +12,7 @@ from PIL import Image
 
 from videocaptioner.config import CACHE_PATH, FONTS_PATH, RESOURCE_PATH
 from videocaptioner.core.entities import SubtitleLayoutEnum
+from videocaptioner.core.synthesis.ffmpeg_env import get_ffmpeg_path
 from videocaptioner.core.utils.logger import setup_logger
 
 from .ass_utils import auto_wrap_ass_file
@@ -183,7 +184,7 @@ def render_ass_preview(
                 # 生成黑色背景
                 subprocess.run(
                     [
-                        "ffmpeg",
+                        get_ffmpeg_path(),
                         "-f",
                         "lavfi",
                         "-i",
@@ -212,7 +213,7 @@ def render_ass_preview(
         fonts_dir_escaped = str(FONTS_PATH).replace("\\", "/").replace(":", r"\:")
 
         cmd = [
-            "ffmpeg",
+            get_ffmpeg_path(),
             "-y",
             "-i",
             str(bg_path_obj),
@@ -246,7 +247,7 @@ def render_ass_preview(
 def _get_video_resolution(video_path: str) -> Tuple[int, int]:
     """获取视频分辨率"""
     result = subprocess.run(
-        ["ffmpeg", "-i", video_path],
+        [get_ffmpeg_path(), "-i", video_path],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -280,7 +281,7 @@ def _render_via_builder(
         supports_two_pass,
     )
     from videocaptioner.core.synthesis.encoder_catalog import get_encoder_spec
-    from videocaptioner.core.synthesis.ffmpeg_env import get_ffmpeg_path, supports_fps_mode
+    from videocaptioner.core.synthesis.ffmpeg_env import supports_fps_mode
 
     probe = None
     if settings.preserve_color or settings.target_height:
@@ -410,7 +411,7 @@ def render_ass_video(
 
         # 检查 CUDA 是否可用
         use_cuda = _check_cuda_available()
-        cmd = ["ffmpeg"]
+        cmd = [get_ffmpeg_path()]
         if use_cuda:
             logger.debug("Using CUDA acceleration")
             cmd.extend(["-hwaccel", "cuda"])
