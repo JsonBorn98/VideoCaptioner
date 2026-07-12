@@ -6,7 +6,14 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QDropEvent
-from PyQt5.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     Action,
     BodyLabel,
@@ -17,6 +24,7 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     LineEdit,
+    Pivot,
     PrimaryPushButton,
     ProgressBar,
     PushButton,
@@ -41,7 +49,6 @@ from videocaptioner.core.entities import (
     SupportedSubtitleFormats,
     SupportedVideoFormats,
     SynthesisTask,
-    VideoQualityEnum,
 )
 from videocaptioner.core.utils.platform_utils import open_folder
 from videocaptioner.ui.common.config import cfg
@@ -68,86 +75,127 @@ class VideoSynthesisInterface(QWidget):
 
     def setup_ui(self):
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setSpacing(20)
+        self.main_layout.setSpacing(12)
 
-        # 创建顶部布局
+        # 顶部：命令栏 + 控制按钮（开始 / 暂停 / 停止）
         top_layout = QHBoxLayout()
-
-        # 添加顶部命令栏
         self.command_bar = CommandBar(self)
         self.command_bar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)  # type: ignore
-        top_layout.addWidget(self.command_bar, 1)  # 设置stretch为1，使其尽可能占用空间
-
-        # 设置命令栏
+        top_layout.addWidget(self.command_bar, 1)
         self._setup_command_bar()
 
-        # 添加开始合成按钮到水平布局
-        self.synthesize_button = PrimaryPushButton(
-            self.tr("开始合成"), self, icon=FIF.PLAY
-        )
+        self.synthesize_button = PrimaryPushButton(self.tr("开始合成"), self, icon=FIF.PLAY)
         self.synthesize_button.setFixedHeight(34)
+        self.pause_button = PushButton(self.tr("暂停"), self)
+        self.pause_button.setFixedHeight(34)
+        self.pause_button.setEnabled(False)
+        self.stop_button = PushButton(self.tr("停止"), self)
+        self.stop_button.setFixedHeight(34)
+        self.stop_button.setEnabled(False)
         top_layout.addWidget(self.synthesize_button)
-
+        top_layout.addWidget(self.pause_button)
+        top_layout.addWidget(self.stop_button)
         self.main_layout.addLayout(top_layout)
 
-        # 配置卡片
-        self.config_card = CardWidget(self)
-        self.config_layout = QVBoxLayout(self.config_card)
-        self.config_layout.setContentsMargins(20, 20, 20, 20)
-        self.config_layout.setSpacing(20)
-
-        # 字幕文件选择
+        # 文件输入（固定）
+        file_card = CardWidget(self)
+        file_layout = QVBoxLayout(file_card)
+        file_layout.setContentsMargins(20, 14, 20, 14)
+        file_layout.setSpacing(12)
         self.subtitle_layout = QHBoxLayout()
         self.subtitle_layout.setSpacing(15)
         self.subtitle_label = BodyLabel(self.tr("字幕文件"), self)
         self.subtitle_input = LineEdit(self)
         self.subtitle_input.setPlaceholderText(self.tr("选择或者拖拽字幕文件"))
-        self.subtitle_input.setAcceptDrops(True)  # 启用拖放
+        self.subtitle_input.setAcceptDrops(True)
         self.subtitle_button = PushButton(self.tr("浏览"))
         self.subtitle_layout.addWidget(self.subtitle_label)
         self.subtitle_layout.addWidget(self.subtitle_input)
         self.subtitle_layout.addWidget(self.subtitle_button)
-        self.config_layout.addLayout(self.subtitle_layout)
-
-        # 视频文件选择
+        file_layout.addLayout(self.subtitle_layout)
         self.video_layout = QHBoxLayout()
         self.video_layout.setSpacing(15)
         self.video_label = BodyLabel(self.tr("视频文件"), self)
         self.video_input = LineEdit(self)
         self.video_input.setPlaceholderText(self.tr("选择或者拖拽视频文件"))
-        self.video_input.setAcceptDrops(True)  # 启用拖放
+        self.video_input.setAcceptDrops(True)
         self.video_button = PushButton(self.tr("浏览"))
         self.video_layout.addWidget(self.video_label)
         self.video_layout.addWidget(self.video_input)
         self.video_layout.addWidget(self.video_button)
-        self.config_layout.addLayout(self.video_layout)
+        file_layout.addLayout(self.video_layout)
+        self.main_layout.addWidget(file_card)
 
-        # 视频编码区（新引擎）
+        # 子页签：视频 / 音频 / 高级（各自可滚动）
+        self.pivot = Pivot(self)
+        self.stack = QStackedWidget(self)
+
+        def _make_page():
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            lay.setContentsMargins(20, 16, 20, 16)
+            lay.setSpacing(16)
+            scroll = SingleDirectionScrollArea(self, orient=Qt.Vertical)  # type: ignore
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(page)
+            scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+            if hasattr(scroll, "enableTransparentBackground"):
+                scroll.enableTransparentBackground()
+            return lay, scroll
+
+        video_lay, video_scroll = _make_page()
+        audio_lay, audio_scroll = _make_page()
+        adv_lay, adv_scroll = _make_page()
+
+        # 借助 self.config_layout 重定向，把各分区分别构建进对应页签
+        self.config_layout = video_lay
         self._setup_encode_section()
-        # 编码器选项 / 分辨率与帧率 / 音频 / 其他·高级（见方案 §5、§4、§11）
         self._setup_encoder_options_section()
         self._setup_resolution_fps_section()
+        video_lay.addStretch(1)
+
+        self.config_layout = audio_lay
         self._setup_audio_section()
+        audio_lay.addStretch(1)
+
+        self.config_layout = adv_lay
         self._setup_advanced_section()
+        self._setup_ffmpeg_section()
+        adv_lay.addStretch(1)
+
+        for idx, (key, title, w) in enumerate(
+            [
+                ("video", self.tr("视频"), video_scroll),
+                ("audio", self.tr("音频"), audio_scroll),
+                ("advanced", self.tr("高级"), adv_scroll),
+            ]
+        ):
+            self.stack.addWidget(w)
+            self.pivot.addItem(
+                routeKey=key, text=title, onClick=lambda i=idx: self.stack.setCurrentIndex(i)
+            )
+        self.pivot.setCurrentItem("video")
+        self.stack.setCurrentIndex(0)
+        self.main_layout.addWidget(self.pivot)
+        self.main_layout.addWidget(self.stack, 1)
+
+        # 底部固定：命令预览 + ffmpeg 控制台
+        bottom_card = CardWidget(self)
+        self.config_layout = QVBoxLayout(bottom_card)
+        self.config_layout.setContentsMargins(20, 12, 20, 12)
+        self.config_layout.setSpacing(10)
         self._setup_command_preview_section()
+        self._setup_console_section()
+        self.main_layout.addWidget(bottom_card)
 
-        # 配置卡放入竖向滚动区（页面较长，顶部工具栏/文件与底部进度保持在滚动区外）
-        self.scroll_area = SingleDirectionScrollArea(self, orient=Qt.Vertical)  # type: ignore
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setWidget(self.config_card)
-        self.scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        if hasattr(self.scroll_area, "enableTransparentBackground"):
-            self.scroll_area.enableTransparentBackground()
-        self.main_layout.addWidget(self.scroll_area, 1)
-
-        # 底部进度条和状态信息
+        # 进度条 + 状态
         self.bottom_layout = QHBoxLayout()
         self.progress_bar = ProgressBar(self)
         self.status_label = BodyLabel(self.tr("就绪"), self)
-        self.status_label.setMinimumWidth(100)  # 设置最小宽度
-        self.status_label.setAlignment(Qt.AlignCenter)  # type: ignore  # 设置文本居中对齐
-        self.bottom_layout.addWidget(self.progress_bar, 1)  # 进度条使用剩余空间
-        self.bottom_layout.addWidget(self.status_label)  # 状态标签使用固定宽度
+        self.status_label.setMinimumWidth(100)
+        self.status_label.setAlignment(Qt.AlignCenter)  # type: ignore
+        self.bottom_layout.addWidget(self.progress_bar, 1)
+        self.bottom_layout.addWidget(self.status_label)
         self.main_layout.addLayout(self.bottom_layout)
 
     def _setup_command_bar(self):
@@ -195,25 +243,6 @@ class VideoSynthesisInterface(QWidget):
 
         self.command_bar.addSeparator()
 
-        # 添加视频质量选择下拉按钮
-        self.video_quality_button = TransparentDropDownPushButton(
-            self.tr("视频质量"), self, FIF.SPEED_HIGH
-        )
-        self.video_quality_button.setFixedHeight(34)
-        self.video_quality_button.setMinimumWidth(125)
-        self.video_quality_menu = RoundMenu(parent=self)
-        for quality in VideoQualityEnum:
-            action = Action(text=quality.value)
-            action.triggered.connect(
-                lambda checked, q=quality.value: self.on_video_quality_action_changed(q)
-            )
-            self.video_quality_menu.addAction(action)
-        self.video_quality_button.setMenu(self.video_quality_menu)
-        self.command_bar.addWidget(self.video_quality_button)
-
-        # 添加分隔符
-        self.command_bar.addSeparator()
-
         # 添加是否合成视频选项
         self.need_video_action = Action(
             FIF.VIDEO,
@@ -223,12 +252,6 @@ class VideoSynthesisInterface(QWidget):
         )
         self.need_video_action.setToolTip(self.tr("是否生成新的视频文件"))
         self.command_bar.addAction(self.need_video_action)
-
-        self.command_bar.addSeparator()
-
-        # ffmpeg 核心管理（来源 / 打开目录 / 可用性测试）
-        self._setup_ffmpeg_menu()
-        self.command_bar.addWidget(self.ffmpeg_button)
 
         self.command_bar.addSeparator()
 
@@ -289,11 +312,12 @@ class VideoSynthesisInterface(QWidget):
         self.synthesize_button.clicked.connect(
             lambda: self.start_video_synthesis(need_create_task=True)
         )
+        self.stop_button.clicked.connect(self._on_stop_clicked)
+        self.pause_button.clicked.connect(self._on_pause_clicked)
 
         # 全局 signalBus
         signalBus.soft_subtitle_changed.connect(self.on_soft_subtitle_changed)
         signalBus.need_video_changed.connect(self.on_need_video_changed)
-        signalBus.video_quality_changed.connect(self.on_video_quality_changed)
         signalBus.use_subtitle_style_changed.connect(self.on_use_style_changed)
         signalBus.subtitle_render_mode_changed.connect(self.on_render_mode_changed_external)
 
@@ -301,7 +325,6 @@ class VideoSynthesisInterface(QWidget):
         """设置初始值"""
         self.soft_subtitle_action.setChecked(cfg.soft_subtitle.value)
         self.need_video_action.setChecked(cfg.need_video.value)
-        self.video_quality_button.setText(cfg.video_quality.value.value)
 
         # 设置样式相关初始值
         self.use_style_action.setChecked(cfg.use_subtitle_style.value)
@@ -370,25 +393,6 @@ class VideoSynthesisInterface(QWidget):
         self.need_video_action.setChecked(checked)
         self._update_synthesis_controls_state()
 
-    def on_video_quality_action_changed(self, quality_text: str):
-        """处理质量选择"""
-        # 根据文本找到对应的枚举
-        quality_enum = None
-        for e in VideoQualityEnum:
-            if e.value == quality_text:
-                quality_enum = e
-                break
-
-        if quality_enum is None:
-            return
-
-        cfg.set(cfg.video_quality, quality_enum)
-        self.video_quality_button.setText(quality_text)
-
-    def on_video_quality_changed(self, quality_text: str):
-        """处理外部质量配置变更（仅更新UI状态）"""
-        self.video_quality_button.setText(quality_text)
-
     def on_use_style_action_triggered(self, checked: bool):
         """处理使用样式开关点击"""
         cfg.set(cfg.use_subtitle_style, checked)
@@ -443,7 +447,6 @@ class VideoSynthesisInterface(QWidget):
         # 合成视频关闭时，禁用所有相关选项
         self.soft_subtitle_action.setEnabled(need_video)
         self.use_style_action.setEnabled(need_video)
-        self.video_quality_button.setEnabled(need_video)
 
         # 渲染模式按钮需要同时满足：合成视频开启 且 使用样式开启
         self._update_style_controls_state()
@@ -565,39 +568,72 @@ class VideoSynthesisInterface(QWidget):
             )
             self.encoder_menu.addAction(action)
 
-    def _setup_ffmpeg_menu(self):
-        """ffmpeg 核心管理下拉：来源切换 / 打开核心目录 / 可用性测试（见方案 §10.1）。"""
-        self.ffmpeg_button = TransparentDropDownPushButton(
-            self.tr("ffmpeg 核心"), self, FIF.SETTING
+    def _setup_console_section(self):
+        """底部只读 ffmpeg 控制台：实时显示编码输出（frame/fps/time/speed）。"""
+        row = QHBoxLayout()
+        row.addWidget(BodyLabel(self.tr("ffmpeg 输出"), self))
+        row.addStretch(1)
+        self.clear_console_button = PushButton(self.tr("清空"), self)
+        row.addWidget(self.clear_console_button)
+        self.config_layout.addLayout(row)
+        self.console = TextEdit(self)
+        self.console.setReadOnly(True)
+        self.console.setFixedHeight(120)
+        self.config_layout.addWidget(self.console)
+        self._console_buf: list[str] = []
+        self._last_was_stats = False
+        self.clear_console_button.clicked.connect(self._clear_console)
+
+    def _clear_console(self):
+        self._console_buf = []
+        self._last_was_stats = False
+        self.console.clear()
+
+    def _append_console(self, line: str):
+        buf = self._console_buf
+        is_stats = "time=" in line and (
+            "frame=" in line or "speed=" in line or "bitrate=" in line
         )
-        self.ffmpeg_button.setFixedHeight(34)
-        menu = RoundMenu(parent=self)
-        src = cfg.ffmpeg_source.value
-        self._ffmpeg_default_action = Action(self.tr("内置 (默认)"), checkable=True)
-        self._ffmpeg_custom_action = Action(self.tr("自定义 (用户目录)"), checkable=True)
-        self._ffmpeg_default_action.setChecked(src == "default")
-        self._ffmpeg_custom_action.setChecked(src == "custom")
-        self._ffmpeg_default_action.triggered.connect(
-            lambda: self._on_ffmpeg_source_changed("default")
+        if is_stats and buf and self._last_was_stats:
+            buf[-1] = line  # 就地更新滚动状态行，避免刷屏
+        else:
+            buf.append(line)
+        self._last_was_stats = is_stats
+        if len(buf) > 600:
+            del buf[: len(buf) - 600]
+        self.console.setPlainText("\n".join(buf))
+        sb = self.console.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _setup_ffmpeg_section(self):
+        """ffmpeg 核心：来源切换 / 打开核心目录 / 可用性测试（见方案 §10.1；移入高级页签）。"""
+        header = BodyLabel(self.tr("ffmpeg 核心"), self)
+        header.setStyleSheet("font-weight: bold;")
+        self.config_layout.addWidget(header)
+
+        row = QHBoxLayout()
+        row.setSpacing(15)
+        row.addWidget(BodyLabel(self.tr("来源"), self))
+        self.ffmpeg_source_combo = ComboBox(self)
+        self.ffmpeg_source_combo.addItem(self.tr("内置 (默认)"), userData="default")
+        self.ffmpeg_source_combo.addItem(self.tr("自定义 (用户目录)"), userData="custom")
+        self.ffmpeg_source_combo.setCurrentIndex(0 if cfg.ffmpeg_source.value == "default" else 1)
+        self.open_core_button = PushButton(self.tr("打开核心目录"), self)
+        self.test_core_button = PushButton(self.tr("可用性测试"), self)
+        row.addWidget(self.ffmpeg_source_combo)
+        row.addWidget(self.open_core_button)
+        row.addWidget(self.test_core_button)
+        row.addStretch(1)
+        self.config_layout.addLayout(row)
+
+        self.ffmpeg_source_combo.currentIndexChanged.connect(
+            lambda idx: self._on_ffmpeg_source_changed("default" if idx == 0 else "custom")
         )
-        self._ffmpeg_custom_action.triggered.connect(
-            lambda: self._on_ffmpeg_source_changed("custom")
-        )
-        menu.addAction(self._ffmpeg_default_action)
-        menu.addAction(self._ffmpeg_custom_action)
-        menu.addSeparator()
-        menu.addAction(
-            Action(FIF.FOLDER, self.tr("打开核心目录"), triggered=self._open_ffmpeg_dir)
-        )
-        menu.addAction(
-            Action(FIF.SYNC, self.tr("可用性测试"), triggered=self._on_availability_test)
-        )
-        self.ffmpeg_button.setMenu(menu)
+        self.open_core_button.clicked.connect(self._open_ffmpeg_dir)
+        self.test_core_button.clicked.connect(self._on_availability_test)
 
     def _on_ffmpeg_source_changed(self, source: str):
         cfg.set(cfg.ffmpeg_source, source)
-        self._ffmpeg_default_action.setChecked(source == "default")
-        self._ffmpeg_custom_action.setChecked(source == "custom")
         try:
             from videocaptioner.core.synthesis import clear_probe_cache
 
@@ -1216,6 +1252,7 @@ class VideoSynthesisInterface(QWidget):
             self.task = self.create_task()
 
         if self.task:
+            self._clear_console()
             self.video_synthesis_thread = VideoSynthesisThread(self.task)
             self.video_synthesis_thread.finished.connect(
                 self.on_video_synthesis_finished
@@ -1224,15 +1261,45 @@ class VideoSynthesisInterface(QWidget):
                 self.on_video_synthesis_progress
             )
             self.video_synthesis_thread.error.connect(self.on_video_synthesis_error)
+            self.video_synthesis_thread.cancelled.connect(self.on_video_synthesis_cancelled)
+            self.video_synthesis_thread.log.connect(self._append_console)
             self.video_synthesis_thread.start()
+            self.stop_button.setEnabled(True)
+            self.pause_button.setEnabled(True)
+            self.pause_button.setText(self.tr("暂停"))
         else:
             self.synthesize_button.setEnabled(True)
 
     def process(self):
         self.start_video_synthesis(need_create_task=False)
 
-    def on_video_synthesis_finished(self, task):
+    def _reset_run_controls(self):
         self.synthesize_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setText(self.tr("暂停"))
+
+    def _on_stop_clicked(self):
+        t = getattr(self, "video_synthesis_thread", None)
+        if t is not None and t.isRunning():
+            self.status_label.setText(self.tr("正在停止…"))
+            t.stop()
+
+    def _on_pause_clicked(self):
+        t = getattr(self, "video_synthesis_thread", None)
+        if t is None or not t.isRunning():
+            return
+        if t.is_paused():
+            t.resume()
+            self.pause_button.setText(self.tr("暂停"))
+            self.status_label.setText(self.tr("已恢复"))
+        else:
+            t.pause()
+            self.pause_button.setText(self.tr("继续"))
+            self.status_label.setText(self.tr("已暂停"))
+
+    def on_video_synthesis_finished(self, task):
+        self._reset_run_controls()
         self.progress_bar.setValue(100)
         self.open_video_folder()
         InfoBar.success(
@@ -1248,12 +1315,24 @@ class VideoSynthesisInterface(QWidget):
         self.status_label.setText(message)
 
     def on_video_synthesis_error(self, error):
-        self.synthesize_button.setEnabled(True)
+        self._reset_run_controls()
         self.progress_bar.error()
         InfoBar.error(
             self.tr("错误"),
             str(error),
             duration=INFOBAR_DURATION_ERROR,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+
+    def on_video_synthesis_cancelled(self):
+        self._reset_run_controls()
+        self.progress_bar.reset()
+        self.status_label.setText(self.tr("已取消"))
+        InfoBar.warning(
+            self.tr("已取消"),
+            self.tr("合成已停止，未完成的输出已清理"),
+            duration=INFOBAR_DURATION_WARNING,
             position=InfoBarPosition.TOP,
             parent=self,
         )

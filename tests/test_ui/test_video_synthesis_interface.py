@@ -129,7 +129,7 @@ app = QApplication([])
 saved = cfg.ffmpeg_source.value
 try:
     w = VideoSynthesisInterface()
-    assert hasattr(w, 'ffmpeg_button')
+    assert hasattr(w, 'ffmpeg_source_combo')
     assert len(w.encoder_menu.actions()) >= 10
     w._on_ffmpeg_source_changed('custom')
     assert cfg.ffmpeg_source.value == 'custom'
@@ -355,5 +355,50 @@ finally:
     cfg.set(cfg.container, saved[4])
 """
     )
+
+
+def test_subtabs_console_and_run_controls():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
+
+app = QApplication([])
+w = VideoSynthesisInterface()
+
+# 分子页签：视频 / 音频 / 高级 三页
+assert w.stack.count() == 3, w.stack.count()
+assert len(w.pivot.items) == 3
+
+# 合成控制按钮：初始禁用暂停/停止
+assert w.synthesize_button.isEnabled() is True
+assert w.pause_button.isEnabled() is False
+assert w.stop_button.isEnabled() is False
+
+# 控制台只读，追加/清空可用，状态行合并
+assert w.console.isReadOnly()
+w._clear_console()
+assert w.console.toPlainText() == ''
+w._append_console('frame= 1 fps=0 time=00:00:00.10')
+w._append_console('frame= 2 fps=0 time=00:00:00.20')  # 状态行应就地覆盖
+w._append_console('done')
+text = w.console.toPlainText()
+assert 'time=00:00:00.20' in text
+assert 'time=00:00:00.10' not in text  # 旧状态行被覆盖
+assert 'done' in text
+
+# 运行态复位：启用开始、禁用暂停/停止、暂停按钮文案还原
+w.pause_button.setText('继续')
+w._reset_run_controls()
+assert w.synthesize_button.isEnabled() is True
+assert w.pause_button.isEnabled() is False
+assert w.stop_button.isEnabled() is False
+assert w.pause_button.text() == '暂停'
+
+w.close()
+print('OK')
+"""
+    )
+
 
 
