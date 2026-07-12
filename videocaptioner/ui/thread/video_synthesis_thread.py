@@ -49,6 +49,27 @@ class VideoSynthesisThread(QThread):
             if not output_path:
                 raise ValueError(self.tr("输出路径为空"))
 
+            # 输出命名：worker 内探测源，按编码设置 + 有效高度细化 【视频合成】… 名（见 §9/§16.1）
+            es = config.encode_settings
+            if es is not None:
+                from dataclasses import replace
+
+                from videocaptioner.core.synthesis import build_output_name, media_probe
+
+                try:
+                    probe = media_probe.probe(video_file, source=es.ffmpeg_source)
+                    eff_h = probe.effective_height(es.target_height)
+                except Exception:
+                    eff_h = None
+                # 软字幕走流复制，命名体现 copy
+                name_es = replace(es, video_encoder="copy") if config.soft_subtitle else es
+                out_dir = Path(output_path).parent
+                output_path = str(
+                    out_dir
+                    / build_output_name(Path(video_file).stem, name_es, eff_h, es.container)
+                )
+                self.task.output_path = output_path
+
             video_quality = config.video_quality
             crf = video_quality.get_crf()
             preset = video_quality.get_preset()

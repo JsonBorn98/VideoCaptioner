@@ -102,6 +102,8 @@ try:
     assert es.encode_mode == 'abr'
     assert es.bitrate_kbps == 6000
     assert es.quality == 30
+    # output naming: provisional 【视频合成】 name, height 'src' until worker probes
+    assert task.output_path.endswith('【视频合成】video_src_nvenc_h265_6000k.mp4'), task.output_path
 
     # hard-burn must never be copy (derived rule)
     cfg.set(cfg.video_encoder, 'copy')

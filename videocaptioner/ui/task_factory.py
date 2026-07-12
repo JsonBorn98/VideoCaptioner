@@ -419,7 +419,7 @@ class TaskFactory:
         input_data=None,
     ) -> SynthesisTask:
         """创建视频合成任务"""
-        output_path = str(Path(video_path).parent / f"【卡卡】{Path(video_path).stem}.mp4")
+        # provisional 输出名（高度 'src'，由 worker 探测后细化，见 §16.1）
 
         # 只有启用样式时才传入样式配置
         use_style = cfg.use_subtitle_style.value
@@ -449,6 +449,21 @@ class TaskFactory:
             audio_encoder="copy",
             container="mp4",
             ffmpeg_source=cfg.ffmpeg_source.value,
+        )
+        from dataclasses import replace
+
+        from videocaptioner.core.synthesis import build_output_name
+
+        _name_es = (
+            replace(encode_settings, video_encoder="copy")
+            if cfg.soft_subtitle.value
+            else encode_settings
+        )
+        output_path = str(
+            Path(video_path).parent
+            / build_output_name(
+                Path(video_path).stem, _name_es, None, encode_settings.container
+            )
         )
         config = SynthesisConfig(
             need_video=cfg.need_video.value,
