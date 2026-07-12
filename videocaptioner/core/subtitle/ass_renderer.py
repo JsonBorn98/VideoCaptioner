@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -17,6 +18,7 @@ from .ass_utils import auto_wrap_ass_file
 
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
+    from videocaptioner.core.synthesis.models import EncodeSettings
 
 logger = setup_logger("subtitle.ass")
 ReferenceHeight = int | float | str | None
@@ -262,6 +264,67 @@ def _get_video_resolution(video_path: str) -> Tuple[int, int]:
     return 1920, 1080  # 默认返回 1080P
 
 
+def _render_via_builder(
+    *,
+    video_path: str,
+    output_path: str,
+    video_filter: str,
+    settings: "EncodeSettings",
+    progress_callback: Optional[Callable] = None,
+) -> None:
+    """新引擎路径：结构化编码设置 -> 集中命令构建器 -> 执行（见方案 §7/§16）。"""
+    from videocaptioner.core.synthesis import media_probe, runner
+    from videocaptioner.core.synthesis.command_builder import (
+        build_ffmpeg_command,
+        build_two_pass_commands,
+        supports_two_pass,
+    )
+    from videocaptioner.core.synthesis.encoder_catalog import get_encoder_spec
+    from videocaptioner.core.synthesis.ffmpeg_env import get_ffmpeg_path, supports_fps_mode
+
+    probe = None
+    if settings.preserve_color or settings.target_height:
+        probe = media_probe.probe(video_path, source=settings.ffmpeg_source)
+
+    # 分辨率下缩：以探测高度为唯一基准（§16.7/§16.9），scale 置于 ass 之后
+    vf = video_filter
+    if probe is not None and settings.target_height and probe.height:
+        eff_h = probe.effective_height(settings.target_height)
+        if eff_h and eff_h < probe.height:
+            vf = f"{vf},scale=-2:{eff_h}"
+
+    ffmpeg = get_ffmpeg_path(settings.ffmpeg_source)
+
+    # 解码加速：硬件编码器交给构建器按后端推导；CPU 编码器沿用机会性 CUDA 解码（§16.3）
+    decode_hwaccel = None
+    spec = get_encoder_spec(settings.video_encoder)
+    if (spec is None or not spec.is_hardware) and _check_cuda_available():
+        decode_hwaccel = "cuda"
+
+    vfr_flag = "-fps_mode" if supports_fps_mode(ffmpeg) else "-vsync"
+    total = (probe.duration_seconds or None) if probe else None
+
+    if supports_two_pass(settings):
+        passdir = tempfile.mkdtemp(prefix="vc_2pass_")
+        passlog = os.path.join(passdir, "log")
+        p1, p2 = build_two_pass_commands(
+            ffmpeg=ffmpeg, input_path=video_path, output_path=output_path,
+            video_filter=vf, settings=settings, probe=probe, passlog=passlog,
+            decode_hwaccel=decode_hwaccel, vfr_flag=vfr_flag,
+        )
+        try:
+            runner.run_two_pass(p1, p2, progress_callback=progress_callback, total_duration=total)
+        finally:
+            shutil.rmtree(passdir, ignore_errors=True)
+    else:
+        cmd = build_ffmpeg_command(
+            ffmpeg=ffmpeg, input_path=video_path, output_path=output_path,
+            video_filter=vf, settings=settings, probe=probe,
+            decode_hwaccel=decode_hwaccel, vfr_flag=vfr_flag,
+        )
+        runner.run_encode(cmd, progress_callback=progress_callback, total_duration=total)
+
+
 def render_ass_video(
     video_path: str,
     asr_data: "ASRData",
@@ -272,6 +335,7 @@ def render_ass_video(
     preset: str = "medium",
     progress_callback: Optional[Callable] = None,
     reference_height: int = 720,
+    encode_settings: "Optional[EncodeSettings]" = None,
 ) -> None:
     """
     渲染 ASS 样式字幕到视频（硬字幕）
@@ -332,6 +396,17 @@ def render_ass_video(
 
         # 统一使用 ass 滤镜
         vf = f"ass='{subtitle_path_escaped}':fontsdir='{fonts_dir_escaped}'"
+
+        # 新引擎路径：结构化编码设置存在时走集中命令构建器（见 ADR 0007）
+        if encode_settings is not None:
+            _render_via_builder(
+                video_path=video_path,
+                output_path=output_path,
+                video_filter=vf,
+                settings=encode_settings,
+                progress_callback=progress_callback,
+            )
+            return
 
         # 检查 CUDA 是否可用
         use_cuda = _check_cuda_available()

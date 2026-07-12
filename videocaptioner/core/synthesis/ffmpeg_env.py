@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +18,9 @@ from videocaptioner.config import BIN_PATH, BUNDLED_BIN_PATH
 from videocaptioner.core.utils.logger import setup_logger
 
 logger = setup_logger("synthesis.ffmpeg_env")
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+_VERSION_RE = re.compile(r"ffmpeg version n?(\d+)\.(\d+)")
 
 
 def _resolve(name: str, source: str, custom_dir: Optional[str]) -> str:
@@ -49,3 +56,24 @@ def get_ffmpeg_path(source: str = "default", custom_dir: Optional[str] = None) -
 def get_ffprobe_path(source: str = "default", custom_dir: Optional[str] = None) -> str:
     """解析当前生效的 ffprobe 可执行文件路径。"""
     return _resolve("ffprobe", source, custom_dir)
+
+
+@lru_cache(maxsize=8)
+def supports_fps_mode(ffmpeg: str) -> bool:
+    """当前 ffmpeg 是否支持 -fps_mode（5.1+）；旧版应回退 -vsync（见 §16.1）。
+
+    解析失败时保守假定支持（现代构建居多）；缓存按二进制路径。
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-version"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
+        )
+    except OSError:
+        return True
+    m = _VERSION_RE.search(result.stdout or "")
+    if not m:
+        return True
+    major, minor = int(m.group(1)), int(m.group(2))
+    return (major, minor) >= (5, 1)

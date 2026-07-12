@@ -87,9 +87,42 @@ def test_default_x264_hard_burn():
     assert cmd[cmd.index("-vf") + 1] == FILTER
     assert "+faststart" in cmd and "make_zero" in cmd
     assert cmd[cmd.index("-fps_mode") + 1] == "vfr"
-    # color passthrough from probe
+    # color passthrough from probe (pix_fmt is NOT forced -- avoids hard-fail)
     assert cmd[cmd.index("-color_primaries") + 1] == "bt709"
-    assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert "-pix_fmt" not in cmd
+
+
+def test_no_forced_pix_fmt_but_color_tags_kept():
+    cmd = cb.build_ffmpeg_command(
+        ffmpeg=FF, input_path="in.mp4", output_path="out.mp4",
+        video_filter=None, settings=EncodeSettings(), probe=_probe(),
+    )
+    assert "-pix_fmt" not in cmd
+    assert cmd[cmd.index("-color_range") + 1] == "tv"
+
+
+def test_cpu_decode_hwaccel_override():
+    s = EncodeSettings(video_encoder="x264")
+    cmd = cb.build_ffmpeg_command(
+        ffmpeg=FF, input_path="in.mp4", output_path="out.mp4",
+        video_filter=FILTER, settings=s, probe=None, decode_hwaccel="cuda",
+    )
+    assert cmd[cmd.index("-hwaccel") + 1] == "cuda"
+    # CPU encoder without override -> no decode hwaccel
+    cmd2 = cb.build_ffmpeg_command(
+        ffmpeg=FF, input_path="in.mp4", output_path="out.mp4",
+        video_filter=FILTER, settings=s, probe=None,
+    )
+    assert "-hwaccel" not in cmd2
+
+
+def test_vfr_flag_fallback_for_old_ffmpeg():
+    cmd = cb.build_ffmpeg_command(
+        ffmpeg=FF, input_path="in.mp4", output_path="out.mp4",
+        video_filter=None, settings=EncodeSettings(), probe=None, vfr_flag="-vsync",
+    )
+    assert cmd[cmd.index("-vsync") + 1] == "vfr"
+    assert "-fps_mode" not in cmd
 
 
 def test_copy_skips_quality_and_color():

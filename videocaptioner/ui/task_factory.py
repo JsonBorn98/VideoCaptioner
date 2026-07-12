@@ -434,6 +434,20 @@ class TaskFactory:
                 cfg.subtitle_style_reference_height.value,
             )
         )
+        # 新引擎编码设置：暂由现有质量档位映射（完整 GUI 控件为后续增量）。
+        # 软字幕不消费 encode_settings（走 add_subtitles copy 路），故编码器恒为 x264，
+        # 避免 "copy" 值若被误路由到构建器时与 -vf 冲突。
+        from videocaptioner.core.synthesis.models import EncodeSettings
+
+        _vq = cfg.video_quality.value
+        encode_settings = EncodeSettings(
+            video_encoder="x264",
+            encode_mode="cq",
+            quality=_vq.get_crf(),
+            enc_preset=_vq.get_preset(),
+            audio_encoder="copy",
+            container="mp4",
+        )
         config = SynthesisConfig(
             need_video=cfg.need_video.value,
             soft_subtitle=cfg.soft_subtitle.value,
@@ -448,6 +462,7 @@ class TaskFactory:
             ),
             reference_width=reference_width,
             reference_height=reference_height,
+            encode_settings=encode_settings,
         )
 
         task = SynthesisTask(

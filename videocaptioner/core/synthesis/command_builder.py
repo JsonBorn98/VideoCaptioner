@@ -45,8 +45,6 @@ def build_video_args(settings: EncodeSettings, probe: Optional[MediaProbe]) -> l
     args += cat.render_preset_args(spec, settings)
     args += cat.render_tune_args(spec, settings)
     args += cat.render_profile_level_args(spec, settings)
-    if settings.preserve_color and probe and probe.pix_fmt:
-        args += ["-pix_fmt", probe.pix_fmt]
     return args
 
 
@@ -76,8 +74,11 @@ def build_color_args(settings: EncodeSettings, probe: Optional[MediaProbe]) -> l
     return args
 
 
-def build_misc_args(settings: EncodeSettings) -> list[str]:
-    """faststart / 元数据 / 帧率+VFR / 起始归零（输出侧）。"""
+def build_misc_args(settings: EncodeSettings, vfr_flag: str = "-fps_mode") -> list[str]:
+    """faststart / 元数据 / 帧率+VFR / 起始归零（输出侧）。
+
+    vfr_flag 由调用方按 ffmpeg 能力决定（新版 -fps_mode，旧版回退 -vsync；见 §16.1）。
+    """
     args: list[str] = []
     if settings.faststart and settings.container in ("mp4", "mov"):
         args += ["-movflags", "+faststart"]
@@ -86,21 +87,27 @@ def build_misc_args(settings: EncodeSettings) -> list[str]:
     if settings.fps:
         args += ["-r", str(settings.fps)]
     if settings.vfr:
-        args += ["-fps_mode", "vfr"]
+        args += [vfr_flag, "vfr"]
     if settings.start_zero:
         args += ["-avoid_negative_ts", "make_zero"]
     return args
 
 
-def _input_opts(settings: EncodeSettings, has_filter: bool) -> list[str]:
-    """输入侧选项：硬件解码加速 + genpts（配合起始归零）。"""
+def _input_opts(settings: EncodeSettings, decode_hwaccel: Optional[str]) -> list[str]:
+    """输入侧选项：硬件解码加速 + genpts（配合起始归零）。
+
+    decode_hwaccel 由调用方解析（硬件编码器按后端，CPU 编码器机会性 CUDA）；
+    为 None 时按编码器后端推导硬件解码 api。不加 -hwaccel_output_format，
+    帧落系统内存供 ass 滤镜（见 §16.3）。
+    """
     opts: list[str] = []
-    spec = cat.get_encoder_spec(settings.video_encoder)
-    if spec is not None and spec.is_hardware:
-        api = _DECODE_HWACCEL.get(spec.backend)
-        if api:
-            # 存在字幕滤镜时不加 -hwaccel_output_format，帧落系统内存（见 §16.3）
-            opts += ["-hwaccel", api]
+    api = decode_hwaccel
+    if api is None:
+        spec = cat.get_encoder_spec(settings.video_encoder)
+        if spec is not None and spec.is_hardware:
+            api = _DECODE_HWACCEL.get(spec.backend)
+    if api:
+        opts += ["-hwaccel", api]
     if settings.start_zero:
         opts += ["-fflags", "+genpts"]
     return opts
@@ -114,17 +121,19 @@ def build_ffmpeg_command(
     video_filter: Optional[str],
     settings: EncodeSettings,
     probe: Optional[MediaProbe],
+    decode_hwaccel: Optional[str] = None,
+    vfr_flag: str = "-fps_mode",
 ) -> list[str]:
     """组装完整 ffmpeg 命令（单遍 / 2-pass 的 pass2）。"""
     cmd = [ffmpeg, "-y"]
-    cmd += _input_opts(settings, bool(video_filter))
+    cmd += _input_opts(settings, decode_hwaccel)
     cmd += ["-i", input_path]
     if video_filter:
         cmd += ["-vf", video_filter]
     cmd += build_video_args(settings, probe)
     cmd += build_color_args(settings, probe)
     cmd += build_audio_args(settings)
-    cmd += build_misc_args(settings)
+    cmd += build_misc_args(settings, vfr_flag)
     if settings.extra_args.strip():
         cmd += shlex.split(settings.extra_args)
     cmd += [output_path]
@@ -148,13 +157,15 @@ def build_two_pass_commands(
     settings: EncodeSettings,
     probe: Optional[MediaProbe],
     passlog: str,
+    decode_hwaccel: Optional[str] = None,
+    vfr_flag: str = "-fps_mode",
 ) -> tuple[list[str], list[str]]:
     """返回 (pass1, pass2)。pass1 仍带 -vf 字幕滤镜使码率统计与成片一致（见 §16.8）。"""
     spec = cat.get_encoder_spec(settings.video_encoder)
     enc = spec.ffmpeg_name if spec else settings.video_encoder
 
     pass1 = [ffmpeg, "-y"]
-    pass1 += _input_opts(settings, bool(video_filter))
+    pass1 += _input_opts(settings, decode_hwaccel)
     pass1 += ["-i", input_path]
     if video_filter:
         pass1 += ["-vf", video_filter]
@@ -165,6 +176,7 @@ def build_two_pass_commands(
     pass2 = build_ffmpeg_command(
         ffmpeg=ffmpeg, input_path=input_path, output_path=output_path,
         video_filter=video_filter, settings=settings, probe=probe,
+        decode_hwaccel=decode_hwaccel, vfr_flag=vfr_flag,
     )
     # 在输出路径前插入 -pass 2 -passlogfile
     pass2 = pass2[:-1] + ["-pass", "2", "-passlogfile", passlog, pass2[-1]]

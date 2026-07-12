@@ -20,6 +20,7 @@ from ..utils.logger import setup_logger
 
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
+    from videocaptioner.core.synthesis.models import EncodeSettings
 
 # FFmpeg preset 类型
 PresetType = Literal[
@@ -549,6 +550,7 @@ def add_subtitles_with_style(
     crf: int = 23,
     preset: PresetType = "medium",
     progress_callback: Optional[Callable] = None,
+    encode_settings: "Optional[EncodeSettings]" = None,
 ) -> None:
     """
     根据渲染模式选择合成方式
@@ -595,4 +597,5 @@ def add_subtitles_with_style(
             preset=preset,
             progress_callback=progress_callback,
             reference_height=reference_height,
+            encode_settings=encode_settings,
         )

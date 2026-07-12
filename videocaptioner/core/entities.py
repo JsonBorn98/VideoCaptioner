@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
     from videocaptioner.core.postprocess.models import PostprocessTask
+    from videocaptioner.core.synthesis.models import EncodeSettings
     from videocaptioner.core.translate.types import TargetLanguage
 
 
@@ -793,6 +794,8 @@ class SynthesisConfig:
     rounded_style: Optional[dict] = None  # 圆角背景样式配置
     reference_width: int = 1280
     reference_height: int = 720
+    # 新引擎结构化编码设置（存在时优先于 video_quality 走集中命令构建器）
+    encode_settings: "Optional[EncodeSettings]" = None
 
     def print_config(self) -> str:
         """Print video synthesis configuration"""
