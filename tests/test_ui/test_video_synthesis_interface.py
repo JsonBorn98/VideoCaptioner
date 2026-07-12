@@ -366,9 +366,22 @@ from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInter
 app = QApplication([])
 w = VideoSynthesisInterface()
 
-# 分子页签：视频 / 音频 / 高级 三页
-assert w.stack.count() == 3, w.stack.count()
-assert len(w.pivot.items) == 3
+# 分子页签：基本 / 高级 两页
+assert w.stack.count() == 2, w.stack.count()
+assert len(w.pivot.items) == 2
+
+# 基本页含视频/音频可视化控件；高级页含自定义参数、命令预览、控制台
+assert w.encoder_button.parent() is not None
+assert w.command_preview in w.advanced_tab.findChildren(type(w.command_preview))
+assert w.console in w.advanced_tab.findChildren(type(w.console))
+
+# 页签切换（基本 <-> 高级）应稳定，且 pivot 与 stack 同步
+w.stack.setCurrentWidget(w.advanced_tab)
+app.processEvents()
+assert w.pivot.currentRouteKey() == 'advanced'
+w.stack.setCurrentWidget(w.basic_tab)
+app.processEvents()
+assert w.pivot.currentRouteKey() == 'basic'
 
 # 合成控制按钮：初始禁用暂停/停止
 assert w.synthesize_button.isEnabled() is True

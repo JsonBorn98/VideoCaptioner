@@ -29,7 +29,7 @@ from qfluentwidgets import (
     ProgressBar,
     PushButton,
     RoundMenu,
-    SingleDirectionScrollArea,
+    ScrollArea,
     Slider,
     SwitchButton,
     TextEdit,
@@ -55,6 +55,36 @@ from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.video_synthesis_thread import VideoSynthesisThread
+
+
+class _ScrollTab(ScrollArea):
+    """可滚动的分区容器：一个页签的内容装在一个纵向可滚动的 body 里。
+
+    关键点：横向滚动条常关（``ScrollBarAlwaysOff``）。否则 ``setWidgetResizable``
+    的滚动区在“短页/长页”之间来回切换时，纵向滚动条的显隐会改变内容宽度，
+    触发布局反复重算而卡死（见 speed_setting_interface 的同款写法）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._body = QWidget(self)
+        self._body.setObjectName("synthScrollBody")
+        self._body.setAutoFillBackground(False)
+        self.body_layout = QVBoxLayout(self._body)
+        self.body_layout.setContentsMargins(8, 10, 12, 12)
+        self.body_layout.setSpacing(16)
+        self.setWidget(self._body)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
+        self.viewport().setObjectName("synthScrollViewport")
+        self.viewport().setAutoFillBackground(False)
+        self.setStyleSheet(
+            """
+            QScrollArea { border: none; background: transparent; }
+            QWidget#synthScrollBody,
+            QWidget#synthScrollViewport { background: transparent; }
+            """
+        )
 
 
 class VideoSynthesisInterface(QWidget):
@@ -126,67 +156,43 @@ class VideoSynthesisInterface(QWidget):
         file_layout.addLayout(self.video_layout)
         self.main_layout.addWidget(file_card)
 
-        # 子页签：视频 / 音频 / 高级（各自可滚动）
+        # 子页签：基本（视频+音频可视化选项）/ 高级（自定义参数、命令预览、输出预览）
         self.pivot = Pivot(self)
         self.stack = QStackedWidget(self)
 
-        def _make_page():
-            page = QWidget()
-            lay = QVBoxLayout(page)
-            lay.setContentsMargins(20, 16, 20, 16)
-            lay.setSpacing(16)
-            scroll = SingleDirectionScrollArea(self, orient=Qt.Vertical)  # type: ignore
-            scroll.setWidgetResizable(True)
-            scroll.setWidget(page)
-            scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-            if hasattr(scroll, "enableTransparentBackground"):
-                scroll.enableTransparentBackground()
-            return lay, scroll
-
-        video_lay, video_scroll = _make_page()
-        audio_lay, audio_scroll = _make_page()
-        adv_lay, adv_scroll = _make_page()
+        self.basic_tab = _ScrollTab(self)
+        self.advanced_tab = _ScrollTab(self)
 
         # 借助 self.config_layout 重定向，把各分区分别构建进对应页签
-        self.config_layout = video_lay
+        self.config_layout = self.basic_tab.body_layout
         self._setup_encode_section()
         self._setup_encoder_options_section()
         self._setup_resolution_fps_section()
-        video_lay.addStretch(1)
-
-        self.config_layout = audio_lay
         self._setup_audio_section()
-        audio_lay.addStretch(1)
+        self.config_layout.addStretch(1)
 
-        self.config_layout = adv_lay
+        self.config_layout = self.advanced_tab.body_layout
         self._setup_advanced_section()
         self._setup_ffmpeg_section()
-        adv_lay.addStretch(1)
-
-        for idx, (key, title, w) in enumerate(
-            [
-                ("video", self.tr("视频"), video_scroll),
-                ("audio", self.tr("音频"), audio_scroll),
-                ("advanced", self.tr("高级"), adv_scroll),
-            ]
-        ):
-            self.stack.addWidget(w)
-            self.pivot.addItem(
-                routeKey=key, text=title, onClick=lambda i=idx: self.stack.setCurrentIndex(i)
-            )
-        self.pivot.setCurrentItem("video")
-        self.stack.setCurrentIndex(0)
-        self.main_layout.addWidget(self.pivot)
-        self.main_layout.addWidget(self.stack, 1)
-
-        # 底部固定：命令预览 + ffmpeg 控制台
-        bottom_card = CardWidget(self)
-        self.config_layout = QVBoxLayout(bottom_card)
-        self.config_layout.setContentsMargins(20, 12, 20, 12)
-        self.config_layout.setSpacing(10)
         self._setup_command_preview_section()
         self._setup_console_section()
-        self.main_layout.addWidget(bottom_card)
+        self.config_layout.addStretch(1)
+
+        for route_key, title, tab in (
+            ("basic", self.tr("基本"), self.basic_tab),
+            ("advanced", self.tr("高级"), self.advanced_tab),
+        ):
+            self.stack.addWidget(tab)
+            self.pivot.addItem(
+                routeKey=route_key,
+                text=title,
+                onClick=lambda _checked=False, w=tab: self.stack.setCurrentWidget(w),
+            )
+        self.stack.currentChanged.connect(self._on_tab_changed)
+        self.stack.setCurrentWidget(self.basic_tab)
+        self.pivot.setCurrentItem("basic")
+        self.main_layout.addWidget(self.pivot, 0, Qt.AlignLeft)  # type: ignore
+        self.main_layout.addWidget(self.stack, 1)
 
         # 进度条 + 状态
         self.bottom_layout = QHBoxLayout()
@@ -197,6 +203,13 @@ class VideoSynthesisInterface(QWidget):
         self.bottom_layout.addWidget(self.progress_bar, 1)
         self.bottom_layout.addWidget(self.status_label)
         self.main_layout.addLayout(self.bottom_layout)
+
+    def _on_tab_changed(self, index: int):
+        w = self.stack.widget(index)
+        if w is self.basic_tab:
+            self.pivot.setCurrentItem("basic")
+        elif w is self.advanced_tab:
+            self.pivot.setCurrentItem("advanced")
 
     def _setup_command_bar(self):
         """设置顶部命令栏"""
