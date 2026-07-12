@@ -544,6 +544,16 @@ class Config(QConfig):
     )
     use_subtitle_style = ConfigItem("Video", "UseSubtitleStyle", False, BoolValidator())
 
+    # ------------------- 视频编码配置（新引擎） -------------------
+    video_encoder = ConfigItem("Video", "VideoEncoder", "x264")
+    encode_mode = OptionsConfigItem(
+        "Video", "EncodeMode", "cq", OptionsValidator(["cq", "abr"])
+    )
+    encode_cq = RangeConfigItem("Video", "EncodeCq", 23, RangeValidator(0, 63))
+    encode_bitrate_kbps = RangeConfigItem(
+        "Video", "EncodeBitrateKbps", 4000, RangeValidator(100, 200000)
+    )
+
     # ------------------- 字幕样式配置 -------------------
     subtitle_style_name = ConfigItem("SubtitleStyle", "StyleName", "default")
     subtitle_layout = OptionsConfigItem(

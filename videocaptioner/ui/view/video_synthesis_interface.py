@@ -11,6 +11,7 @@ from qfluentwidgets import (
     Action,
     BodyLabel,
     CardWidget,
+    ComboBox,
     CommandBar,
     InfoBar,
     InfoBarPosition,
@@ -19,6 +20,7 @@ from qfluentwidgets import (
     ProgressBar,
     PushButton,
     RoundMenu,
+    Slider,
     ToolTipFilter,
     ToolTipPosition,
     TransparentDropDownPushButton,
@@ -115,6 +117,9 @@ class VideoSynthesisInterface(QWidget):
         self.video_layout.addWidget(self.video_input)
         self.video_layout.addWidget(self.video_button)
         self.config_layout.addLayout(self.video_layout)
+
+        # 视频编码区（新引擎）
+        self._setup_encode_section()
 
         self.main_layout.addWidget(self.config_card)
 
@@ -280,11 +285,13 @@ class VideoSynthesisInterface(QWidget):
         # 设置样式相关初始值
         self.use_style_action.setChecked(cfg.use_subtitle_style.value)
         self.render_mode_button.setText(cfg.subtitle_render_mode.value.value)
+        self._init_encode_controls()
         self._update_synthesis_controls_state()
 
     def on_soft_subtitle_action_triggered(self, checked: bool):
         """处理软字幕按钮点击（更新配置+显示InfoBar）"""
         cfg.set(cfg.soft_subtitle, checked)
+        self._update_synthesis_controls_state()
 
         # 显示说明信息
         if checked:
@@ -312,6 +319,7 @@ class VideoSynthesisInterface(QWidget):
     def on_soft_subtitle_changed(self, checked: bool):
         """处理外部软字幕配置变更（仅更新UI状态）"""
         self.soft_subtitle_action.setChecked(checked)
+        self._update_synthesis_controls_state()
 
     def on_need_video_action_triggered(self, checked: bool):
         """处理视频合成按钮点击（更新配置+显示InfoBar）"""
@@ -418,6 +426,10 @@ class VideoSynthesisInterface(QWidget):
 
         # 渲染模式按钮需要同时满足：合成视频开启 且 使用样式开启
         self._update_style_controls_state()
+        # 编码区仅在硬烧录重编码时有意义（软字幕走流复制）
+        self._set_encode_section_enabled(
+            need_video and not self.soft_subtitle_action.isChecked()
+        )
 
     def _update_style_controls_state(self):
         """更新样式相关控件的启用/禁用状态"""
@@ -425,6 +437,159 @@ class VideoSynthesisInterface(QWidget):
         use_style = self.use_style_action.isChecked()
         # 渲染模式按钮：需要合成视频开启 且 使用样式开启
         self.render_mode_button.setEnabled(need_video and use_style)
+
+    # ------------------- 视频编码区 -------------------
+
+    def _setup_encode_section(self):
+        """构建【视频编码】区：编码器 / 编码方式 / 质量（见方案 §5、增量 A）。"""
+        from videocaptioner.core.synthesis import (
+            available_encoder_keys,
+            get_encoder_spec,
+        )
+
+        self._get_encoder_spec = get_encoder_spec
+        self._encoder_labels: dict[str, str] = {}
+
+        header = BodyLabel(self.tr("视频编码"), self)
+        header.setStyleSheet("font-weight: bold;")
+        self.config_layout.addWidget(header)
+
+        # 编码器下拉（不可用项置灰）
+        enc_row = QHBoxLayout()
+        enc_row.setSpacing(15)
+        enc_row.addWidget(BodyLabel(self.tr("视频编码器"), self))
+        self.encoder_button = TransparentDropDownPushButton(
+            self.tr("编码器"), self, FIF.VIDEO
+        )
+        self.encoder_button.setFixedHeight(34)
+        self.encoder_button.setMinimumWidth(240)
+        self.encoder_menu = RoundMenu(parent=self)
+        self._build_encoder_menu(available_encoder_keys())
+        self.encoder_button.setMenu(self.encoder_menu)
+        enc_row.addWidget(self.encoder_button)
+        enc_row.addStretch(1)
+        self.config_layout.addLayout(enc_row)
+
+        # 编码方式
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(15)
+        mode_row.addWidget(BodyLabel(self.tr("编码方式"), self))
+        self.encode_mode_combo = ComboBox(self)
+        self.encode_mode_combo.addItems([self.tr("固定品质"), self.tr("平均码率")])
+        self.encode_mode_combo.setMinimumWidth(140)
+        mode_row.addWidget(self.encode_mode_combo)
+        mode_row.addStretch(1)
+        self.config_layout.addLayout(mode_row)
+
+        # 固定品质
+        self.quality_container = QWidget(self)
+        q_row = QHBoxLayout(self.quality_container)
+        q_row.setContentsMargins(0, 0, 0, 0)
+        q_row.setSpacing(15)
+        q_row.addWidget(BodyLabel(self.tr("固定品质 (RF/CQ)"), self))
+        self.quality_slider = Slider(Qt.Horizontal, self)  # type: ignore
+        self.quality_slider.setRange(0, 51)
+        self.quality_value_label = BodyLabel("23", self)
+        self.quality_value_label.setMinimumWidth(28)
+        self.quality_hint = BodyLabel(self.tr("越小画质越好、文件越大"), self)
+        q_row.addWidget(self.quality_slider, 1)
+        q_row.addWidget(self.quality_value_label)
+        q_row.addWidget(self.quality_hint)
+        self.config_layout.addWidget(self.quality_container)
+
+        # 平均码率
+        self.bitrate_container = QWidget(self)
+        b_row = QHBoxLayout(self.bitrate_container)
+        b_row.setContentsMargins(0, 0, 0, 0)
+        b_row.setSpacing(15)
+        b_row.addWidget(BodyLabel(self.tr("平均码率 (kbps)"), self))
+        self.bitrate_input = LineEdit(self)
+        self.bitrate_input.setMaximumWidth(140)
+        b_row.addWidget(self.bitrate_input)
+        b_row.addStretch(1)
+        self.config_layout.addWidget(self.bitrate_container)
+
+        # 信号
+        self.encode_mode_combo.currentIndexChanged.connect(self._on_encode_mode_changed)
+        self.quality_slider.valueChanged.connect(self._on_cq_changed)
+        self.bitrate_input.textChanged.connect(self._on_bitrate_changed)
+
+    def _build_encoder_menu(self, keys):
+        """构建编码器菜单；不可用项置灰并附原因（能力探测，probe_hardware=False）。"""
+        try:
+            from videocaptioner.core.synthesis import available_encoders
+
+            avail = available_encoders(probe_hardware=False)
+        except Exception:
+            avail = {}
+        for key in keys:
+            spec = self._get_encoder_spec(key)
+            if spec is None:
+                continue
+            self._encoder_labels[key] = spec.label
+            action = Action(text=spec.label)
+            info = avail.get(key)
+            if info is not None and not info.available:
+                action.setEnabled(False)
+                action.setToolTip(info.reason or self.tr("不可用"))
+            action.triggered.connect(
+                lambda checked, k=key, lb=spec.label: self._on_encoder_selected(k, lb)
+            )
+            self.encoder_menu.addAction(action)
+
+    def _apply_encoder_range(self, key: str):
+        """按所选编码器的原生刻度设置质量拉条范围并夹取当前值（见 Q4-A）。"""
+        spec = self._get_encoder_spec(key)
+        lo, hi = (spec.quality_min, spec.quality_max) if spec else (0, 63)
+        self.quality_slider.setRange(lo, hi)
+        clamped = min(max(cfg.encode_cq.value, lo), hi)
+        self.quality_slider.setValue(clamped)
+
+    def _on_encoder_selected(self, key: str, label: str):
+        cfg.set(cfg.video_encoder, key)
+        self.encoder_button.setText(label)
+        self._apply_encoder_range(key)
+
+    def _on_encode_mode_changed(self, index: int):
+        cfg.set(cfg.encode_mode, "cq" if index == 0 else "abr")
+        self._update_encode_mode_visibility()
+
+    def _on_cq_changed(self, value: int):
+        cfg.set(cfg.encode_cq, value)
+        self.quality_value_label.setText(str(value))
+
+    def _on_bitrate_changed(self, text: str):
+        try:
+            value = int(text)
+        except ValueError:
+            return
+        if 100 <= value <= 200000:
+            cfg.set(cfg.encode_bitrate_kbps, value)
+
+    def _update_encode_mode_visibility(self):
+        is_cq = cfg.encode_mode.value == "cq"
+        self.quality_container.setVisible(is_cq)
+        self.bitrate_container.setVisible(not is_cq)
+
+    def _init_encode_controls(self):
+        key = cfg.video_encoder.value
+        self.encoder_button.setText(self._encoder_labels.get(key, key))
+        self._apply_encoder_range(key)
+        self.encode_mode_combo.setCurrentIndex(0 if cfg.encode_mode.value == "cq" else 1)
+        self.quality_slider.setValue(cfg.encode_cq.value)
+        self.quality_value_label.setText(str(cfg.encode_cq.value))
+        self.bitrate_input.setText(str(cfg.encode_bitrate_kbps.value))
+        self._update_encode_mode_visibility()
+
+    def _set_encode_section_enabled(self, enabled: bool):
+        """编码区仅在硬烧录重编码时有意义（软字幕走流复制）。"""
+        for w in (
+            self.encoder_button,
+            self.encode_mode_combo,
+            self.quality_container,
+            self.bitrate_container,
+        ):
+            w.setEnabled(enabled)
 
     def choose_subtitle_file(self):
         # 构建文件过滤器
