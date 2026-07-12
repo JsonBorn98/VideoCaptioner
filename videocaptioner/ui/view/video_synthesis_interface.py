@@ -211,6 +211,12 @@ class VideoSynthesisInterface(QWidget):
 
         self.command_bar.addSeparator()
 
+        # ffmpeg 核心管理（来源 / 打开目录 / 可用性测试）
+        self._setup_ffmpeg_menu()
+        self.command_bar.addWidget(self.ffmpeg_button)
+
+        self.command_bar.addSeparator()
+
         # 添加打开文件夹按钮
         folder_action = Action(FIF.FOLDER, "", triggered=self.open_video_folder)
         folder_action.setToolTip(self.tr("打开输出文件夹"))
@@ -442,10 +448,7 @@ class VideoSynthesisInterface(QWidget):
 
     def _setup_encode_section(self):
         """构建【视频编码】区：编码器 / 编码方式 / 质量（见方案 §5、增量 A）。"""
-        from videocaptioner.core.synthesis import (
-            available_encoder_keys,
-            get_encoder_spec,
-        )
+        from videocaptioner.core.synthesis import get_encoder_spec
 
         self._get_encoder_spec = get_encoder_spec
         self._encoder_labels: dict[str, str] = {}
@@ -464,7 +467,7 @@ class VideoSynthesisInterface(QWidget):
         self.encoder_button.setFixedHeight(34)
         self.encoder_button.setMinimumWidth(240)
         self.encoder_menu = RoundMenu(parent=self)
-        self._build_encoder_menu(available_encoder_keys())
+        self._build_encoder_menu()
         self.encoder_button.setMenu(self.encoder_menu)
         enc_row.addWidget(self.encoder_button)
         enc_row.addStretch(1)
@@ -514,15 +517,25 @@ class VideoSynthesisInterface(QWidget):
         self.quality_slider.valueChanged.connect(self._on_cq_changed)
         self.bitrate_input.textChanged.connect(self._on_bitrate_changed)
 
-    def _build_encoder_menu(self, keys):
-        """构建编码器菜单；不可用项置灰并附原因（能力探测，probe_hardware=False）。"""
+    def _build_encoder_menu(self, probe_hardware: bool = False):
+        """构建/重建编码器菜单；不可用项置灰并附原因。
+
+        probe_hardware=True 时对硬件编码器做真实探测（"可用性测试"用），
+        否则只按当前核心的编译支持置灰。
+        """
+        from videocaptioner.core.synthesis import available_encoder_keys
+
+        self.encoder_menu.clear()
+        self._encoder_labels = {}
         try:
             from videocaptioner.core.synthesis import available_encoders
 
-            avail = available_encoders(probe_hardware=False)
+            avail = available_encoders(
+                source=cfg.ffmpeg_source.value, probe_hardware=probe_hardware
+            )
         except Exception:
             avail = {}
-        for key in keys:
+        for key in available_encoder_keys():
             spec = self._get_encoder_spec(key)
             if spec is None:
                 continue
@@ -536,6 +549,85 @@ class VideoSynthesisInterface(QWidget):
                 lambda checked, k=key, lb=spec.label: self._on_encoder_selected(k, lb)
             )
             self.encoder_menu.addAction(action)
+
+    def _setup_ffmpeg_menu(self):
+        """ffmpeg 核心管理下拉：来源切换 / 打开核心目录 / 可用性测试（见方案 §10.1）。"""
+        self.ffmpeg_button = TransparentDropDownPushButton(
+            self.tr("ffmpeg 核心"), self, FIF.SETTING
+        )
+        self.ffmpeg_button.setFixedHeight(34)
+        menu = RoundMenu(parent=self)
+        src = cfg.ffmpeg_source.value
+        self._ffmpeg_default_action = Action(self.tr("内置 (默认)"), checkable=True)
+        self._ffmpeg_custom_action = Action(self.tr("自定义 (用户目录)"), checkable=True)
+        self._ffmpeg_default_action.setChecked(src == "default")
+        self._ffmpeg_custom_action.setChecked(src == "custom")
+        self._ffmpeg_default_action.triggered.connect(
+            lambda: self._on_ffmpeg_source_changed("default")
+        )
+        self._ffmpeg_custom_action.triggered.connect(
+            lambda: self._on_ffmpeg_source_changed("custom")
+        )
+        menu.addAction(self._ffmpeg_default_action)
+        menu.addAction(self._ffmpeg_custom_action)
+        menu.addSeparator()
+        menu.addAction(
+            Action(FIF.FOLDER, self.tr("打开核心目录"), triggered=self._open_ffmpeg_dir)
+        )
+        menu.addAction(
+            Action(FIF.SYNC, self.tr("可用性测试"), triggered=self._on_availability_test)
+        )
+        self.ffmpeg_button.setMenu(menu)
+
+    def _on_ffmpeg_source_changed(self, source: str):
+        cfg.set(cfg.ffmpeg_source, source)
+        self._ffmpeg_default_action.setChecked(source == "default")
+        self._ffmpeg_custom_action.setChecked(source == "custom")
+        try:
+            from videocaptioner.core.synthesis import clear_probe_cache
+
+            clear_probe_cache()
+        except Exception:
+            pass
+        self._build_encoder_menu()
+        InfoBar.info(
+            self.tr("ffmpeg 核心来源"),
+            self.tr("已切换，编码器可用性已刷新"),
+            duration=INFOBAR_DURATION_SUCCESS,
+            position=InfoBarPosition.BOTTOM,
+            parent=self,
+        )
+
+    def _open_ffmpeg_dir(self):
+        from videocaptioner.config import BIN_PATH
+
+        BIN_PATH.mkdir(parents=True, exist_ok=True)
+        open_folder(str(BIN_PATH))
+
+    def _on_availability_test(self):
+        from videocaptioner.core.synthesis import clear_probe_cache, run_availability_test
+
+        clear_probe_cache()
+        try:
+            report = run_availability_test(source=cfg.ffmpeg_source.value)
+        except Exception as e:
+            InfoBar.error(
+                self.tr("可用性测试失败"),
+                str(e),
+                duration=INFOBAR_DURATION_ERROR,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
+        self._build_encoder_menu(probe_hardware=True)
+        available = sum(1 for a in report.encoders.values() if a.available)
+        InfoBar.success(
+            self.tr("可用性测试完成"),
+            self.tr("可用编码器 {n}/{t}").format(n=available, t=len(report.encoders)),
+            duration=INFOBAR_DURATION_SUCCESS,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
 
     def _apply_encoder_range(self, key: str):
         """按所选编码器的原生刻度设置质量拉条范围并夹取当前值（见 Q4-A）。"""

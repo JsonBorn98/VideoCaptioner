@@ -448,6 +448,7 @@ class TaskFactory:
             bitrate_kbps=cfg.encode_bitrate_kbps.value,
             audio_encoder="copy",
             container="mp4",
+            ffmpeg_source=cfg.ffmpeg_source.value,
         )
         config = SynthesisConfig(
             need_video=cfg.need_video.value,

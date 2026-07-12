@@ -553,6 +553,10 @@ class Config(QConfig):
     encode_bitrate_kbps = RangeConfigItem(
         "Video", "EncodeBitrateKbps", 4000, RangeValidator(100, 200000)
     )
+    # ffmpeg 核心来源：默认（内置，不可变）/ 自定义（用户 BIN_PATH，git 忽略）
+    ffmpeg_source = OptionsConfigItem(
+        "Video", "FfmpegSource", "default", OptionsValidator(["default", "custom"])
+    )
 
     # ------------------- 字幕样式配置 -------------------
     subtitle_style_name = ConfigItem("SubtitleStyle", "StyleName", "default")

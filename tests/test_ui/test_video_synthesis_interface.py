@@ -113,3 +113,28 @@ finally:
         cfg.set(k, v)
 """
     )
+
+
+def test_ffmpeg_source_toggle_rebuilds_encoder_menu():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
+
+app = QApplication([])
+saved = cfg.ffmpeg_source.value
+try:
+    w = VideoSynthesisInterface()
+    assert hasattr(w, 'ffmpeg_button')
+    assert len(w.encoder_menu.actions()) >= 10
+    w._on_ffmpeg_source_changed('custom')
+    assert cfg.ffmpeg_source.value == 'custom'
+    assert len(w.encoder_menu.actions()) >= 10  # menu rebuilt for the new source
+    w._on_ffmpeg_source_changed('default')
+    assert cfg.ffmpeg_source.value == 'default'
+    print('OK')
+finally:
+    cfg.set(cfg.ffmpeg_source, saved)
+"""
+    )
