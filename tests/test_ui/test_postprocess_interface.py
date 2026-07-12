@@ -113,6 +113,38 @@ widget.close()
     )
 
 
+def test_postprocess_drop_hint_and_settings_title_are_theme_aware(tmp_path):
+    profile_path = repr(str(tmp_path / "profiles.json"))
+    _run_qt_script(
+        f"""
+from PyQt5.QtGui import QColor
+from PyQt5.QtWidgets import QApplication
+from qfluentwidgets import BodyLabel, Theme, TitleLabel, setTheme
+from videocaptioner.core.postprocess import PostprocessProfileStore
+from videocaptioner.ui.view.postprocess_interface import PostprocessInterface
+from videocaptioner.ui.view.speed_setting_interface import PostprocessSettingInterface
+
+app = QApplication([])
+setTheme(Theme.DARK)
+
+# 主页拖入提示：保留 Fluent 主题色（暗色白字），虚线边框改由父级样式表命中，
+# 不再用 setStyleSheet 覆盖标签自身颜色 QSS。
+page = PostprocessInterface(profile_store=PostprocessProfileStore({profile_path}))
+assert isinstance(page.input_label, BodyLabel)
+assert page.input_label.darkColor == QColor(255, 255, 255)
+assert 'color' in page.input_label.styleSheet(), page.input_label.styleSheet()
+assert 'postprocessDropHint' in page.styleSheet() and 'dashed' in page.styleSheet()
+
+# 设置弹窗标题：主题感知的 TitleLabel（旧版是纯 QLabel，暗色下黑字看不清）。
+dlg = PostprocessSettingInterface(profile_store=PostprocessProfileStore({profile_path}))
+assert isinstance(dlg.titleLabel, TitleLabel)
+assert dlg.titleLabel.lightColor == QColor(0, 0, 0)
+assert dlg.titleLabel.darkColor == QColor(255, 255, 255)
+print('OK')
+"""
+    )
+
+
 def test_postprocess_settings_tabs_keep_dark_theme_background_transparent(tmp_path):
     profile_path = repr(str(tmp_path / "profiles.json"))
     _run_qt_script(

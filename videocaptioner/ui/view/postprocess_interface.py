@@ -167,8 +167,13 @@ class PostprocessInterface(QWidget):
         self.input_label = BodyLabel(self.tr("请拖入完整的 SRT、VTT 或 ASS 字幕"), self)
         self.input_label.setAlignment(Qt.AlignCenter)  # type: ignore[arg-type]
         self.input_label.setMinimumHeight(54)
-        self.input_label.setStyleSheet(
-            "border: 1px dashed rgba(128,128,128,120); border-radius: 8px; padding: 18px;"
+        self.input_label.setObjectName("postprocessDropHint")
+        # 边框放在父级样式表按 objectName 命中，避免直接 setStyleSheet 覆盖 Fluent
+        # 标签自带的主题色 QSS（否则暗色模式下文字会退回黑色而看不清）。
+        self.setStyleSheet(
+            "#postprocessDropHint {"
+            " border: 1px dashed rgba(128,128,128,120);"
+            " border-radius: 8px; padding: 18px; }"
         )
         self.main_layout.addWidget(self.input_label)
 

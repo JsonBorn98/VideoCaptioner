@@ -21,6 +21,7 @@ from qfluentwidgets import (
     SegmentedWidget,
     SettingCardGroup,
     SwitchSettingCard,
+    TitleLabel,
     ToolButton,
 )
 from qfluentwidgets import FluentIcon as FIF
@@ -196,7 +197,7 @@ class PostprocessSettingInterface(QWidget):
         self.setObjectName("postprocessSettingInterface")
         self.resize(1000, 800)
 
-        self.titleLabel = QLabel(self.tr("字幕后处理设置"), self)
+        self.titleLabel = TitleLabel(self.tr("字幕后处理设置"), self)
         self.titleLabel.setObjectName("speedSettingTitle")
         self.subtitleLabel = QLabel(
             self.tr("集中管理文本清理、显示速度、时间轴、语义修复与质量报告。"), self

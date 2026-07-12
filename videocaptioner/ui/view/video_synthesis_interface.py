@@ -31,6 +31,7 @@ from qfluentwidgets import (
     RoundMenu,
     ScrollArea,
     Slider,
+    StrongBodyLabel,
     SwitchButton,
     TextEdit,
     ToolTipFilter,
@@ -484,8 +485,7 @@ class VideoSynthesisInterface(QWidget):
         self._get_encoder_spec = get_encoder_spec
         self._encoder_labels: dict[str, str] = {}
 
-        header = BodyLabel(self.tr("视频编码"), self)
-        header.setStyleSheet("font-weight: bold;")
+        header = StrongBodyLabel(self.tr("视频编码"), self)
         self.config_layout.addWidget(header)
 
         # 编码器下拉（不可用项置灰）
@@ -620,8 +620,7 @@ class VideoSynthesisInterface(QWidget):
 
     def _setup_ffmpeg_section(self):
         """ffmpeg 核心：来源切换 / 打开核心目录 / 可用性测试（见方案 §10.1；移入高级页签）。"""
-        header = BodyLabel(self.tr("ffmpeg 核心"), self)
-        header.setStyleSheet("font-weight: bold;")
+        header = StrongBodyLabel(self.tr("ffmpeg 核心"), self)
         self.config_layout.addWidget(header)
 
         row = QHBoxLayout()
@@ -772,8 +771,7 @@ class VideoSynthesisInterface(QWidget):
 
     def _setup_command_preview_section(self):
         """自定义参数输入 + 只读实时命令预览（不做反向编辑，见方案 §8）。"""
-        header = BodyLabel(self.tr("命令预览"), self)
-        header.setStyleSheet("font-weight: bold;")
+        header = StrongBodyLabel(self.tr("命令预览"), self)
         self.config_layout.addWidget(header)
 
         ea_row = QHBoxLayout()
@@ -864,8 +862,7 @@ class VideoSynthesisInterface(QWidget):
 
     def _setup_encoder_options_section(self):
         """构建【编码器选项】区：按当前编码器动态披露预设/微调/配置/级别/快速解码（见方案 §4）。"""
-        header = BodyLabel(self.tr("编码器选项"), self)
-        header.setStyleSheet("font-weight: bold;")
+        header = StrongBodyLabel(self.tr("编码器选项"), self)
         self.config_layout.addWidget(header)
 
         self.enc_preset_container = self._make_auto_combo_row(
@@ -986,8 +983,7 @@ class VideoSynthesisInterface(QWidget):
 
     def _setup_resolution_fps_section(self):
         """构建【分辨率与帧率】区（见方案 §5）。"""
-        header = BodyLabel(self.tr("分辨率与帧率"), self)
-        header.setStyleSheet("font-weight: bold;")
+        header = StrongBodyLabel(self.tr("分辨率与帧率"), self)
         self.config_layout.addWidget(header)
 
         self.resolution_container = QWidget(self)
@@ -1110,8 +1106,7 @@ class VideoSynthesisInterface(QWidget):
 
     def _setup_audio_section(self):
         """构建【音频】区（见方案 §5/§7/§12）。"""
-        header = BodyLabel(self.tr("音频"), self)
-        header.setStyleSheet("font-weight: bold;")
+        header = StrongBodyLabel(self.tr("音频"), self)
         self.config_layout.addWidget(header)
 
         self.audio_container = QWidget(self)
@@ -1161,8 +1156,7 @@ class VideoSynthesisInterface(QWidget):
 
     def _setup_advanced_section(self):
         """构建【其他 · 高级】区（见方案 §11）。"""
-        header = BodyLabel(self.tr("其他 · 高级"), self)
-        header.setStyleSheet("font-weight: bold;")
+        header = StrongBodyLabel(self.tr("其他 · 高级"), self)
         self.config_layout.addWidget(header)
 
         self.advanced_container = QWidget(self)

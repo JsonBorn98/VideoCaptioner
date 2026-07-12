@@ -414,4 +414,33 @@ print('OK')
     )
 
 
+def test_section_headers_are_theme_aware():
+    _run_qt_script(
+        """
+from PyQt5.QtGui import QColor
+from PyQt5.QtWidgets import QApplication
+from qfluentwidgets import StrongBodyLabel, Theme, setTheme
+
+setTheme(Theme.DARK)
+from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
+
+app = QApplication([])
+w = VideoSynthesisInterface()
+
+# 所有分区标题用主题感知的 StrongBodyLabel（暗色下为白字），不再被 setStyleSheet
+# 覆盖掉 Fluent 自带的颜色 QSS（否则会退回黑字，暗色模式看不清）。
+headers = w.findChildren(StrongBodyLabel)
+assert len(headers) == 7, len(headers)
+for h in headers:
+    assert h.lightColor == QColor(0, 0, 0)
+    assert h.darkColor == QColor(255, 255, 255)
+    assert 'color' in h.styleSheet(), (h.text(), h.styleSheet())
+
+w.close()
+print('OK')
+"""
+    )
+
+
+
 
