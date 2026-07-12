@@ -88,7 +88,7 @@ from videocaptioner.ui.task_factory import TaskFactory
 
 app = QApplication([])
 keys = [cfg.video_encoder, cfg.encode_mode, cfg.encode_cq,
-        cfg.encode_bitrate_kbps, cfg.soft_subtitle]
+        cfg.encode_bitrate_kbps, cfg.soft_subtitle, cfg.container]
 saved = [k.value for k in keys]
 try:
     cfg.set(cfg.soft_subtitle, False)
@@ -96,6 +96,7 @@ try:
     cfg.set(cfg.encode_mode, 'abr')
     cfg.set(cfg.encode_bitrate_kbps, 6000)
     cfg.set(cfg.encode_cq, 30)
+    cfg.set(cfg.container, 'mp4')
     task = TaskFactory.create_synthesis_task('C:/x/video.mp4', 'C:/x/sub.srt')
     es = task.synthesis_config.encode_settings
     assert es.video_encoder == 'hevc_nvenc', es.video_encoder
@@ -328,9 +329,14 @@ from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
 
 app = QApplication([])
-saved = (cfg.video_encoder.value, cfg.soft_subtitle.value, cfg.extra_args.value)
+saved = (cfg.video_encoder.value, cfg.soft_subtitle.value, cfg.extra_args.value,
+         cfg.encode_mode.value, cfg.container.value)
 try:
     cfg.set(cfg.soft_subtitle, False)
+    cfg.set(cfg.video_encoder, 'x264')
+    cfg.set(cfg.encode_mode, 'cq')
+    cfg.set(cfg.extra_args, '')
+    cfg.set(cfg.container, 'mp4')
     w = VideoSynthesisInterface()
     assert w.command_preview.isReadOnly()
     assert 'libx264' in w.command_preview.toPlainText()
@@ -345,6 +351,8 @@ finally:
     cfg.set(cfg.video_encoder, saved[0])
     cfg.set(cfg.soft_subtitle, saved[1])
     cfg.set(cfg.extra_args, saved[2])
+    cfg.set(cfg.encode_mode, saved[3])
+    cfg.set(cfg.container, saved[4])
 """
     )
 

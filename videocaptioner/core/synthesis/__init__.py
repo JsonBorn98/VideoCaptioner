@@ -19,6 +19,7 @@ from .encoder_probe import (
 from .ffmpeg_env import get_ffmpeg_path, get_ffprobe_path
 from .models import EncodeSettings, MediaProbe
 from .naming import build_output_name
+from .runner import SynthesisCancelled, SynthesisControl
 
 __all__ = [
     "EncodeSettings",
@@ -34,4 +35,6 @@ __all__ = [
     "available_encoders",
     "run_availability_test",
     "clear_probe_cache",
+    "SynthesisControl",
+    "SynthesisCancelled",
 ]

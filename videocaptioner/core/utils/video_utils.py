@@ -22,6 +22,7 @@ from ..utils.logger import setup_logger
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
     from videocaptioner.core.synthesis.models import EncodeSettings
+    from videocaptioner.core.synthesis.runner import SynthesisControl
 
 # FFmpeg preset 类型
 PresetType = Literal[
@@ -220,6 +221,7 @@ def add_subtitles(
     vcodec: str = "libx264",
     soft_subtitle: bool = False,
     progress_callback: Optional[Callable] = None,
+    control: "Optional[SynthesisControl]" = None,
 ) -> None:
     assert Path(input_file).is_file(), "输入文件不存在"
     assert Path(subtitle_file).is_file(), "字幕文件不存在"
@@ -256,30 +258,11 @@ def add_subtitles(
                 output,
             ]
             logger.debug(f"FFmpeg soft subtitle cmd: {' '.join(cmd)}")
-            try:
-                subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    check=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    creationflags=(
-                        getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                        if os.name == "nt"
-                        else 0
-                    ),
-                )
-                logger.debug("Soft subtitle added")
-            except subprocess.CalledProcessError as e:
-                logger.error("FFmpeg soft subtitle failed")
-                logger.error(f"Return code: {e.returncode}")
-                logger.error(f"Command: {' '.join(e.cmd)}")
-                if e.stdout:
-                    logger.error(f"stdout: {e.stdout}")
-                if e.stderr:
-                    logger.error(f"stderr: {e.stderr}")
-                raise
+            # 经 runner 执行：支持取消/暂停与日志回传
+            from ..synthesis import runner
+
+            runner.run_encode(cmd, progress_callback=progress_callback, control=control)
+            logger.debug("Soft subtitle added")
         else:
             # 使用硬字幕
             subtitle_path_escaped = (
@@ -571,6 +554,7 @@ def add_subtitles_with_style(
     preset: PresetType = "medium",
     progress_callback: Optional[Callable] = None,
     encode_settings: "Optional[EncodeSettings]" = None,
+    control: "Optional[SynthesisControl]" = None,
 ) -> None:
     """
     根据渲染模式选择合成方式
@@ -605,6 +589,7 @@ def add_subtitles_with_style(
             preset=preset,
             progress_callback=progress_callback,
             encode_settings=encode_settings,
+            control=control,
         )
     else:
         # ASS 样式模式
@@ -619,4 +604,5 @@ def add_subtitles_with_style(
             progress_callback=progress_callback,
             reference_height=reference_height,
             encode_settings=encode_settings,
+            control=control,
         )

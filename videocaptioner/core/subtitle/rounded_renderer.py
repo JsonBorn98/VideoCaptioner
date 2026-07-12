@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 from PIL import Image, ImageDraw
 
 from videocaptioner.core.entities import SubtitleLayoutEnum
+from videocaptioner.core.synthesis import runner
 from videocaptioner.core.synthesis.ffmpeg_env import get_ffmpeg_path
 from videocaptioner.core.utils.logger import setup_logger
 
@@ -21,6 +22,7 @@ from .text_utils import hex_to_rgba, wrap_text
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
     from videocaptioner.core.synthesis.models import EncodeSettings
+    from videocaptioner.core.synthesis.runner import SynthesisControl
 
 logger = setup_logger("subtitle.rounded")
 ReferenceHeight = int | float | str | None
@@ -292,6 +294,7 @@ def render_rounded_video(
     progress_callback: Optional[Callable] = None,
     reference_height: int = 720,
     encode_settings: "Optional[EncodeSettings]" = None,
+    control: "Optional[SynthesisControl]" = None,
 ) -> None:
     """
     渲染圆角背景字幕到视频（分批overlay方案）
@@ -482,20 +485,8 @@ def render_rounded_video(
                 cmd_str = subprocess.list2cmdline(cmd)
                 logger.debug(f"FFmpeg cmd: {cmd_str}")
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=(
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-                ),
-            )
-
-            if result.returncode != 0:
-                logger.error(f"批次 {batch_idx + 1} 失败: {result.stderr}")
-                raise RuntimeError(f"Subtitle processing failed（批次 {batch_idx + 1}）")
+            # 经 runner 执行：支持取消（kill 进程）与日志回传；非零返回码会抛错
+            runner.run_plain(cmd, control=control)
 
             # 更新进度 (30-100%)
             if progress_callback:

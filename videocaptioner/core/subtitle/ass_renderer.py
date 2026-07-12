@@ -20,6 +20,7 @@ from .ass_utils import auto_wrap_ass_file
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
     from videocaptioner.core.synthesis.models import EncodeSettings
+    from videocaptioner.core.synthesis.runner import SynthesisControl
 
 logger = setup_logger("subtitle.ass")
 ReferenceHeight = int | float | str | None
@@ -272,6 +273,7 @@ def _render_via_builder(
     video_filter: str,
     settings: "EncodeSettings",
     progress_callback: Optional[Callable] = None,
+    control: "Optional[SynthesisControl]" = None,
 ) -> None:
     """新引擎路径：结构化编码设置 -> 集中命令构建器 -> 执行（见方案 §7/§16）。"""
     from videocaptioner.core.synthesis import media_probe, runner
@@ -314,7 +316,7 @@ def _render_via_builder(
             decode_hwaccel=decode_hwaccel, vfr_flag=vfr_flag,
         )
         try:
-            runner.run_two_pass(p1, p2, progress_callback=progress_callback, total_duration=total)
+            runner.run_two_pass(p1, p2, progress_callback=progress_callback, total_duration=total, control=control)
         finally:
             shutil.rmtree(passdir, ignore_errors=True)
     else:
@@ -323,7 +325,7 @@ def _render_via_builder(
             video_filter=vf, settings=settings, probe=probe,
             decode_hwaccel=decode_hwaccel, vfr_flag=vfr_flag,
         )
-        runner.run_encode(cmd, progress_callback=progress_callback, total_duration=total)
+        runner.run_encode(cmd, progress_callback=progress_callback, total_duration=total, control=control)
 
 
 def render_ass_video(
@@ -337,6 +339,7 @@ def render_ass_video(
     progress_callback: Optional[Callable] = None,
     reference_height: int = 720,
     encode_settings: "Optional[EncodeSettings]" = None,
+    control: "Optional[SynthesisControl]" = None,
 ) -> None:
     """
     渲染 ASS 样式字幕到视频（硬字幕）
@@ -406,6 +409,7 @@ def render_ass_video(
                 video_filter=vf,
                 settings=encode_settings,
                 progress_callback=progress_callback,
+                control=control,
             )
             return
 

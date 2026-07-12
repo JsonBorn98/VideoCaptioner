@@ -1,12 +1,15 @@
 import datetime
 import tempfile
 from pathlib import Path
+from threading import Event
 
+import psutil
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.entities import SynthesisTask
 from videocaptioner.core.subtitle import clone_subtitle_data
+from videocaptioner.core.synthesis import SynthesisCancelled, SynthesisControl
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.video_utils import add_subtitles, add_subtitles_with_style
 
@@ -17,13 +20,65 @@ class VideoSynthesisThread(QThread):
     finished = pyqtSignal(SynthesisTask)
     progress = pyqtSignal(int, str)
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+    log = pyqtSignal(str)  # ffmpeg 逐行输出（供控制台）
 
     def __init__(self, task: SynthesisTask):
         super().__init__()
         self.task = task
+        self._cancel_event = Event()
+        self._current_process = None
+        self._paused = False
+        self._control = SynthesisControl(
+            cancel_event=self._cancel_event,
+            log_callback=self.log.emit,
+            on_process=self._register_process,
+        )
         logger.debug(f"初始化 VideoSynthesisThread，任务: {self.task}")
 
+    # ---- 取消 / 暂停控制（由 GUI 调用） ----
+
+    def _register_process(self, process) -> None:
+        self._current_process = process
+
+    def stop(self) -> None:
+        """请求停止：置取消位并 kill 当前 ffmpeg（若暂停则先恢复再 kill）。"""
+        self._cancel_event.set()
+        p = self._current_process
+        if p is not None and p.poll() is None:
+            try:
+                if self._paused:
+                    psutil.Process(p.pid).resume()
+            except Exception:
+                pass
+            try:
+                p.kill()
+            except Exception:
+                pass
+        self._paused = False
+
+    def pause(self) -> None:
+        p = self._current_process
+        if p is not None and p.poll() is None and not self._paused:
+            try:
+                psutil.Process(p.pid).suspend()
+                self._paused = True
+            except Exception as e:
+                logger.warning(f"暂停失败: {e}")
+
+    def resume(self) -> None:
+        p = self._current_process
+        if p is not None and self._paused:
+            try:
+                psutil.Process(p.pid).resume()
+            finally:
+                self._paused = False
+
+    def is_paused(self) -> bool:
+        return self._paused
+
     def run(self):
+        output_path = self.task.output_path
         try:
             self.task.started_at = datetime.datetime.now()
             config = self.task.synthesis_config
@@ -31,7 +86,6 @@ class VideoSynthesisThread(QThread):
 
             video_file = self.task.video_path
             subtitle_file = self.task.subtitle_path
-            output_path = self.task.output_path
 
             if not config.need_video:
                 logger.info("不需要合成视频，跳过")
@@ -106,6 +160,7 @@ class VideoSynthesisThread(QThread):
                         preset=preset,
                         soft_subtitle=True,
                         progress_callback=self.progress_callback,
+                        control=self._control,
                     )
                 finally:
                     Path(temp_srt_path).unlink(missing_ok=True)
@@ -126,12 +181,19 @@ class VideoSynthesisThread(QThread):
                     preset=preset,
                     progress_callback=self.progress_callback,
                     encode_settings=config.encode_settings,
+                    control=self._control,
                 )
 
             self.progress.emit(100, self.tr("合成完成"))
             logger.info(f"视频合成完成，保存路径: {output_path}")
             self.finished.emit(self.task)
 
+        except SynthesisCancelled:
+            logger.info("视频合成已取消")
+            if output_path:
+                Path(output_path).unlink(missing_ok=True)  # 清理半成品
+            self.progress.emit(0, self.tr("已取消"))
+            self.cancelled.emit()
         except Exception as e:
             logger.exception(f"视频合成失败: {e}")
             self.error.emit(str(e))
