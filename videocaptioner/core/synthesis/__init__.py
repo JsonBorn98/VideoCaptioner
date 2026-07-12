@@ -9,6 +9,13 @@ from .encoder_catalog import (
     available_encoder_keys,
     get_encoder_spec,
 )
+from .encoder_probe import (
+    AvailabilityReport,
+    EncoderAvailability,
+    available_encoders,
+    clear_probe_cache,
+    run_availability_test,
+)
 from .ffmpeg_env import get_ffmpeg_path, get_ffprobe_path
 from .models import EncodeSettings, MediaProbe
 from .naming import build_output_name
@@ -22,4 +29,9 @@ __all__ = [
     "get_ffmpeg_path",
     "get_ffprobe_path",
     "build_output_name",
+    "EncoderAvailability",
+    "AvailabilityReport",
+    "available_encoders",
+    "run_availability_test",
+    "clear_probe_cache",
 ]
