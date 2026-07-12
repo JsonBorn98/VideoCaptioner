@@ -23,6 +23,7 @@ from qfluentwidgets import (
     RoundMenu,
     Slider,
     SwitchButton,
+    TextEdit,
     ToolTipFilter,
     ToolTipPosition,
     TransparentDropDownPushButton,
@@ -127,6 +128,7 @@ class VideoSynthesisInterface(QWidget):
         self._setup_resolution_fps_section()
         self._setup_audio_section()
         self._setup_advanced_section()
+        self._setup_command_preview_section()
 
         self.main_layout.addWidget(self.config_card)
 
@@ -684,6 +686,8 @@ class VideoSynthesisInterface(QWidget):
         self._init_resolution_fps_controls()
         self._init_audio_controls()
         self._init_advanced_controls()
+        self.extra_args_input.setText(cfg.extra_args.value)
+        self._refresh_command_preview()
 
     def _set_encode_section_enabled(self, enabled: bool):
         """编码区仅在硬烧录重编码时有意义（软字幕走流复制）。"""
@@ -705,8 +709,101 @@ class VideoSynthesisInterface(QWidget):
             self.vfr_container,
             self.audio_container,
             self.advanced_container,
+            self.extra_args_input,
         ):
             w.setEnabled(enabled)
+
+    # ------------------- 命令预览区（只读；见 §8、ADR 0007） -------------------
+
+    def _setup_command_preview_section(self):
+        """自定义参数输入 + 只读实时命令预览（不做反向编辑，见方案 §8）。"""
+        header = BodyLabel(self.tr("命令预览"), self)
+        header.setStyleSheet("font-weight: bold;")
+        self.config_layout.addWidget(header)
+
+        ea_row = QHBoxLayout()
+        ea_row.setSpacing(15)
+        ea_row.addWidget(BodyLabel(self.tr("自定义参数"), self))
+        self.extra_args_input = LineEdit(self)
+        self.extra_args_input.setPlaceholderText(
+            self.tr("追加的 ffmpeg 参数，如 -x264-params ref=4:bframes=8")
+        )
+        ea_row.addWidget(self.extra_args_input)
+        self.config_layout.addLayout(ea_row)
+
+        self.command_preview = TextEdit(self)
+        self.command_preview.setReadOnly(True)
+        self.command_preview.setFixedHeight(96)
+        self.config_layout.addWidget(self.command_preview)
+
+        copy_row = QHBoxLayout()
+        copy_row.addStretch(1)
+        self.copy_command_button = PushButton(self.tr("复制命令"), self)
+        copy_row.addWidget(self.copy_command_button)
+        self.config_layout.addLayout(copy_row)
+
+        self.extra_args_input.textChanged.connect(self._on_extra_args_changed)
+        self.copy_command_button.clicked.connect(self._copy_command)
+        # 实时刷新：任一编码相关配置变化都重建只读预览
+        for _item in (
+            cfg.video_encoder, cfg.encode_mode, cfg.encode_cq, cfg.encode_bitrate_kbps,
+            cfg.enc_preset, cfg.enc_tune, cfg.enc_profile, cfg.enc_level, cfg.fast_decode,
+            cfg.target_height, cfg.out_fps, cfg.vfr, cfg.audio_encoder, cfg.audio_bitrate_kbps,
+            cfg.container, cfg.faststart, cfg.keep_metadata, cfg.start_zero, cfg.extra_args,
+            cfg.ffmpeg_source, cfg.soft_subtitle,
+        ):
+            _item.valueChanged.connect(lambda *_a: self._refresh_command_preview())
+
+    def _on_extra_args_changed(self, text: str):
+        cfg.set(cfg.extra_args, text)
+
+    def _copy_command(self):
+        QApplication.clipboard().setText(self.command_preview.toPlainText())
+        InfoBar.success(
+            self.tr("已复制"),
+            self.tr("命令已复制到剪贴板"),
+            duration=INFOBAR_DURATION_SUCCESS,
+            position=InfoBarPosition.BOTTOM,
+            parent=self,
+        )
+
+    def _refresh_command_preview(self):
+        try:
+            text = self._build_preview_command_text()
+        except Exception as e:  # 预览是尽力展示，失败不应影响页面
+            text = f"# 预览生成失败: {e}"
+        self.command_preview.setPlainText(text)
+
+    def _build_preview_command_text(self) -> str:
+        import subprocess
+        from dataclasses import replace
+
+        from videocaptioner.core.synthesis import build_output_name, get_ffmpeg_path
+        from videocaptioner.core.synthesis.command_builder import build_ffmpeg_command
+
+        es = TaskFactory.encode_settings_from_cfg()
+        ffmpeg = get_ffmpeg_path(es.ffmpeg_source)
+        soft = cfg.soft_subtitle.value
+
+        video = self.video_input.text().strip() or "<视频文件>"
+        subtitle = self.subtitle_input.text().strip() or "<字幕文件>"
+        stem = Path(video).stem if self.video_input.text().strip() else "视频"
+        name_es = replace(es, video_encoder="copy") if soft else es
+        output = build_output_name(stem, name_es, None, es.container)
+
+        if soft:
+            sub_codec = "srt" if es.container == "mkv" else "mov_text"
+            cmd = [
+                ffmpeg, "-i", video, "-i", subtitle,
+                "-c:v", "copy", "-c:a", "copy", "-c:s", sub_codec, "-y", output,
+            ]
+        else:
+            vf = "ass='<字幕(缩放/换行后).ass>'"
+            cmd = build_ffmpeg_command(
+                ffmpeg=ffmpeg, input_path=video, output_path=output,
+                video_filter=vf, settings=es, probe=None,
+            )
+        return subprocess.list2cmdline(cmd)
 
     # ------------------- 编码器选项区（预设/微调/配置/级别/快速解码） -------------------
 

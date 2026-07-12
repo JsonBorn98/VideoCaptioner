@@ -319,3 +319,33 @@ finally:
 """
     )
 
+
+def test_command_preview_is_readonly_and_live():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
+
+app = QApplication([])
+saved = (cfg.video_encoder.value, cfg.soft_subtitle.value, cfg.extra_args.value)
+try:
+    cfg.set(cfg.soft_subtitle, False)
+    w = VideoSynthesisInterface()
+    assert w.command_preview.isReadOnly()
+    assert 'libx264' in w.command_preview.toPlainText()
+    w._on_encoder_selected('hevc_nvenc', 'H.265 (NVENC)')
+    assert 'hevc_nvenc' in w.command_preview.toPlainText()  # live update from controls
+    w.extra_args_input.setText('-spatial-aq 1')
+    assert '-spatial-aq' in w.command_preview.toPlainText()  # extra args reflected
+    cfg.set(cfg.soft_subtitle, True)
+    assert '-c:s' in w.command_preview.toPlainText()  # soft mux command
+    print('OK')
+finally:
+    cfg.set(cfg.video_encoder, saved[0])
+    cfg.set(cfg.soft_subtitle, saved[1])
+    cfg.set(cfg.extra_args, saved[2])
+"""
+    )
+
+

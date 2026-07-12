@@ -102,6 +102,43 @@ class TaskFactory:
         }
 
     @staticmethod
+    def encode_settings_from_cfg():
+        """Build EncodeSettings from the 视频编码 controls; reused by the task and command preview."""
+        from videocaptioner.core.synthesis.models import EncodeSettings
+
+        enc = cfg.video_encoder.value
+        # 派生规则：硬烧录必须重编码，故硬字幕下 copy 回退 x264（避免 -c:v copy 与 -vf 冲突）
+        if not cfg.soft_subtitle.value and enc == "copy":
+            enc = "x264"
+        fps_text = cfg.out_fps.value.strip()
+        try:
+            fps = float(fps_text) if fps_text else None
+        except ValueError:
+            fps = None
+        return EncodeSettings(
+            video_encoder=enc,
+            encode_mode=cfg.encode_mode.value,
+            quality=cfg.encode_cq.value,
+            bitrate_kbps=cfg.encode_bitrate_kbps.value,
+            enc_preset=cfg.enc_preset.value or None,
+            enc_tune=cfg.enc_tune.value or None,
+            enc_profile=cfg.enc_profile.value or None,
+            enc_level=cfg.enc_level.value or None,
+            fast_decode=cfg.fast_decode.value,
+            target_height=cfg.target_height.value or None,
+            fps=fps,
+            vfr=cfg.vfr.value,
+            audio_encoder=cfg.audio_encoder.value,
+            audio_bitrate_kbps=cfg.audio_bitrate_kbps.value,
+            container=cfg.container.value,
+            faststart=cfg.faststart.value,
+            keep_metadata=cfg.keep_metadata.value,
+            start_zero=cfg.start_zero.value,
+            extra_args=cfg.extra_args.value,
+            ffmpeg_source=cfg.ffmpeg_source.value,
+        )
+
+    @staticmethod
     def create_subtitle_export_policy() -> SubtitleExportPolicy:
         """Freeze the one workflow-wide delivery export choice."""
         reference_width, reference_height = TaskFactory.get_style_reference(
@@ -434,39 +471,8 @@ class TaskFactory:
                 cfg.subtitle_style_reference_height.value,
             )
         )
-        # 新引擎编码设置：读取【视频编码】区的用户选择（GUI 控件为本增量）。
-        # 派生规则：硬烧录必须重编码，故硬字幕下 copy 回退 x264（避免 -c:v copy 与 -vf 冲突）。
-        from videocaptioner.core.synthesis.models import EncodeSettings
-
-        _enc = cfg.video_encoder.value
-        if not cfg.soft_subtitle.value and _enc == "copy":
-            _enc = "x264"
-        _out_fps_text = cfg.out_fps.value.strip()
-        try:
-            _out_fps = float(_out_fps_text) if _out_fps_text else None
-        except ValueError:
-            _out_fps = None
-        encode_settings = EncodeSettings(
-            video_encoder=_enc,
-            encode_mode=cfg.encode_mode.value,
-            quality=cfg.encode_cq.value,
-            bitrate_kbps=cfg.encode_bitrate_kbps.value,
-            enc_preset=cfg.enc_preset.value or None,
-            enc_tune=cfg.enc_tune.value or None,
-            enc_profile=cfg.enc_profile.value or None,
-            enc_level=cfg.enc_level.value or None,
-            fast_decode=cfg.fast_decode.value,
-            target_height=cfg.target_height.value or None,
-            fps=_out_fps,
-            vfr=cfg.vfr.value,
-            audio_encoder=cfg.audio_encoder.value,
-            audio_bitrate_kbps=cfg.audio_bitrate_kbps.value,
-            container=cfg.container.value,
-            faststart=cfg.faststart.value,
-            keep_metadata=cfg.keep_metadata.value,
-            start_zero=cfg.start_zero.value,
-            ffmpeg_source=cfg.ffmpeg_source.value,
-        )
+        # 新引擎编码设置：读取【视频编码】区的用户选择（可复用于命令预览）
+        encode_settings = TaskFactory.encode_settings_from_cfg()
         from dataclasses import replace
 
         from videocaptioner.core.synthesis import build_output_name

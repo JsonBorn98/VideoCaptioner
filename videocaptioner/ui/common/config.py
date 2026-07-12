@@ -557,6 +557,8 @@ class Config(QConfig):
     ffmpeg_source = OptionsConfigItem(
         "Video", "FfmpegSource", "default", OptionsValidator(["default", "custom"])
     )
+    # 自定义 ffmpeg 参数（追加在构建命令末段；命令预览未识别 token 也归入此处）
+    extra_args = ConfigItem("Video", "ExtraArgs", "")
 
     # ------------------- 编码器选项（预设/微调/配置/级别/快速解码） -------------------
     # 空字符串 = 自动/默认（编码器默认值，None）
