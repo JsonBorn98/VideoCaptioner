@@ -516,6 +516,46 @@ def _build_synthesize_parser(subparsers) -> None:
         help="Subtitle layout for bilingual output (default: target-above)",
     )
 
+    enc = p.add_argument_group(
+        "Encode (new engine; any of these routes hard-burn through the encoder catalog)"
+    )
+    enc.add_argument(
+        "--video-encoder",
+        metavar="ENC",
+        help="x264/x265/svt_av1/aom_av1/h264_nvenc/hevc_nvenc/av1_nvenc/"
+        "h264_qsv/hevc_qsv/av1_qsv/h264_amf/hevc_amf/av1_amf/vp9/copy or a custom ffmpeg encoder",
+    )
+    enc.add_argument("--encode-mode", choices=["cq", "abr"], help="cq=constant quality, abr=average bitrate")
+    enc.add_argument("--cq", type=int, metavar="N", help="Constant-quality value (native scale; lower=better)")
+    enc.add_argument("--bitrate", type=int, metavar="KBPS", help="Average bitrate kbps (abr)")
+    enc.add_argument("--two-pass", action="store_true", default=None, help="Two-pass ABR (CPU only)")
+    enc.add_argument("--preset", dest="enc_preset", metavar="P", help="Encoder preset")
+    enc.add_argument("--tune", dest="enc_tune", metavar="T", help="Encoder tune")
+    enc.add_argument("--profile", dest="enc_profile", metavar="P", help="Encoder profile")
+    enc.add_argument("--level", dest="enc_level", metavar="L", help="Encoder level")
+    enc.add_argument("--fast-decode", action="store_true", default=None, help="Fast-decode tune (x264/x265)")
+    enc.add_argument("--height", type=int, metavar="H", help="Output height; width auto, no upscaling")
+    enc.add_argument("--fps", dest="out_fps", metavar="F", help="Output frame rate (omit=source)")
+    _vfr = enc.add_mutually_exclusive_group()
+    _vfr.add_argument("--vfr", dest="vfr", action="store_true", default=None, help="Variable frame rate (default)")
+    _vfr.add_argument("--cfr", dest="vfr", action="store_false", help="Constant frame rate")
+    enc.add_argument("--audio-encoder", metavar="A", help="copy(default)/aac/opus/ac3/mp3/flac")
+    enc.add_argument("--audio-bitrate", type=int, metavar="KBPS", help="Audio bitrate kbps (re-encode)")
+    enc.add_argument("--container", choices=["mp4", "mkv"], help="Output container (default mp4)")
+    _fs = enc.add_mutually_exclusive_group()
+    _fs.add_argument("--faststart", dest="faststart", action="store_true", default=None)
+    _fs.add_argument("--no-faststart", dest="faststart", action="store_false")
+    _md = enc.add_mutually_exclusive_group()
+    _md.add_argument("--keep-metadata", dest="keep_metadata", action="store_true", default=None)
+    _md.add_argument("--no-keep-metadata", dest="keep_metadata", action="store_false")
+    enc.add_argument("--extra-args", metavar="STR", help="Extra ffmpeg args appended verbatim")
+    enc.add_argument(
+        "--print-command", action="store_true", help="Print the ffmpeg command that would run, then exit"
+    )
+    enc.add_argument(
+        "--raw-ffmpeg", metavar="CMD", help="Run this exact ffmpeg command verbatim (argv[0] forced to the managed ffmpeg)"
+    )
+
     _add_style_options(p)
     p.add_argument("-o", "--output", metavar="PATH", help="Output video file path")
 

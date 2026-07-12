@@ -153,6 +153,10 @@ def _override_ass_font(ass_style: str, font_file: Optional[str], font_size: Opti
 
 
 def run(args: Namespace, config: dict) -> int:
+    # --raw-ffmpeg: execute a full ffmpeg command verbatim (argv[0] forced to managed ffmpeg)
+    if getattr(args, "raw_ffmpeg", None):
+        return _run_raw_ffmpeg(args)
+
     video_path = Path(args.video)
     subtitle_path = Path(args.subtitle)
 
@@ -179,6 +183,12 @@ def run(args: Namespace, config: dict) -> int:
     crf, preset = _QUALITY_MAP.get(quality, (28, "medium"))
     soft = subtitle_mode == "soft"
 
+    # New engine settings from flags (CQ falls back to the --quality tier's CRF)
+    encode_settings = _build_encode_settings(args, quality)
+    if not soft and encode_settings.video_encoder == "copy":
+        from dataclasses import replace
+        encode_settings = replace(encode_settings, video_encoder="x264")
+
     # Warn if user explicitly passed style options with soft mode
     style_arg = getattr(args, "style", None)
     override_arg = getattr(args, "style_override", None)
@@ -186,13 +196,20 @@ def run(args: Namespace, config: dict) -> int:
     if soft and any([style_arg, override_arg, render_arg]):
         output.warn("Style options are ignored in soft subtitle mode (player controls rendering)")
 
-    # Output path
+    # Output path: -o wins; otherwise 【视频合成】…_{h}p_{enc}_{codec}_{q} (probe for height)
     if args.output:
         output_path = args.output
     else:
-        stem = video_path.stem
-        suffix = "_captioned" if not soft else "_subtitled"
-        output_path = str(video_path.with_stem(stem + suffix))
+        from dataclasses import replace
+
+        from videocaptioner.core.synthesis import build_output_name, media_probe
+        _probe = media_probe.probe(str(video_path), source=encode_settings.ffmpeg_source)
+        _eff_h = _probe.effective_height(encode_settings.target_height)
+        _name_es = replace(encode_settings, video_encoder="copy") if soft else encode_settings
+        output_path = str(
+            video_path.parent
+            / build_output_name(video_path.stem, _name_es, _eff_h, encode_settings.container)
+        )
 
     # Check input != output
     if Path(output_path).resolve() == video_path.resolve():
@@ -202,6 +219,9 @@ def run(args: Namespace, config: dict) -> int:
     if verbose:
         output.info(f"Mode: {'soft (embedded track)' if soft else 'hard (burned in)'}")
         output.info(f"Quality: {quality} (CRF={crf}, preset={preset})")
+
+    if getattr(args, "print_command", False):
+        return _print_command(encode_settings, video_path, subtitle_path, output_path)
 
     progress = None if quiet else output.ProgressLine(f"Synthesizing video [{subtitle_mode}]").start()
 
@@ -252,6 +272,7 @@ def run(args: Namespace, config: dict) -> int:
                     preset=preset,
                     progress_callback=progress_callback,
                     reference_height=style.reference_height,
+                    encode_settings=encode_settings,
                 )
             else:
                 from videocaptioner.core.asr.asr_data import ASRData
@@ -272,6 +293,7 @@ def run(args: Namespace, config: dict) -> int:
                     preset=preset,
                     progress_callback=progress_callback,
                     reference_height=style.reference_height,
+                    encode_settings=encode_settings,
                 )
 
         if progress:
@@ -301,3 +323,115 @@ def _register_font(font_file: str) -> None:
     dest = FONTS_PATH / Path(font_file).name
     if not dest.exists():
         shutil.copy(font_file, dest)
+
+
+def _build_encode_settings(args: Namespace, quality_tier: str):
+    """Build EncodeSettings from CLI flags; CQ falls back to the --quality tier's CRF."""
+    from videocaptioner.core.synthesis.models import EncodeSettings
+
+    tier_crf = {"ultra": 18, "high": 23, "medium": 28, "low": 32}.get(quality_tier, 28)
+
+    def _v(name: str):
+        return getattr(args, name, None)
+
+    def _opt_str(name: str):
+        v = _v(name)
+        return str(v) if v is not None else None
+
+    cq = _v("cq")
+    bitrate = _v("bitrate")
+    audio_br = _v("audio_bitrate")
+    height = _v("height")
+    fps_raw = _v("out_fps")
+    try:
+        fps = float(fps_raw) if fps_raw else None
+    except (TypeError, ValueError):
+        fps = None
+
+    encode_mode = "abr" if _v("encode_mode") == "abr" else "cq"
+    container = "mkv" if _v("container") == "mkv" else "mp4"
+    vfr_v, faststart_v, keep_meta_v = _v("vfr"), _v("faststart"), _v("keep_metadata")
+
+    return EncodeSettings(
+        video_encoder=str(_v("video_encoder") or "x264"),
+        encode_mode=encode_mode,
+        quality=int(cq) if cq is not None else tier_crf,
+        bitrate_kbps=int(bitrate) if bitrate is not None else 4000,
+        two_pass=bool(_v("two_pass")),
+        enc_preset=_opt_str("enc_preset"),
+        enc_tune=_opt_str("enc_tune"),
+        enc_profile=_opt_str("enc_profile"),
+        enc_level=_opt_str("enc_level"),
+        fast_decode=bool(_v("fast_decode")),
+        target_height=int(height) if height is not None else None,
+        fps=fps,
+        vfr=True if vfr_v is None else bool(vfr_v),
+        audio_encoder=str(_v("audio_encoder") or "copy"),
+        audio_bitrate_kbps=int(audio_br) if audio_br is not None else 192,
+        container=container,
+        faststart=True if faststart_v is None else bool(faststart_v),
+        keep_metadata=True if keep_meta_v is None else bool(keep_meta_v),
+        extra_args=str(_v("extra_args") or ""),
+    )
+
+
+def _print_command(encode_settings, video_path: Path, subtitle_path: Path, output_path: str) -> int:
+    """Print the hard-burn ffmpeg command the engine would run (for inspection / --raw-ffmpeg)."""
+    import subprocess as _sp
+
+    from videocaptioner.core.synthesis import get_ffmpeg_path, media_probe
+    from videocaptioner.core.synthesis.command_builder import build_ffmpeg_command
+
+    probe = media_probe.probe(str(video_path), source=encode_settings.ffmpeg_source)
+    ffmpeg = get_ffmpeg_path(encode_settings.ffmpeg_source)
+    # Representative subtitle filter; the real temp .ass path is resolved at run time.
+    vf = f"ass='{subtitle_path.name}'"
+    cmd = build_ffmpeg_command(
+        ffmpeg=ffmpeg,
+        input_path=str(video_path),
+        output_path=output_path,
+        video_filter=vf,
+        settings=encode_settings,
+        probe=probe,
+    )
+    print(_sp.list2cmdline(cmd))
+    return EXIT.SUCCESS
+
+
+def _run_raw_ffmpeg(args: Namespace) -> int:
+    """Execute a full ffmpeg command verbatim; argv[0] is forced to the managed ffmpeg."""
+    import shlex
+
+    from videocaptioner.core.synthesis import get_ffmpeg_path, runner
+
+    tokens = shlex.split(args.raw_ffmpeg)
+    if not tokens:
+        output.error("--raw-ffmpeg is empty")
+        return EXIT.USAGE_ERROR
+    if Path(tokens[0]).stem.lower() not in ("ffmpeg", "ffprobe"):
+        output.error("--raw-ffmpeg must be an ffmpeg invocation (first token must be 'ffmpeg')")
+        return EXIT.USAGE_ERROR
+    tokens[0] = get_ffmpeg_path()
+
+    quiet = getattr(args, "quiet", False)
+    progress = None if quiet else output.ProgressLine("Running ffmpeg [raw]").start()
+
+    def _cb(*cb_args) -> None:
+        if progress and cb_args:
+            try:
+                progress.update(int(float(cb_args[0])), "Encoding [raw]")
+            except (ValueError, TypeError):
+                pass
+
+    try:
+        runner.run_encode(tokens, progress_callback=_cb)
+    except Exception as e:
+        msg = output.clean_error(str(e))
+        if progress:
+            progress.fail(msg)
+        else:
+            output.error(msg)
+        return EXIT.RUNTIME_ERROR
+    if progress:
+        progress.finish("Done (raw)")
+    return EXIT.SUCCESS
