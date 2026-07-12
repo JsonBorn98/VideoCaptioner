@@ -558,6 +558,33 @@ class Config(QConfig):
         "Video", "FfmpegSource", "default", OptionsValidator(["default", "custom"])
     )
 
+    # ------------------- 编码器选项（预设/微调/配置/级别/快速解码） -------------------
+    # 空字符串 = 自动/默认（编码器默认值，None）
+    enc_preset = ConfigItem("Video", "EncPreset", "")
+    enc_tune = ConfigItem("Video", "EncTune", "")
+    enc_profile = ConfigItem("Video", "EncProfile", "")
+    enc_level = ConfigItem("Video", "EncLevel", "")
+    fast_decode = ConfigItem("Video", "FastDecode", False, BoolValidator())
+
+    # ------------------- 分辨率与帧率 -------------------
+    # 0 = 与源相同（不放大）
+    target_height = RangeConfigItem("Video", "TargetHeight", 0, RangeValidator(0, 4320))
+    # 空字符串 = 与源相同
+    out_fps = ConfigItem("Video", "OutFps", "")
+    vfr = ConfigItem("Video", "Vfr", True, BoolValidator())
+
+    # ------------------- 音频 -------------------
+    audio_encoder = ConfigItem("Video", "AudioEncoder", "copy")
+    audio_bitrate_kbps = RangeConfigItem(
+        "Video", "AudioBitrateKbps", 192, RangeValidator(32, 1024)
+    )
+
+    # ------------------- 其他 · 高级 -------------------
+    container = OptionsConfigItem("Video", "Container", "mp4", OptionsValidator(["mp4", "mkv"]))
+    faststart = ConfigItem("Video", "Faststart", True, BoolValidator())
+    keep_metadata = ConfigItem("Video", "KeepMetadata", True, BoolValidator())
+    start_zero = ConfigItem("Video", "StartZero", True, BoolValidator())
+
     # ------------------- 字幕样式配置 -------------------
     subtitle_style_name = ConfigItem("SubtitleStyle", "StyleName", "default")
     subtitle_layout = OptionsConfigItem(

@@ -140,3 +140,182 @@ finally:
     cfg.set(cfg.ffmpeg_source, saved)
 """
     )
+
+
+def test_encoder_selection_repopulates_encoder_options():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
+
+app = QApplication([])
+keys = [cfg.video_encoder, cfg.enc_preset, cfg.enc_tune, cfg.fast_decode]
+saved = [k.value for k in keys]
+try:
+    w = VideoSynthesisInterface()
+
+    # x264: has presets ('medium' among them), tunes, and fastdecode support
+    w._on_encoder_selected('x264', 'H.264 (x264)')
+    preset_items = [w.enc_preset_combo.itemText(i) for i in range(w.enc_preset_combo.count())]
+    assert 'medium' in preset_items, preset_items
+    assert w.enc_preset_container.isHidden() is False
+    assert w.enc_tune_container.isHidden() is False
+    assert w.fast_decode_container.isHidden() is False
+
+    # svt_av1: numeric presets, no tunes tuple in catalog -> tune row hidden
+    w._on_encoder_selected('svt_av1', 'AV1 (SVT)')
+    preset_items = [w.enc_preset_combo.itemText(i) for i in range(w.enc_preset_combo.count())]
+    assert '8' in preset_items, preset_items
+    assert w.enc_tune_container.isHidden() is True
+
+    # selecting a preset value persists to cfg (skip the leading 自动/默认 item)
+    w.enc_preset_combo.setCurrentIndex(1)
+    assert cfg.enc_preset.value == w.enc_preset_combo.itemData(1)
+
+    # '自动/默认' maps back to empty string (None at the EncodeSettings layer)
+    w.enc_preset_combo.setCurrentIndex(0)
+    assert cfg.enc_preset.value == ''
+
+    print('OK')
+finally:
+    for k, v in zip(keys, saved):
+        cfg.set(k, v)
+"""
+    )
+
+
+def test_resolution_combo_updates_target_height():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
+
+app = QApplication([])
+saved = cfg.target_height.value
+try:
+    w = VideoSynthesisInterface()
+
+    w.resolution_combo.setCurrentIndex(2)  # 1080p
+    assert cfg.target_height.value == 1080, cfg.target_height.value
+
+    w.resolution_combo.setCurrentIndex(4)  # 4K -> height 2160
+    assert cfg.target_height.value == 2160, cfg.target_height.value
+
+    w.resolution_combo.setCurrentIndex(5)  # 自定义
+    w.custom_height_input.setText('900')
+    assert cfg.target_height.value == 900, cfg.target_height.value
+
+    w.resolution_combo.setCurrentIndex(0)  # 与源相同
+    assert cfg.target_height.value == 0, cfg.target_height.value
+
+    print('OK')
+finally:
+    cfg.set(cfg.target_height, saved)
+"""
+    )
+
+
+def test_audio_encoder_copy_disables_bitrate():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.video_synthesis_interface import VideoSynthesisInterface
+
+app = QApplication([])
+saved = cfg.audio_encoder.value
+try:
+    w = VideoSynthesisInterface()
+
+    # index 0 = 直通 (copy) -> bitrate disabled
+    w.audio_encoder_combo.setCurrentIndex(0)
+    assert cfg.audio_encoder.value == 'copy'
+    assert w.audio_bitrate_combo.isEnabled() is False
+
+    # index 1 = AAC -> bitrate enabled
+    w.audio_encoder_combo.setCurrentIndex(1)
+    assert cfg.audio_encoder.value == 'aac'
+    assert w.audio_bitrate_combo.isEnabled() is True
+
+    # FLAC (lossless) also disables bitrate
+    w.audio_encoder_combo.setCurrentIndex(5)
+    assert cfg.audio_encoder.value == 'flac'
+    assert w.audio_bitrate_combo.isEnabled() is False
+
+    print('OK')
+finally:
+    cfg.set(cfg.audio_encoder, saved)
+"""
+    )
+
+
+def test_task_factory_maps_resolution_audio_container_fields():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.task_factory import TaskFactory
+
+app = QApplication([])
+keys = [
+    cfg.soft_subtitle, cfg.video_encoder, cfg.target_height, cfg.out_fps, cfg.vfr,
+    cfg.audio_encoder, cfg.audio_bitrate_kbps, cfg.container, cfg.faststart,
+    cfg.keep_metadata, cfg.start_zero, cfg.enc_preset, cfg.enc_tune, cfg.enc_profile,
+    cfg.enc_level, cfg.fast_decode,
+]
+saved = [k.value for k in keys]
+try:
+    cfg.set(cfg.soft_subtitle, False)
+    cfg.set(cfg.video_encoder, 'x264')
+    cfg.set(cfg.target_height, 1080)
+    cfg.set(cfg.out_fps, '')
+    cfg.set(cfg.vfr, False)
+    cfg.set(cfg.audio_encoder, 'aac')
+    cfg.set(cfg.audio_bitrate_kbps, 128)
+    cfg.set(cfg.container, 'mkv')
+    cfg.set(cfg.faststart, False)
+    cfg.set(cfg.keep_metadata, False)
+    cfg.set(cfg.start_zero, False)
+    cfg.set(cfg.enc_preset, 'slow')
+    cfg.set(cfg.enc_tune, 'film')
+    cfg.set(cfg.enc_profile, 'high')
+    cfg.set(cfg.enc_level, '4.1')
+    cfg.set(cfg.fast_decode, True)
+
+    task = TaskFactory.create_synthesis_task('C:/x/video.mp4', 'C:/x/sub.srt')
+    es = task.synthesis_config.encode_settings
+
+    assert es.target_height == 1080, es.target_height
+    assert es.fps is None, es.fps
+    assert es.vfr is False
+    assert es.audio_encoder == 'aac'
+    assert es.audio_bitrate_kbps == 128
+    assert es.container == 'mkv'
+    assert es.faststart is False
+    assert es.keep_metadata is False
+    assert es.start_zero is False
+    assert es.enc_preset == 'slow'
+    assert es.enc_tune == 'film'
+    assert es.enc_profile == 'high'
+    assert es.enc_level == '4.1'
+    assert es.fast_decode is True
+
+    # '' target_height / out_fps map back to None
+    cfg.set(cfg.target_height, 0)
+    cfg.set(cfg.out_fps, '29.97')
+    cfg.set(cfg.enc_preset, '')
+    task2 = TaskFactory.create_synthesis_task('C:/x/video2.mp4', 'C:/x/sub2.srt')
+    es2 = task2.synthesis_config.encode_settings
+    assert es2.target_height is None, es2.target_height
+    assert es2.fps == 29.97, es2.fps
+    assert es2.enc_preset is None, es2.enc_preset
+
+    print('OK')
+finally:
+    for k, v in zip(keys, saved):
+        cfg.set(k, v)
+"""
+    )
+

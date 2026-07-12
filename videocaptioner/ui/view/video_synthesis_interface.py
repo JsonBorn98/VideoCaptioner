@@ -13,6 +13,7 @@ from qfluentwidgets import (
     CardWidget,
     ComboBox,
     CommandBar,
+    EditableComboBox,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -21,6 +22,7 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     Slider,
+    SwitchButton,
     ToolTipFilter,
     ToolTipPosition,
     TransparentDropDownPushButton,
@@ -120,6 +122,11 @@ class VideoSynthesisInterface(QWidget):
 
         # 视频编码区（新引擎）
         self._setup_encode_section()
+        # 编码器选项 / 分辨率与帧率 / 音频 / 其他·高级（见方案 §5、§4、§11）
+        self._setup_encoder_options_section()
+        self._setup_resolution_fps_section()
+        self._setup_audio_section()
+        self._setup_advanced_section()
 
         self.main_layout.addWidget(self.config_card)
 
@@ -641,6 +648,7 @@ class VideoSynthesisInterface(QWidget):
         cfg.set(cfg.video_encoder, key)
         self.encoder_button.setText(label)
         self._apply_encoder_range(key)
+        self._refresh_encoder_options()
 
     def _on_encode_mode_changed(self, index: int):
         cfg.set(cfg.encode_mode, "cq" if index == 0 else "abr")
@@ -672,6 +680,10 @@ class VideoSynthesisInterface(QWidget):
         self.quality_value_label.setText(str(cfg.encode_cq.value))
         self.bitrate_input.setText(str(cfg.encode_bitrate_kbps.value))
         self._update_encode_mode_visibility()
+        self._refresh_encoder_options()
+        self._init_resolution_fps_controls()
+        self._init_audio_controls()
+        self._init_advanced_controls()
 
     def _set_encode_section_enabled(self, enabled: bool):
         """编码区仅在硬烧录重编码时有意义（软字幕走流复制）。"""
@@ -682,6 +694,369 @@ class VideoSynthesisInterface(QWidget):
             self.bitrate_container,
         ):
             w.setEnabled(enabled)
+        for w in (
+            self.enc_preset_container,
+            self.enc_tune_container,
+            self.enc_profile_container,
+            self.enc_level_container,
+            self.fast_decode_container,
+            self.resolution_container,
+            self.fps_container,
+            self.vfr_container,
+            self.audio_container,
+            self.advanced_container,
+        ):
+            w.setEnabled(enabled)
+
+    # ------------------- 编码器选项区（预设/微调/配置/级别/快速解码） -------------------
+
+    def _setup_encoder_options_section(self):
+        """构建【编码器选项】区：按当前编码器动态披露预设/微调/配置/级别/快速解码（见方案 §4）。"""
+        header = BodyLabel(self.tr("编码器选项"), self)
+        header.setStyleSheet("font-weight: bold;")
+        self.config_layout.addWidget(header)
+
+        self.enc_preset_container = self._make_auto_combo_row(
+            "enc_preset_combo", self.tr("预设")
+        )
+        self.enc_tune_container = self._make_auto_combo_row("enc_tune_combo", self.tr("微调"))
+        self.enc_profile_container = self._make_auto_combo_row(
+            "enc_profile_combo", self.tr("配置")
+        )
+        self.enc_level_container = self._make_auto_combo_row("enc_level_combo", self.tr("级别"))
+
+        self.fast_decode_container = QWidget(self)
+        fd_row = QHBoxLayout(self.fast_decode_container)
+        fd_row.setContentsMargins(0, 0, 0, 0)
+        fd_row.setSpacing(15)
+        fd_row.addWidget(BodyLabel(self.tr("快速解码"), self))
+        self.fast_decode_switch = SwitchButton(self)
+        fd_row.addWidget(self.fast_decode_switch)
+        fd_row.addStretch(1)
+        self.config_layout.addWidget(self.fast_decode_container)
+
+        self.enc_preset_combo.currentIndexChanged.connect(
+            lambda i: self._on_auto_combo_changed(cfg.enc_preset, self.enc_preset_combo)
+        )
+        self.enc_tune_combo.currentIndexChanged.connect(
+            lambda i: self._on_auto_combo_changed(cfg.enc_tune, self.enc_tune_combo)
+        )
+        self.enc_profile_combo.currentIndexChanged.connect(
+            lambda i: self._on_auto_combo_changed(cfg.enc_profile, self.enc_profile_combo)
+        )
+        self.enc_level_combo.currentIndexChanged.connect(
+            lambda i: self._on_auto_combo_changed(cfg.enc_level, self.enc_level_combo)
+        )
+        self.fast_decode_switch.checkedChanged.connect(
+            lambda checked: cfg.set(cfg.fast_decode, checked)
+        )
+
+    def _make_auto_combo_row(self, attr_name: str, label_text: str) -> QWidget:
+        """创建一行"标签 + 下拉框"（首项为"自动/默认"），返回可整体显示/隐藏的容器。"""
+        container = QWidget(self)
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(15)
+        row.addWidget(BodyLabel(label_text, self))
+        combo = ComboBox(self)
+        combo.setMinimumWidth(140)
+        row.addWidget(combo)
+        row.addStretch(1)
+        setattr(self, attr_name, combo)
+        self.config_layout.addWidget(container)
+        return container
+
+    def _on_auto_combo_changed(self, config_item, combo: ComboBox):
+        value = combo.currentData()
+        cfg.set(config_item, value or "")
+
+    def _populate_auto_combo(self, combo: ComboBox, values: tuple, current: str):
+        """填充"自动/默认"下拉框；current 为空字符串表示自动。"""
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(self.tr("自动/默认"), userData="")
+        for v in values:
+            combo.addItem(v, userData=v)
+        idx = combo.findData(current)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _refresh_encoder_options(self):
+        """按当前编码器重建【编码器选项】区可见控件（见方案 §4）。
+
+        自定义（未列出）编码器隐藏全部编码器选项控件。
+        """
+        key = cfg.video_encoder.value
+        spec = self._get_encoder_spec(key)
+        if spec is None:
+            for w in (
+                self.enc_preset_container,
+                self.enc_tune_container,
+                self.enc_profile_container,
+                self.enc_level_container,
+                self.fast_decode_container,
+            ):
+                w.setVisible(False)
+            return
+
+        has_preset = bool(spec.presets)
+        has_tune = bool(spec.tunes)
+        has_profile = bool(spec.profiles)
+        has_level = bool(spec.levels)
+        self.enc_preset_container.setVisible(has_preset)
+        self.enc_tune_container.setVisible(has_tune)
+        self.enc_profile_container.setVisible(has_profile)
+        self.enc_level_container.setVisible(has_level)
+        self.fast_decode_container.setVisible(spec.supports_fastdecode)
+
+        if has_preset:
+            self._populate_auto_combo(self.enc_preset_combo, spec.presets, cfg.enc_preset.value)
+        if has_tune:
+            self._populate_auto_combo(self.enc_tune_combo, spec.tunes, cfg.enc_tune.value)
+        if has_profile:
+            self._populate_auto_combo(
+                self.enc_profile_combo, spec.profiles, cfg.enc_profile.value
+            )
+        if has_level:
+            self._populate_auto_combo(self.enc_level_combo, spec.levels, cfg.enc_level.value)
+        self.fast_decode_switch.setChecked(cfg.fast_decode.value)
+
+    # ------------------- 分辨率与帧率区 -------------------
+
+    _RESOLUTION_ITEMS = (
+        ("与源相同", 0),
+        ("720p", 720),
+        ("1080p", 1080),
+        ("1440p", 1440),
+        ("4K", 2160),
+        ("自定义", None),
+    )
+
+    def _setup_resolution_fps_section(self):
+        """构建【分辨率与帧率】区（见方案 §5）。"""
+        header = BodyLabel(self.tr("分辨率与帧率"), self)
+        header.setStyleSheet("font-weight: bold;")
+        self.config_layout.addWidget(header)
+
+        self.resolution_container = QWidget(self)
+        res_row = QHBoxLayout(self.resolution_container)
+        res_row.setContentsMargins(0, 0, 0, 0)
+        res_row.setSpacing(15)
+        res_row.addWidget(BodyLabel(self.tr("分辨率"), self))
+        self.resolution_combo = ComboBox(self)
+        for text, _ in self._RESOLUTION_ITEMS:
+            self.resolution_combo.addItem(self.tr(text))
+        self.resolution_combo.setMinimumWidth(140)
+        res_row.addWidget(self.resolution_combo)
+        self.custom_height_input = LineEdit(self)
+        self.custom_height_input.setPlaceholderText(self.tr("高度(px)"))
+        self.custom_height_input.setMaximumWidth(100)
+        res_row.addWidget(self.custom_height_input)
+        res_row.addStretch(1)
+        self.config_layout.addWidget(self.resolution_container)
+
+        self.fps_container = QWidget(self)
+        fps_row = QHBoxLayout(self.fps_container)
+        fps_row.setContentsMargins(0, 0, 0, 0)
+        fps_row.setSpacing(15)
+        fps_row.addWidget(BodyLabel(self.tr("帧率"), self))
+        self.fps_combo = ComboBox(self)
+        self.fps_combo.addItems([self.tr("与源相同"), self.tr("自定义")])
+        self.fps_combo.setMinimumWidth(140)
+        fps_row.addWidget(self.fps_combo)
+        self.custom_fps_input = LineEdit(self)
+        self.custom_fps_input.setPlaceholderText(self.tr("帧率"))
+        self.custom_fps_input.setMaximumWidth(100)
+        fps_row.addWidget(self.custom_fps_input)
+        fps_row.addStretch(1)
+        self.config_layout.addWidget(self.fps_container)
+
+        self.vfr_container = QWidget(self)
+        vfr_row = QHBoxLayout(self.vfr_container)
+        vfr_row.setContentsMargins(0, 0, 0, 0)
+        vfr_row.setSpacing(15)
+        vfr_row.addWidget(BodyLabel(self.tr("可变帧率 (VFR)"), self))
+        self.vfr_switch = SwitchButton(self)
+        vfr_row.addWidget(self.vfr_switch)
+        vfr_row.addStretch(1)
+        self.config_layout.addWidget(self.vfr_container)
+
+        self.resolution_combo.currentIndexChanged.connect(self._on_resolution_changed)
+        self.custom_height_input.textChanged.connect(self._on_custom_height_changed)
+        self.fps_combo.currentIndexChanged.connect(self._on_fps_mode_changed)
+        self.custom_fps_input.textChanged.connect(self._on_custom_fps_changed)
+        self.vfr_switch.checkedChanged.connect(lambda checked: cfg.set(cfg.vfr, checked))
+
+    def _on_resolution_changed(self, index: int):
+        _, height = self._RESOLUTION_ITEMS[index]
+        is_custom = height is None
+        self.custom_height_input.setVisible(is_custom)
+        if not is_custom:
+            cfg.set(cfg.target_height, height)
+
+    def _on_custom_height_changed(self, text: str):
+        if self.resolution_combo.currentIndex() != len(self._RESOLUTION_ITEMS) - 1:
+            return
+        try:
+            value = int(text)
+        except ValueError:
+            return
+        if 0 <= value <= 4320:
+            cfg.set(cfg.target_height, value)
+
+    def _on_fps_mode_changed(self, index: int):
+        is_custom = index == 1
+        self.custom_fps_input.setVisible(is_custom)
+        if not is_custom:
+            cfg.set(cfg.out_fps, "")
+
+    def _on_custom_fps_changed(self, text: str):
+        if self.fps_combo.currentIndex() != 1:
+            return
+        try:
+            float(text)
+        except ValueError:
+            return
+        cfg.set(cfg.out_fps, text)
+
+    def _init_resolution_fps_controls(self):
+        target_height = cfg.target_height.value
+        preset_heights = {h for _, h in self._RESOLUTION_ITEMS if h is not None}
+        if target_height in preset_heights:
+            idx = next(
+                i for i, (_, h) in enumerate(self._RESOLUTION_ITEMS) if h == target_height
+            )
+            self.resolution_combo.setCurrentIndex(idx)
+            self.custom_height_input.setVisible(False)
+        else:
+            # 自定义（含 0 未落在预设里的情况按"与源相同"兜底不会发生，因为 0 在预设中）
+            custom_idx = len(self._RESOLUTION_ITEMS) - 1
+            self.resolution_combo.setCurrentIndex(custom_idx)
+            self.custom_height_input.setText(str(target_height))
+            self.custom_height_input.setVisible(True)
+
+        out_fps = cfg.out_fps.value
+        is_custom_fps = bool(out_fps)
+        self.fps_combo.setCurrentIndex(1 if is_custom_fps else 0)
+        self.custom_fps_input.setVisible(is_custom_fps)
+        if is_custom_fps:
+            self.custom_fps_input.setText(out_fps)
+
+        self.vfr_switch.setChecked(cfg.vfr.value)
+
+    # ------------------- 音频区 -------------------
+
+    _AUDIO_ENCODER_ITEMS = (
+        ("直通", "copy"),
+        ("AAC", "aac"),
+        ("Opus", "opus"),
+        ("AC3", "ac3"),
+        ("MP3", "mp3"),
+        ("FLAC", "flac"),
+    )
+    _AUDIO_BITRATE_ITEMS = ("96", "128", "160", "192", "256", "320")
+
+    def _setup_audio_section(self):
+        """构建【音频】区（见方案 §5/§7/§12）。"""
+        header = BodyLabel(self.tr("音频"), self)
+        header.setStyleSheet("font-weight: bold;")
+        self.config_layout.addWidget(header)
+
+        self.audio_container = QWidget(self)
+        audio_row = QHBoxLayout(self.audio_container)
+        audio_row.setContentsMargins(0, 0, 0, 0)
+        audio_row.setSpacing(15)
+        audio_row.addWidget(BodyLabel(self.tr("音频编码器"), self))
+        self.audio_encoder_combo = ComboBox(self)
+        for text, _ in self._AUDIO_ENCODER_ITEMS:
+            self.audio_encoder_combo.addItem(self.tr(text))
+        self.audio_encoder_combo.setMinimumWidth(140)
+        audio_row.addWidget(self.audio_encoder_combo)
+        audio_row.addWidget(BodyLabel(self.tr("码率 (kbps)"), self))
+        self.audio_bitrate_combo = EditableComboBox(self)
+        self.audio_bitrate_combo.addItems(list(self._AUDIO_BITRATE_ITEMS))
+        self.audio_bitrate_combo.setMinimumWidth(100)
+        audio_row.addWidget(self.audio_bitrate_combo)
+        audio_row.addStretch(1)
+        self.config_layout.addWidget(self.audio_container)
+
+        self.audio_encoder_combo.currentIndexChanged.connect(self._on_audio_encoder_changed)
+        self.audio_bitrate_combo.currentTextChanged.connect(self._on_audio_bitrate_changed)
+
+    def _on_audio_encoder_changed(self, index: int):
+        _, key = self._AUDIO_ENCODER_ITEMS[index]
+        cfg.set(cfg.audio_encoder, key)
+        self.audio_bitrate_combo.setEnabled(key not in ("copy", "flac"))
+
+    def _on_audio_bitrate_changed(self, text: str):
+        try:
+            value = int(text)
+        except ValueError:
+            return
+        if 32 <= value <= 1024:
+            cfg.set(cfg.audio_bitrate_kbps, value)
+
+    def _init_audio_controls(self):
+        key = cfg.audio_encoder.value
+        idx = next(
+            (i for i, (_, k) in enumerate(self._AUDIO_ENCODER_ITEMS) if k == key), 0
+        )
+        self.audio_encoder_combo.setCurrentIndex(idx)
+        self.audio_bitrate_combo.setCurrentText(str(cfg.audio_bitrate_kbps.value))
+        self.audio_bitrate_combo.setEnabled(key not in ("copy", "flac"))
+
+    # ------------------- 其他 · 高级区 -------------------
+
+    def _setup_advanced_section(self):
+        """构建【其他 · 高级】区（见方案 §11）。"""
+        header = BodyLabel(self.tr("其他 · 高级"), self)
+        header.setStyleSheet("font-weight: bold;")
+        self.config_layout.addWidget(header)
+
+        self.advanced_container = QWidget(self)
+        adv_row = QHBoxLayout(self.advanced_container)
+        adv_row.setContentsMargins(0, 0, 0, 0)
+        adv_row.setSpacing(15)
+
+        adv_row.addWidget(BodyLabel(self.tr("网络优化"), self))
+        self.faststart_switch = SwitchButton(self)
+        adv_row.addWidget(self.faststart_switch)
+
+        adv_row.addWidget(BodyLabel(self.tr("保留元数据"), self))
+        self.keep_metadata_switch = SwitchButton(self)
+        adv_row.addWidget(self.keep_metadata_switch)
+
+        adv_row.addWidget(BodyLabel(self.tr("起始归零"), self))
+        self.start_zero_switch = SwitchButton(self)
+        adv_row.addWidget(self.start_zero_switch)
+
+        adv_row.addWidget(BodyLabel(self.tr("容器"), self))
+        self.container_combo = ComboBox(self)
+        self.container_combo.addItems(["mp4", "mkv"])
+        self.container_combo.setMinimumWidth(80)
+        adv_row.addWidget(self.container_combo)
+
+        adv_row.addStretch(1)
+        self.config_layout.addWidget(self.advanced_container)
+
+        self.faststart_switch.checkedChanged.connect(
+            lambda checked: cfg.set(cfg.faststart, checked)
+        )
+        self.keep_metadata_switch.checkedChanged.connect(
+            lambda checked: cfg.set(cfg.keep_metadata, checked)
+        )
+        self.start_zero_switch.checkedChanged.connect(
+            lambda checked: cfg.set(cfg.start_zero, checked)
+        )
+        self.container_combo.currentTextChanged.connect(
+            lambda text: cfg.set(cfg.container, text)
+        )
+
+    def _init_advanced_controls(self):
+        self.faststart_switch.setChecked(cfg.faststart.value)
+        self.keep_metadata_switch.setChecked(cfg.keep_metadata.value)
+        self.start_zero_switch.setChecked(cfg.start_zero.value)
+        self.container_combo.setCurrentText(cfg.container.value)
 
     def choose_subtitle_file(self):
         # 构建文件过滤器

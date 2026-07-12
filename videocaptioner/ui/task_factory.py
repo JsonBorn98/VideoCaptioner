@@ -441,13 +441,30 @@ class TaskFactory:
         _enc = cfg.video_encoder.value
         if not cfg.soft_subtitle.value and _enc == "copy":
             _enc = "x264"
+        _out_fps_text = cfg.out_fps.value.strip()
+        try:
+            _out_fps = float(_out_fps_text) if _out_fps_text else None
+        except ValueError:
+            _out_fps = None
         encode_settings = EncodeSettings(
             video_encoder=_enc,
             encode_mode=cfg.encode_mode.value,
             quality=cfg.encode_cq.value,
             bitrate_kbps=cfg.encode_bitrate_kbps.value,
-            audio_encoder="copy",
-            container="mp4",
+            enc_preset=cfg.enc_preset.value or None,
+            enc_tune=cfg.enc_tune.value or None,
+            enc_profile=cfg.enc_profile.value or None,
+            enc_level=cfg.enc_level.value or None,
+            fast_decode=cfg.fast_decode.value,
+            target_height=cfg.target_height.value or None,
+            fps=_out_fps,
+            vfr=cfg.vfr.value,
+            audio_encoder=cfg.audio_encoder.value,
+            audio_bitrate_kbps=cfg.audio_bitrate_kbps.value,
+            container=cfg.container.value,
+            faststart=cfg.faststart.value,
+            keep_metadata=cfg.keep_metadata.value,
+            start_zero=cfg.start_zero.value,
             ffmpeg_source=cfg.ffmpeg_source.value,
         )
         from dataclasses import replace
