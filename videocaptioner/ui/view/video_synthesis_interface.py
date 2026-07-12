@@ -21,6 +21,7 @@ from qfluentwidgets import (
     ProgressBar,
     PushButton,
     RoundMenu,
+    SingleDirectionScrollArea,
     Slider,
     SwitchButton,
     TextEdit,
@@ -130,9 +131,14 @@ class VideoSynthesisInterface(QWidget):
         self._setup_advanced_section()
         self._setup_command_preview_section()
 
-        self.main_layout.addWidget(self.config_card)
-
-        self.main_layout.addStretch(1)
+        # 配置卡放入竖向滚动区（页面较长，顶部工具栏/文件与底部进度保持在滚动区外）
+        self.scroll_area = SingleDirectionScrollArea(self, orient=Qt.Vertical)  # type: ignore
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(self.config_card)
+        self.scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        if hasattr(self.scroll_area, "enableTransparentBackground"):
+            self.scroll_area.enableTransparentBackground()
+        self.main_layout.addWidget(self.scroll_area, 1)
 
         # 底部进度条和状态信息
         self.bottom_layout = QHBoxLayout()
