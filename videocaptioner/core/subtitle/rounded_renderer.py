@@ -19,6 +19,7 @@ from .text_utils import hex_to_rgba, wrap_text
 
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
+    from videocaptioner.core.synthesis.models import EncodeSettings
 
 logger = setup_logger("subtitle.rounded")
 ReferenceHeight = int | float | str | None
@@ -289,6 +290,7 @@ def render_rounded_video(
     preset: str = "medium",
     progress_callback: Optional[Callable] = None,
     reference_height: int = 720,
+    encode_settings: "Optional[EncodeSettings]" = None,
 ) -> None:
     """
     渲染圆角背景字幕到视频（分批overlay方案）
@@ -306,6 +308,9 @@ def render_rounded_video(
         preset: FFmpeg编码预设
         progress_callback: 进度回调 (progress: int, message: str)
         reference_height: 样式设计基准高度
+        encode_settings: 结构化编码设置；提供时最终批经集中命令构建器
+            （见方案 §16.2）。中间批仍走原生 `libx264 -crf 0` 无损链式重编码，
+            不受影响——圆角管线本身是 8-bit SDR，不做色彩/元数据保真。
     """
     # 检查字幕数据
     if not asr_data or not asr_data.segments:
@@ -424,30 +429,56 @@ def render_rounded_video(
             logger.debug(f"Processing batch {batch_idx + 1}/{total_batches}（{len(batch_frames)}个字幕）")
             # 构建 ffmpeg Command
             # -t 参数强制保持原视频时长，防止因 overlay ended而截断视频
-            cmd = [
-                "ffmpeg",
-                "-y",
-                *input_args,
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                final_output,
-                "-map",
-                "0:a?",
-                "-t",
-                str(video_duration),  # 强制保持原视频时长
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast" if not is_last_batch else preset,
-                "-crf",
-                "0" if not is_last_batch else str(crf),
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "copy",
-                str(batch_output),
-            ]
+            if is_last_batch and encode_settings is not None:
+                # 新引擎路径：最终批经集中命令构建器（见方案 §16.2）。
+                # 圆角是 8-bit SDR 分批链式重编码管线，中间批已剥离色彩/元数据，
+                # 构建器内部对此调用强制 preserve_color/keep_metadata=False。
+                from videocaptioner.core.synthesis.command_builder import (
+                    build_ffmpeg_command_multi,
+                )
+                from videocaptioner.core.synthesis.ffmpeg_env import (
+                    get_ffmpeg_path,
+                    supports_fps_mode,
+                )
+
+                ffmpeg = get_ffmpeg_path(encode_settings.ffmpeg_source)
+                vfr_flag = "-fps_mode" if supports_fps_mode(ffmpeg) else "-vsync"
+                cmd = build_ffmpeg_command_multi(
+                    ffmpeg=ffmpeg,
+                    input_args=input_args,
+                    filter_complex=filter_complex,
+                    final_map=final_output,
+                    output_path=str(batch_output),
+                    settings=encode_settings,
+                    probe=None,
+                    extra_output_args=["-t", str(video_duration)],
+                    vfr_flag=vfr_flag,
+                )
+            else:
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    *input_args,
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    final_output,
+                    "-map",
+                    "0:a?",
+                    "-t",
+                    str(video_duration),  # 强制保持原视频时长
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast" if not is_last_batch else preset,
+                    "-crf",
+                    "0" if not is_last_batch else str(crf),
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "copy",
+                    str(batch_output),
+                ]
 
             if batch_idx == 0 or is_last_batch:
                 cmd_str = subprocess.list2cmdline(cmd)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from dataclasses import replace
 from typing import Optional
 
 from . import encoder_catalog as cat
@@ -181,3 +182,38 @@ def build_two_pass_commands(
     # 在输出路径前插入 -pass 2 -passlogfile
     pass2 = pass2[:-1] + ["-pass", "2", "-passlogfile", passlog, pass2[-1]]
     return pass1, pass2
+
+
+def build_ffmpeg_command_multi(
+    *,
+    ffmpeg: str,
+    input_args: list[str],
+    filter_complex: str,
+    final_map: str,
+    output_path: str,
+    settings: EncodeSettings,
+    probe: Optional[MediaProbe],
+    extra_output_args: Optional[list[str]] = None,
+    vfr_flag: str = "-fps_mode",
+) -> list[str]:
+    """组装多输入 `-filter_complex` 命令（圆角最终批用，见方案 §16.2）。
+
+    圆角是 8-bit SDR 分批链式重编码管线：中间批已把色彩标签/元数据剥离到
+    intermediate 文件，故最终批**不做**色彩透传（不调用 `build_color_args`）、
+    也不带 `-map_metadata`（源自剥离过的中间产物，映射它没有意义）——
+    为此在结构化设置层强制 `preserve_color=False`、`keep_metadata=False`
+    （而非仅在此处跳过调用），避免其他 misc 参数（faststart/fps/起始归零）
+    被连带略过。
+    """
+    s = replace(settings, preserve_color=False, keep_metadata=False)
+
+    cmd = [ffmpeg, "-y"]
+    cmd += input_args
+    cmd += ["-filter_complex", filter_complex]
+    cmd += ["-map", final_map, "-map", "0:a?"]
+    cmd += extra_output_args or []
+    cmd += build_video_args(s, probe)
+    cmd += build_audio_args(s)
+    cmd += build_misc_args(s, vfr_flag)
+    cmd += [output_path]
+    return cmd
