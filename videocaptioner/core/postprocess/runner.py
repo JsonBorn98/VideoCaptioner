@@ -121,6 +121,12 @@ def _summarize_timing_grades(
     return tuple((grade.name, counts[grade]) for grade in ordered if counts.get(grade))
 
 
+def _has_aligned_timing_evidence(evidence: Iterable["TimingEvidenceWindow"]) -> bool:
+    """Return whether at least one window contains media-derived timing evidence."""
+
+    return any(window.quality_metrics.get("fallback") is not True for window in evidence)
+
+
 def run_postprocess_task(
     task: PostprocessTask,
     *,
@@ -181,7 +187,7 @@ def run_postprocess_task(
                 evidence = ()
                 precise_timing_outcome = "degraded_failed"
             else:
-                if evidence:
+                if evidence and _has_aligned_timing_evidence(evidence):
                     precise_timing_outcome = "applied"
                     precise_timing_grades = _summarize_timing_grades(evidence)
                 else:
@@ -191,10 +197,12 @@ def run_postprocess_task(
         elif not evidence:
             warnings.append("已开启对齐时间轴，但未提供媒体时间证据，已降级处理")
             precise_timing_outcome = "degraded_no_media"
-        else:
+        elif _has_aligned_timing_evidence(evidence):
             # Precise timing requested with caller-supplied evidence and no resolver.
             precise_timing_outcome = "applied"
             precise_timing_grades = _summarize_timing_grades(evidence)
+        else:
+            precise_timing_outcome = "degraded_failed"
 
     if config.speed_mode == "analyze":
         # Analyze is a stage-wide dry run.  Text cleanup and timing mutation

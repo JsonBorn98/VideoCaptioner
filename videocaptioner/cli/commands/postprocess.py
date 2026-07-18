@@ -110,7 +110,11 @@ def _write_reports(result, *, verbose: bool, base_path: str | None = None) -> No
         if verbose:
             output.info(f"Changes -> {changes_path}")
     timing_bundle = result.task.timing_bundle
-    if config.save_timing_sidecar and timing_bundle is not None:
+    if (
+        config.save_timing_sidecar
+        and timing_bundle is not None
+        and result.precise_timing_outcome == "applied"
+    ):
         from videocaptioner.core.speed.timing_archive import (
             timing_sidecar_path,
             write_timing_archive,

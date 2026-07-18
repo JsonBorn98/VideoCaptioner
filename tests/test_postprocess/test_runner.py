@@ -8,12 +8,41 @@ from videocaptioner.core.postprocess import run_post_stage
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
 from videocaptioner.core.postprocess.runner import run_postprocess_task
+from videocaptioner.core.speed.timing_evidence import (
+    TimingEvidenceWindow,
+    TimingGranularity,
+    TimingOperation,
+    TimingProvenance,
+    TimingQualityGrade,
+)
 
 
 def _write_srt(path: Path, text: str = "翻译。") -> bytes:
     content = f"1\n00:00:00,000 --> 00:00:02,000\n{text}\n"
     path.write_text(content, encoding="utf-8")
     return path.read_bytes()
+
+
+def _timing_window(
+    cue_id: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    fallback: bool,
+) -> TimingEvidenceWindow:
+    return TimingEvidenceWindow.create(
+        cue_ids=(cue_id,),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        provenance=(
+            TimingProvenance.SUBTITLE_INPUT if fallback else TimingProvenance.FORCED_ALIGNER
+        ),
+        granularity=TimingGranularity.CUE,
+        coverage=1.0,
+        quality_grade=TimingQualityGrade.LOW if fallback else TimingQualityGrade.HIGH,
+        allowed_operations=frozenset({TimingOperation.USE_SAFE_GAP}),
+        quality_metrics={"fallback": True} if fallback else {},
+    )
 
 
 def test_standalone_runner_preserves_input_and_writes_separate_active_output(tmp_path):
@@ -39,6 +68,57 @@ def test_standalone_runner_preserves_input_and_writes_separate_active_output(tmp
     assert result.layout is SubtitleLayoutEnum.ONLY_ORIGINAL
     assert result.layout_confidence == 0.5
     assert result.warnings
+
+
+def test_precise_timing_reports_degraded_when_all_windows_are_subtitle_fallbacks(tmp_path):
+    source = tmp_path / "input.srt"
+    _write_srt(source)
+    task = PostprocessTask(
+        str(source),
+        media_path=str(tmp_path / "media.mp4"),
+        config_snapshot=PostprocessConfig(precise_timing=True, speed_optimize=False),
+    )
+    fallback = _timing_window("cue-1", 0, 2000, fallback=True)
+
+    result = run_postprocess_task(task, timing_resolver=lambda *_args: (fallback,))
+
+    assert result.precise_timing_outcome == "degraded_failed"
+    assert result.precise_timing_grades is None
+
+
+def test_precise_timing_reports_applied_when_any_window_was_aligned(tmp_path):
+    source = tmp_path / "input.srt"
+    _write_srt(source)
+    task = PostprocessTask(
+        str(source),
+        media_path=str(tmp_path / "media.mp4"),
+        config_snapshot=PostprocessConfig(precise_timing=True, speed_optimize=False),
+    )
+    fallback = _timing_window("cue-1", 0, 1000, fallback=True)
+    aligned = _timing_window("cue-2", 1000, 2000, fallback=False)
+
+    result = run_postprocess_task(
+        task,
+        timing_resolver=lambda *_args: (fallback, aligned),
+    )
+
+    assert result.precise_timing_outcome == "applied"
+    assert result.precise_timing_grades == (("HIGH", 1), ("LOW", 1))
+
+
+def test_caller_supplied_subtitle_fallback_is_not_reported_as_applied(tmp_path):
+    source = tmp_path / "input.srt"
+    _write_srt(source)
+    task = PostprocessTask(
+        str(source),
+        config_snapshot=PostprocessConfig(precise_timing=True, speed_optimize=False),
+    )
+    fallback = _timing_window("cue-1", 0, 2000, fallback=True)
+
+    result = run_postprocess_task(task, timing_windows=(fallback,))
+
+    assert result.precise_timing_outcome == "degraded_failed"
+    assert result.precise_timing_grades is None
 
 
 def test_default_output_replaces_known_artifact_prefixes(tmp_path):

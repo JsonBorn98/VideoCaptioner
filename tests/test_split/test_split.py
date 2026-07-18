@@ -319,6 +319,7 @@ class TestSubtitleSplitterEdgeCases:
         assert "".join(seg.text for seg in result) == "今天天气很好"
         assert result[0].start_time == 0
         assert result[-1].end_time == segments[-1].end_time
+        assert splitter.rule_fallback_segments == len(segments)
 
     def test_llm_merge_preserves_asr_gap_before_later_match(self):
         """LLM从中间开始匹配时,前面的ASR片段应交给规则降级保留。"""
@@ -343,6 +344,7 @@ class TestSubtitleSplitterEdgeCases:
         assert result[0].start_time == 0
         assert result[0].end_time == segments[1].end_time
         assert result[1].start_time == segments[2].start_time
+        assert splitter.rule_fallback_segments == 2
 
 
 class TestSplitterParameters:

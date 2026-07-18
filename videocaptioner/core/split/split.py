@@ -145,13 +145,17 @@ class SubtitleSplitter:
         self.use_llm = use_llm
         self.progress_callback = progress_callback
         self.is_running = True
-        # Degrade counter surfaced in the stage summary (ADR-0009): segments that fell
-        # back to rule-based splitting because LLM segmentation raised. In pure-rules
-        # mode (use_llm=False) rules are the chosen path and are normally not counted
-        # (only a rules-side error would be).
+        # Degrade counter surfaced in the stage summary (ADR-0009): input segments
+        # routed to rule splitting after an LLM failure or an unmatched LLM span.
+        # Pure-rules mode (use_llm=False) is the chosen path and is not counted.
         self._stat_lock = threading.Lock()
         self.rule_fallback_segments = 0
         self._init_thread_pool()
+
+    def _record_rule_fallback(self, segment_count: int) -> None:
+        """Record input segments that were successfully handled by rule fallback."""
+        with self._stat_lock:
+            self.rule_fallback_segments += segment_count
 
     def _init_thread_pool(self):
         """初始化线程池并注册清理"""
@@ -310,9 +314,8 @@ class SubtitleSplitter:
                 result = future.result()
             except Exception as e:
                 logger.error("Segment %s processing failed, falling back to rules: %s", index, e)
-                with self._stat_lock:
-                    self.rule_fallback_segments += 1
                 result = self._process_by_rules(asr_data_list[index].segments)
+                self._record_rule_fallback(len(asr_data_list[index].segments))
             processed_segments[index] = result
             completed += 1
             if self.progress_callback:
@@ -320,9 +323,8 @@ class SubtitleSplitter:
 
         for index, result in enumerate(processed_segments):
             if result is None:
-                with self._stat_lock:
-                    self.rule_fallback_segments += 1
                 processed_segments[index] = self._process_by_rules(asr_data_list[index].segments)
+                self._record_rule_fallback(len(asr_data_list[index].segments))
         return [result for result in processed_segments if result is not None]
 
     def _process_single_segment(self, asr_data_part: ASRData) -> List[ASRDataSeg]:
@@ -336,9 +338,9 @@ class SubtitleSplitter:
         except Exception as e:
             # Routine self-healing: rule-based split still produces valid output.
             logger.debug(f"LLM processing failed, falling back to rules: {str(e)}")
-            with self._stat_lock:
-                self.rule_fallback_segments += 1
-            return self._process_by_rules(asr_data_part.segments)
+            result = self._process_by_rules(asr_data_part.segments)
+            self._record_rule_fallback(len(asr_data_part.segments))
+            return result
 
     def _process_by_llm(self, segments: List[ASRDataSeg]) -> List[ASRDataSeg]:
         """使用LLM进行智能Segments
@@ -799,7 +801,9 @@ class SubtitleSplitter:
             logger.debug(
                 f"Falling back to rule split for ASR segments {start}:{end}: {reason}"
             )
-            new_segments.extend(self._process_by_rules(segments[start:end]))
+            fallback_segments = self._process_by_rules(segments[start:end])
+            new_segments.extend(fallback_segments)
+            self._record_rule_fallback(end - start)
 
         for sentence in sentences:
             if asr_index >= asr_len:

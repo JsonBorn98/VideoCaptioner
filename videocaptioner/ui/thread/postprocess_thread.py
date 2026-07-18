@@ -161,7 +161,12 @@ class PostprocessThread(QThread):
 
             write_changes(Path(output_path).with_suffix(".speed-changes.json"), self.result.report.speed)
         timing_bundle = self.task.timing_bundle
-        if config is not None and config.save_timing_sidecar and timing_bundle is not None:
+        if (
+            config is not None
+            and config.save_timing_sidecar
+            and timing_bundle is not None
+            and self.result.precise_timing_outcome == "applied"
+        ):
             from videocaptioner.core.speed.timing_archive import (
                 timing_sidecar_path,
                 write_timing_archive,
