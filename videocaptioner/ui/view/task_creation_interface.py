@@ -41,7 +41,6 @@ from videocaptioner.core.subtitle import StyleMode, list_styles
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.DonateDialog import DonateDialog
 from videocaptioner.ui.thread.video_download_thread import VideoDownloadThread
-from videocaptioner.ui.view.log_window import LogWindow
 
 LOGO_PATH = ASSETS_PATH / "logo.png"
 
@@ -56,7 +55,6 @@ class TaskCreationInterface(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.task = None
-        self.log_window = None
 
         self.setObjectName("TaskCreationInterface")
         self.setAttribute(Qt.WA_StyledBackground, True)  # type: ignore
@@ -270,7 +268,7 @@ class TaskCreationInterface(QWidget):
     def setup_signals(self):
         self.start_button.clicked.connect(self.on_start_clicked)
         self.search_input.textChanged.connect(self.on_search_input_changed)
-        self.log_button.clicked.connect(self.show_log_window)
+        self.log_button.clicked.connect(self.show_run_log)
         self.donate_button.clicked.connect(self.show_donate_dialog)
 
     def setup_values(self):
@@ -443,14 +441,12 @@ class TaskCreationInterface(QWidget):
                 parent=self,
             )
 
-    def show_log_window(self):
-        """显示日志窗口"""
-        if self.log_window is None:
-            self.log_window = LogWindow()
-        if self.log_window.isHidden():
-            self.log_window.show()
-        else:
-            self.log_window.activateWindow()
+    def show_run_log(self):
+        """切换到主窗口的实时运行日志页面。"""
+        window = self.window()
+        run_log_interface = getattr(window, "runLogInterface", None)
+        if run_log_interface is not None and hasattr(window, "switchTo"):
+            window.switchTo(run_log_interface)
 
     def show_donate_dialog(self):
         """显示捐助窗口"""

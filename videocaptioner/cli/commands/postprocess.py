@@ -6,15 +6,10 @@ import os
 from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
 from videocaptioner.cli.config import get
-
-if TYPE_CHECKING:
-    from videocaptioner.core.postprocess import PostprocessResult
-    from videocaptioner.core.utils.stage_summary import StageSummary
 
 _LAYOUT_MODES = {
     "auto": "auto",
@@ -22,14 +17,6 @@ _LAYOUT_MODES = {
     "target-above": "translate_on_top",
     "source-only": "original_only",
     "target-only": "translate_only",
-}
-
-# 媒体增强对齐 / 对齐时间轴 的结果徽标（见 CONTEXT.md / docs/adr/0009）。键为
-# PostprocessResult.precise_timing_outcome 的取值，值为摘要中常驻显示的短标签。
-_PRECISE_TIMING_BADGES = {
-    "applied": "applied",
-    "degraded_no_media": "degraded-no-media",
-    "degraded_failed": "degraded-failed",
 }
 
 _CONFIG_OVERRIDE_FIELDS = {
@@ -124,43 +111,6 @@ def _write_reports(result, *, verbose: bool, base_path: str | None = None) -> No
         write_timing_archive(sidecar_path, timing_bundle)
         if verbose:
             output.info(f"Timing evidence -> {sidecar_path}")
-
-
-def _build_stage_summary(result: "PostprocessResult") -> "StageSummary":
-    """Render a truthful, level-independent postprocess summary from the report."""
-    from videocaptioner.core.postprocess.report import _STAGE_LABELS
-    from videocaptioner.core.utils.stage_summary import StageSummary
-
-    report = result.report
-    counts: list[tuple[str, int]] = [("段", len(result.output_data.segments))]
-    for key, stage_report in report.stages.items():
-        if stage_report.changed > 0:
-            counts.append((_STAGE_LABELS.get(key, key), stage_report.changed))
-    if report.compress_failures:
-        counts.append(("压缩失败", len(report.compress_failures)))
-    if report.placeholder_review:
-        counts.append(("占位符复查", len(report.placeholder_review)))
-    audit = report.audit
-    if audit is not None:
-        audit_counts = audit.counts()
-        if audit_counts["hard"]:
-            counts.append(("硬超速", audit_counts["hard"]))
-    # 媒体增强对齐 / 对齐时间轴 的结果常驻显示（见 docs/adr/0009）：已应用时补充每档
-    # 证据窗计数，降级时通过 status 徽标可见。
-    outcome = result.precise_timing_outcome
-    if outcome == "applied":
-        for grade_name, grade_count in result.precise_timing_grades or ():
-            counts.append((grade_name, grade_count))
-    status_parts: list[str] = []
-    if result.used_fallback:
-        status_parts.append("fallback")
-    elif result.task.status == "skipped":
-        status_parts.append("skipped")
-    badge = _PRECISE_TIMING_BADGES.get(outcome or "")
-    if badge:
-        status_parts.append(f"对齐时间轴 {badge}")
-    status = " · ".join(status_parts) or None
-    return StageSummary("postprocess", counts, warnings=result.warnings, status=status)
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -274,7 +224,9 @@ def run(args: Namespace, config: dict) -> int:
     args.result_data = result.output_data
     active_path = result.task.active_subtitle_path or str(input_path)
     if not quiet:
-        output.stage(_build_stage_summary(result))
+        from videocaptioner.core.postprocess.summary import build_postprocess_stage_summary
+
+        output.stage(build_postprocess_stage_summary(result))
     if progress:
         output.success(f"Done -> {active_path}")
     if quiet:

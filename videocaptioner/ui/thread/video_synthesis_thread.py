@@ -11,7 +11,9 @@ from videocaptioner.core.entities import SynthesisTask
 from videocaptioner.core.subtitle import clone_subtitle_data
 from videocaptioner.core.synthesis import SynthesisCancelled, SynthesisControl
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.utils.stage_summary import StageSummary
 from videocaptioner.core.utils.video_utils import add_subtitles, add_subtitles_with_style
+from videocaptioner.ui.common.log_bridge import publish_stage_summary
 
 logger = setup_logger("video_synthesis_thread")
 
@@ -90,6 +92,7 @@ class VideoSynthesisThread(QThread):
             if not config.need_video:
                 logger.info("不需要合成视频，跳过")
                 self.progress.emit(100, self.tr("合成完成"))
+                publish_stage_summary(StageSummary("synthesize", status="skipped"))
                 self.finished.emit(self.task)
                 return
 
@@ -186,6 +189,9 @@ class VideoSynthesisThread(QThread):
 
             self.progress.emit(100, self.tr("合成完成"))
             logger.info(f"视频合成完成，保存路径: {output_path}")
+            publish_stage_summary(
+                StageSummary("synthesize", [("段", len(asr_data.segments))])
+            )
             self.finished.emit(self.task)
 
         except SynthesisCancelled:

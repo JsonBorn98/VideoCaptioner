@@ -24,7 +24,9 @@ from videocaptioner.core.subtitle import (
     save_canonical_srt,
 )
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.utils.stage_summary import StageSummary
 from videocaptioner.core.utils.video_utils import video2audio
+from videocaptioner.ui.common.log_bridge import publish_stage_summary
 from videocaptioner.ui.task_factory import TaskFactory
 
 logger = setup_logger("transcript_thread")
@@ -267,6 +269,13 @@ class TranscriptThread(QThread):
             logger.warning("转录字幕自动导出失败，继续 workflow: %s", warning)
         logger.info(f"字幕文件已下载，跳过转录。找到下载的字幕文件：{subtitle_file}")
         self.progress.emit(100, self.tr("字幕已下载"))
+        publish_stage_summary(
+            StageSummary(
+                "transcribe",
+                [("段", len(imported.data.segments))],
+                status="downloaded",
+            )
+        )
         self.finished.emit(self.task)
         return True
 
@@ -344,6 +353,9 @@ class TranscriptThread(QThread):
                 self._save_asr_data(asr_data)
 
             self.progress.emit(100, self.tr("转录完成"))
+            publish_stage_summary(
+                StageSummary("transcribe", [("段", len(asr_data.segments))])
+            )
             self.finished.emit(self.task)
         finally:
             self.task.transcribe_config.runtime_temp_dir = previous_runtime_temp_dir

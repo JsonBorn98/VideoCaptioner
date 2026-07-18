@@ -3,8 +3,19 @@ from unittest.mock import patch
 
 from videocaptioner.core.utils.logger import (
     _WindowsSafeRotatingFileHandler,
+    register_log_handler,
     setup_logger,
+    unregister_log_handler,
 )
+
+
+class _RecordingHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
 
 
 def test_named_loggers_share_one_file_handler(tmp_path):
@@ -49,3 +60,32 @@ def test_rollover_file_lock_is_delayed_without_losing_log_record(tmp_path):
     finally:
         handler.close()
         logger.handlers.clear()
+
+
+def test_registered_handler_observes_existing_and_future_loggers(tmp_path):
+    existing = setup_logger(
+        "test.observer.existing",
+        log_file=str(tmp_path / "existing.log"),
+        console_output=False,
+    )
+    observer = _RecordingHandler()
+
+    register_log_handler(observer)
+    register_log_handler(observer)
+    try:
+        future = setup_logger(
+            "test.observer.future",
+            log_file=str(tmp_path / "future.log"),
+            console_output=False,
+        )
+        assert sum(handler is observer for handler in existing.handlers) == 1
+        assert sum(handler is observer for handler in future.handlers) == 1
+
+        existing.info("from existing")
+        future.warning("from future")
+        assert observer.messages == ["from existing", "from future"]
+    finally:
+        unregister_log_handler(observer)
+
+    existing.info("after unregister")
+    assert observer.messages == ["from existing", "from future"]

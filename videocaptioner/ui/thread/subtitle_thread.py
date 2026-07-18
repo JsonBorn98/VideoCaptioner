@@ -25,6 +25,12 @@ from videocaptioner.core.subtitle import clone_subtitle_data
 from videocaptioner.core.translate.factory import TranslatorFactory
 from videocaptioner.core.translate.types import TranslatorType
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.utils.stage_summary import (
+    build_optimize_stage_summary,
+    build_split_stage_summary,
+    build_translate_stage_summary,
+)
+from videocaptioner.ui.common.log_bridge import publish_stage_summary
 from videocaptioner.ui.task_factory import TaskFactory
 
 SERVICE_TO_TYPE = {
@@ -166,6 +172,13 @@ class SubtitleThread(QThread):
                     splitter.stop()
                     self.splitter = None
                 self.update_all.emit(asr_data.to_json())
+                publish_stage_summary(
+                    build_split_stage_summary(
+                        len(asr_data.segments),
+                        use_llm=use_llm_split,
+                        fallback_count=splitter.rule_fallback_segments,
+                    )
+                )
 
             # 3. 优化字幕
             context_info = f'The subtitles below are from a file named "{task_file}". Use this context to improve accuracy if needed.\n'
@@ -188,6 +201,13 @@ class SubtitleThread(QThread):
                 )
                 asr_data = optimizer.optimize_subtitle(asr_data)
                 self.update_all.emit(asr_data.to_json())
+                publish_stage_summary(
+                    build_optimize_stage_summary(
+                        len(asr_data.segments),
+                        failed_batches=optimizer.failed_batches,
+                        maxed_batches=optimizer.maxed_batches,
+                    )
+                )
 
             # 4. 翻译字幕
             if subtitle_config.need_translate:
@@ -205,6 +225,12 @@ class SubtitleThread(QThread):
 
                 asr_data = translator.translate_subtitle(asr_data)
                 self.update_all.emit(asr_data.to_json())
+                publish_stage_summary(
+                    build_translate_stage_summary(
+                        len(asr_data.segments),
+                        failed_count=translator.failed_count,
+                    )
+                )
 
             # 5. 发布内存快照，并强制保存当前阶段唯一的规范 SRT。
             self.task.result_data = clone_subtitle_data(asr_data)

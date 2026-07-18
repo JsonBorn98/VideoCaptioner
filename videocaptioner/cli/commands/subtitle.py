@@ -211,7 +211,12 @@ def run(args: Namespace, config: dict) -> int:
     _total_count = max(len(asr_data.segments), 1)
     # Level-independent per-stage summaries, rendered at the orchestration
     # boundary just before the final "Done" line (see ADR-0009).
-    from videocaptioner.core.utils.stage_summary import StageSummary
+    from videocaptioner.core.utils.stage_summary import (
+        StageSummary,
+        build_optimize_stage_summary,
+        build_split_stage_summary,
+        build_translate_stage_summary,
+    )
 
     stage_summaries: list[StageSummary] = []
 
@@ -242,15 +247,12 @@ def run(args: Namespace, config: dict) -> int:
                 use_llm=need_split,
             )
             asr_data = splitter.split_subtitle(asr_data)
-            split_counts = [("段", len(asr_data.segments))]
             fallbacks = getattr(splitter, "rule_fallback_segments", 0)
-            if fallbacks:
-                split_counts.append(("规则回退", fallbacks))
             stage_summaries.append(
-                StageSummary(
-                    "split" if need_split else "merge",
-                    split_counts,
-                    status="degraded" if fallbacks else None,
+                build_split_stage_summary(
+                    len(asr_data.segments),
+                    use_llm=need_split,
+                    fallback_count=fallbacks,
                 )
             )
 
@@ -269,18 +271,13 @@ def run(args: Namespace, config: dict) -> int:
                 extra_rules="",
             )
             asr_data = optimizer.optimize_subtitle(asr_data)
-            optimize_counts = [("段", len(asr_data.segments))]
             failed = getattr(optimizer, "failed_batches", 0)
             maxed = getattr(optimizer, "maxed_batches", 0)
-            if failed:
-                optimize_counts.append(("批失败", failed))
-            if maxed:
-                optimize_counts.append(("校验未过", maxed))
             stage_summaries.append(
-                StageSummary(
-                    "optimize",
-                    optimize_counts,
-                    status="degraded" if failed else None,
+                build_optimize_stage_summary(
+                    len(asr_data.segments),
+                    failed_batches=failed,
+                    maxed_batches=maxed,
                 )
             )
 
@@ -314,15 +311,11 @@ def run(args: Namespace, config: dict) -> int:
                 update_callback=callback,
             )
             asr_data = translator.translate_subtitle(asr_data)
-            translate_counts = [("段", len(asr_data.segments))]
             failed = getattr(translator, "failed_count", 0)
-            if failed:
-                translate_counts.append(("翻译失败", failed))
             stage_summaries.append(
-                StageSummary(
-                    "translate",
-                    translate_counts,
-                    status="degraded" if failed else None,
+                build_translate_stage_summary(
+                    len(asr_data.segments),
+                    failed_count=failed,
                 )
             )
 

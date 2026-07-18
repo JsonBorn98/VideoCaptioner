@@ -7,8 +7,11 @@ from videocaptioner.core.llm.context import clear_task_context, set_task_context
 from videocaptioner.core.postprocess.models import PostprocessTask
 from videocaptioner.core.postprocess.report import build_qa_report
 from videocaptioner.core.postprocess.runner import run_postprocess_task
+from videocaptioner.core.postprocess.summary import build_postprocess_stage_summary
 from videocaptioner.core.speed.models import CueSnapshot
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.utils.stage_summary import StageSummary
+from videocaptioner.ui.common.log_bridge import publish_stage_summary
 from videocaptioner.ui.task_factory import TaskFactory
 
 logger = setup_logger("subtitle_postprocess_thread")
@@ -129,6 +132,7 @@ class PostprocessThread(QThread):
                 if self._finish_if_cancelled():
                     return
                 self.progress.emit(100, self.tr("字幕后处理完成"))
+            publish_stage_summary(build_postprocess_stage_summary(self.result))
             self.finished.emit(self.task.media_path or "", active_path)
         except Exception as exc:
             logger.exception("字幕后处理阶段失败: %s", exc)
@@ -140,6 +144,9 @@ class PostprocessThread(QThread):
                 self.task.active_subtitle_path = initial_path
                 self.warning.emit(message)
                 self.progress.emit(100, self.tr("字幕后处理已回退到初版字幕"))
+                publish_stage_summary(
+                    StageSummary("postprocess", warnings=(message,), status="fallback")
+                )
                 self.finished.emit(self.task.media_path or "", initial_path)
             else:
                 self.error.emit(str(exc))

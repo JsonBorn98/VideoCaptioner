@@ -25,6 +25,7 @@ from videocaptioner.ui.view.batch_process_interface import BatchProcessInterface
 from videocaptioner.ui.view.home_interface import HomeInterface
 from videocaptioner.ui.view.llm_logs_interface import LLMLogsInterface
 from videocaptioner.ui.view.postprocess_setting_interface import PostprocessSettingInterface
+from videocaptioner.ui.view.run_log_interface import RunLogInterface
 from videocaptioner.ui.view.setting_interface import SettingInterface
 from videocaptioner.ui.view.subtitle_style_interface import SubtitleStyleInterface
 
@@ -43,6 +44,7 @@ class MainWindow(FluentWindow):
         self.subtitleStyleInterface = SubtitleStyleInterface(self)
         self.batchProcessInterface = BatchProcessInterface(self)
         self.llmLogsInterface = LLMLogsInterface(self)
+        self.runLogInterface = RunLogInterface(self)
 
         # Dedicated postprocess settings are reached from Settings/Postprocess.
         # They intentionally have no separate main-navigation item.
@@ -75,6 +77,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.batchProcessInterface, FIF.VIDEO, self.tr("批量处理"))
         self.addSubInterface(self.subtitleStyleInterface, FIF.FONT, self.tr("字幕样式"))
         self.addSubInterface(self.llmLogsInterface, FIF.HISTORY, self.tr("请求日志"))
+        self.addSubInterface(self.runLogInterface, FIF.DEVELOPER_TOOLS, self.tr("运行日志"))
 
         self.navigationInterface.addSeparator()
 
@@ -184,6 +187,7 @@ class MainWindow(FluentWindow):
             self.splashScreen.resize(self.size())
 
     def closeEvent(self, event):
+        self.runLogInterface.shutdown()
         # 关闭所有子界面
         # self.homeInterface.close()
         # self.batchProcessInterface.close()

@@ -99,6 +99,12 @@ _console_level_lock = threading.RLock()
 # shared console threshold alone is not enough.
 _configured_loggers: "list[tuple[logging.Logger, int]]" = []
 
+# Additional handlers that observe every logger created by ``setup_logger``.
+# This stays framework-agnostic: GUI frontends can register a Qt-backed
+# handler without importing Qt into core, while future loggers are picked up
+# automatically even though all configured loggers use ``propagate=False``.
+_observer_handlers: "list[logging.Handler]" = []
+
 
 def _effective_logger_level(base_level: int) -> int:
     """Lowest level a logger must accept to honour both the file handler (its
@@ -131,6 +137,35 @@ def get_console_level() -> int:
     """Return the current process-wide console log threshold."""
 
     return _console_level
+
+
+def register_log_handler(handler: logging.Handler) -> None:
+    """Attach *handler* to every configured logger, including future ones.
+
+    Registration is identity-based and idempotent.  The caller owns the
+    handler and must unregister it before closing or destroying resources it
+    references.
+    """
+
+    with _console_level_lock:
+        if any(existing is handler for existing in _observer_handlers):
+            return
+        _observer_handlers.append(handler)
+        for logger, _ in _configured_loggers:
+            if all(existing is not handler for existing in logger.handlers):
+                logger.addHandler(handler)
+
+
+def unregister_log_handler(handler: logging.Handler) -> None:
+    """Detach a handler previously added with :func:`register_log_handler`."""
+
+    with _console_level_lock:
+        _observer_handlers[:] = [
+            existing for existing in _observer_handlers if existing is not handler
+        ]
+        for logger, _ in _configured_loggers:
+            if any(existing is handler for existing in logger.handlers):
+                logger.removeHandler(handler)
 
 
 def setup_logger(
@@ -233,5 +268,13 @@ def setup_logger(
     ]
     for lib in error_loggers:
         logging.getLogger(lib).setLevel(logging.ERROR)
+
+    # Observer handlers are outside the one-time standard-handler block: a
+    # logger may already exist when a GUI observer is registered, and calling
+    # setup_logger again must still preserve the process-wide attachment.
+    with _console_level_lock:
+        for handler in _observer_handlers:
+            if all(existing is not handler for existing in logger.handlers):
+                logger.addHandler(handler)
 
     return logger
