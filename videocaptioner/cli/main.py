@@ -240,7 +240,10 @@ def _add_postprocess_options(parser: argparse.ArgumentParser, *, hidden: bool = 
         "--speed-precise-timing",
         dest="speed_precise_timing",
         action="store_true",
-        help=h("Run ForcedAligner on the associated media before speed optimization"),
+        help=h(
+            "媒体增强对齐: run ForcedAligner on the associated media to build the "
+            "对齐时间轴 (degrades gracefully when no usable media is provided)"
+        ),
     )
     grp.add_argument(
         "--speed-save-timing-sidecar",
@@ -1256,17 +1259,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return EXIT.USAGE_ERROR
 
-    # Control core logger output for CLI: quiet=CRITICAL, default=WARNING, verbose=DEBUG
+    # Control core logger console output for CLI: quiet=ERROR, default=WARNING, verbose=DEBUG.
+    # -q stays at ERROR (not CRITICAL) so genuine core errors still surface on the console
+    # alongside the final result line — matching the ADR-0009 "-q = final result + ERROR" mapping.
     import logging
+
+    from videocaptioner.core.utils.logger import set_console_level
 
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
     if quiet:
-        logging.getLogger().setLevel(logging.CRITICAL)
+        set_console_level(logging.ERROR)
     elif verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+        set_console_level(logging.DEBUG)
     else:
-        logging.getLogger().setLevel(logging.WARNING)
+        set_console_level(logging.WARNING)
 
     try:
         return args.func(args) or 0

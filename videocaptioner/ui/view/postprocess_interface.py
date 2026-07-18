@@ -23,6 +23,7 @@ from qfluentwidgets import (
     CommandBar,
     InfoBar,
     InfoBarPosition,
+    MessageBoxBase,
     PrimaryPushButton,
     ProgressBar,
     PushButton,
@@ -30,6 +31,7 @@ from qfluentwidgets import (
     SubtitleLabel,
     TableView,
     TransparentDropDownPushButton,
+    isDarkTheme,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -59,6 +61,46 @@ from videocaptioner.core.subtitle.io import (
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.view.subtitle_interface import SubtitleTableModel
+
+
+class _PreciseTimingGuardDialog(MessageBoxBase):
+    """开启对齐时间轴（媒体增强对齐）却未关联媒体时的运行前三选一确认框。
+
+    对应领域词见 CONTEXT.md：媒体增强对齐 / 对齐时间轴 / 关联媒体 / 对齐降级。
+    """
+
+    ASSOCIATE = "associate"  # 去关联媒体：中止本次启动
+    DISABLE = "disable"  # 关闭对齐时间轴并继续（仅作用于本次运行快照）
+    CONTINUE = "continue"  # 仍然继续，接受对齐降级
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        # 误关闭（Esc / 遮罩）按最保守处理：中止启动，不静默降级。
+        self.choice = self.ASSOCIATE
+        self.titleLabel = SubtitleLabel(self.tr("尚未关联媒体"), self)
+        self.bodyLabel = BodyLabel(
+            self.tr(
+                "本次任务开启了“媒体增强对齐（对齐时间轴）”，但尚未关联媒体。\n"
+                "缺少媒体时间证据时，将自动降级为字幕内部估算时间轴。"
+            ),
+            self,
+        )
+        self.bodyLabel.setWordWrap(True)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.bodyLabel)
+
+        self.yesButton.setText(self.tr("去关联媒体"))
+        self.disableButton = PushButton(self.tr("关闭对齐时间轴并继续"), self.buttonGroup)
+        self.disableButton.clicked.connect(self._choose_disable)
+        self.buttonLayout.insertWidget(1, self.disableButton, 1, Qt.AlignVCenter)  # type: ignore[arg-type]
+        self.cancelButton.setText(self.tr("仍然继续（接受降级）"))
+
+        self.yesButton.clicked.connect(lambda: setattr(self, "choice", self.ASSOCIATE))
+        self.cancelButton.clicked.connect(lambda: setattr(self, "choice", self.CONTINUE))
+
+    def _choose_disable(self) -> None:
+        self.choice = self.DISABLE
+        self.accept()
 
 
 class PostprocessInterface(QWidget):
@@ -186,6 +228,13 @@ class PostprocessInterface(QWidget):
 
         self.result_title = SubtitleLabel(self.tr("后处理工作稿"), self)
         self.main_layout.addWidget(self.result_title)
+        # 对齐时间轴（媒体增强对齐）结果的常驻指示，由 _on_finished 依 PostprocessResult
+        # 的 precise_timing_outcome / precise_timing_grades 更新（见 docs/adr/0009）。
+        self.timing_status_label = BodyLabel("", self)
+        self.timing_status_label.setObjectName("postprocessTimingStatus")
+        self.timing_status_label.setWordWrap(True)
+        self.timing_status_label.hide()
+        self.main_layout.addWidget(self.timing_status_label)
         self.subtitle_table = TableView(self)
         self.model = SubtitleTableModel("")
         self.model.edited.connect(self._mark_dirty)
@@ -457,6 +506,36 @@ class PostprocessInterface(QWidget):
             else PostprocessLayoutMode.SINGLE
         )
 
+    def _precise_timing_guard(self, task: PostprocessTask) -> bool:
+        """未关联媒体却开启对齐时间轴时的运行前确认。
+
+        返回 False 表示用户选择先去关联媒体、应中止本次启动；返回 True 表示可以继续
+        （必要时已就本次运行快照关闭 precise_timing，不写回方案 / cfg）。核心的
+        运行时降级警告仍作为兜底保留。
+        """
+        config = getattr(task, "config_snapshot", None)
+        if config is not None:
+            requested = bool(getattr(config, "precise_timing", False))
+        else:
+            requested = bool(cfg.get(cfg.speed_precise_timing))
+        media = self.media_path or getattr(task, "media_path", None)
+        if not requested or media:
+            return True
+        dialog = _PreciseTimingGuardDialog(self)
+        dialog.exec()
+        if dialog.choice == _PreciseTimingGuardDialog.ASSOCIATE:
+            InfoBar.info(
+                self.tr("请先关联媒体"),
+                self.tr("点击“关联媒体”选择对应的视频或音频后再开始。"),
+                duration=INFOBAR_DURATION_INFO,
+                parent=self,
+            )
+            return False
+        if dialog.choice == _PreciseTimingGuardDialog.DISABLE and config is not None:
+            # 仅关闭本次运行快照上的开关，不持久化到方案或 cfg。
+            config.precise_timing = False
+        return True
+
     def start(self) -> None:
         if self._thread is not None and self._thread.isRunning():
             return
@@ -481,6 +560,8 @@ class PostprocessInterface(QWidget):
             self.task = self._create_task()
         if not isinstance(self.task, PostprocessTask):
             raise TypeError("postprocess page requires a PostprocessTask")
+        if not self._precise_timing_guard(self.task):
+            return
         self._snapshot_task_input(self.task)
         try:
             from videocaptioner.ui.thread.postprocess_thread import PostprocessThread
@@ -499,6 +580,7 @@ class PostprocessInterface(QWidget):
         self._thread.error.connect(self._on_error)
         self._thread.cancelled.connect(self._on_cancelled)
         self._set_processing(True)
+        self.timing_status_label.hide()
         self.progress_bar.reset()
         self.status_label.setText(self.tr("正在分析字幕结构与阅读速度…"))
         self._thread.start()
@@ -556,6 +638,7 @@ class PostprocessInterface(QWidget):
         self.progress_bar.setValue(100)
         try:
             result = getattr(self._thread, "result", None)
+            self._update_timing_indicator(result)
             if result is not None:
                 result_data = clone_subtitle_data(result.output_data)
                 self._effective_layout = result.layout
@@ -603,6 +686,39 @@ class PostprocessInterface(QWidget):
         )
         if self.task is not None and getattr(self.task, "need_next_task", False):
             self.finished.emit(video_path, self.primary_srt_path or output_path)
+
+    def _update_timing_indicator(self, result: Any | None) -> None:
+        """常驻显示对齐时间轴（媒体增强对齐）的结果，取代仅一闪而过的提示。
+
+        读取 core agent 新增的 PostprocessResult.precise_timing_outcome /
+        precise_timing_grades（见 docs/adr/0009）。outcome 为 None（未请求）时隐藏。
+        """
+        outcome = getattr(result, "precise_timing_outcome", None) if result is not None else None
+        if not outcome:
+            self.timing_status_label.clear()
+            self.timing_status_label.hide()
+            return
+        if outcome == "applied":
+            grades = getattr(result, "precise_timing_grades", None) or ()
+            detail = "/".join(f"{name} {count}" for name, count in grades)
+            text = self.tr("对齐时间轴：已应用")
+            if detail:
+                text = f"{text}（{detail}）"
+            # 主题感知的成功绿：暗色模式用更亮的绿以保证对比度（琥珀色沿用
+            # layout_warning 的 #d89614，两种主题下均可读）。
+            color = "#3fb950" if isDarkTheme() else "#2e7d32"
+        elif outcome == "degraded_no_media":
+            text = self.tr("对齐时间轴：已降级（未关联媒体）")
+            color = "#d89614"
+        elif outcome == "degraded_failed":
+            text = self.tr("对齐时间轴：已降级（对齐失败）")
+            color = "#d89614"
+        else:
+            text = self.tr("对齐时间轴：") + str(outcome)
+            color = "#d89614"
+        self.timing_status_label.setStyleSheet(f"color: {color}; padding: 2px 10px;")
+        self.timing_status_label.setText(text)
+        self.timing_status_label.show()
 
     def _on_error(self, error: str) -> None:
         self._set_processing(False)

@@ -75,7 +75,8 @@ def get_llm_client() -> OpenAI:
 
 
 def before_sleep_log(retry_state: RetryCallState) -> None:
-    logger.warning(
+    # Expected backoff, not a failure: tenacity retries the rate-limited call.
+    logger.debug(
         "Rate Limit Error, sleeping and retrying... Please lower your thread concurrency or use better OpenAI API."
     )
 

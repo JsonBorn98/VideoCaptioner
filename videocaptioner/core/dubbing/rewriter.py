@@ -5,9 +5,12 @@ from typing import Iterable
 
 from openai import OpenAI
 
+from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.text_utils import is_mainly_cjk
 
 from .models import DubbingConfig, DubbingSegment
+
+logger = setup_logger("dubbing.rewriter")
 
 
 def should_rewrite(segment: DubbingSegment, threshold: float) -> bool:
@@ -34,6 +37,7 @@ def rewrite_segments_if_needed(segments: Iterable[DubbingSegment], config: Dubbi
     if not targets:
         return
 
+    logger.info("dubbing rewrite: %d segment(s) over duration threshold", len(targets))
     client = OpenAI(api_key=config.llm_api_key, base_url=config.llm_api_base)
     payload = [
         {
@@ -79,3 +83,10 @@ def rewrite_segments_if_needed(segments: Iterable[DubbingSegment], config: Dubbi
         new_text = rewritten.get(seg.index)
         if new_text:
             seg.rewritten_text = new_text
+
+    applied = sum(1 for seg in targets if seg.rewritten_text)
+    logger.info("dubbing rewrite: applied %d of %d", applied, len(targets))
+    if applied < len(targets):
+        logger.warning(
+            "dubbing rewrite: LLM returned %d of %d requested lines", applied, len(targets)
+        )

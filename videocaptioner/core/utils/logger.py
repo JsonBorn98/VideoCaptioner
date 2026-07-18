@@ -83,6 +83,56 @@ def _coerce_log_level(value: LogLevel | None, default: int) -> int:
     return int(logging._nameToLevel.get(normalized, default))
 
 
+# Process-wide console threshold, read live by every ConsoleFilter.filter().
+# Initialised from the env var (parsed once) so ``-v/-q`` can later mutate it
+# via set_console_level() and take effect on already-created loggers.
+_console_level: int = _coerce_log_level(
+    os.environ.get("VIDEOCAPTIONER_CONSOLE_LOG_LEVEL"),
+    logging.WARNING,
+)
+_console_level_lock = threading.RLock()
+
+# Loggers created by setup_logger, paired with the base level requested at
+# creation.  set_console_level() lowers each logger's *own* level so that
+# ``-v`` (DEBUG) actually produces DEBUG records: a logger pinned at INFO drops
+# ``debug()`` calls via isEnabledFor() *before* any handler/filter runs, so the
+# shared console threshold alone is not enough.
+_configured_loggers: "list[tuple[logging.Logger, int]]" = []
+
+
+def _effective_logger_level(base_level: int) -> int:
+    """Lowest level a logger must accept to honour both the file handler (its
+    base level, keeping app.log at INFO+) and the live console threshold.
+
+    Lowering the console threshold to DEBUG lowers the logger too (so DEBUG is
+    emitted to both console and file); raising it (``-q``) never lifts a logger
+    above its base level, so app.log keeps its INFO+ coverage.
+    """
+
+    return min(base_level, _console_level)
+
+
+def set_console_level(level: LogLevel) -> None:
+    """Set the process-wide console log threshold, effective immediately.
+
+    Every console handler shares this single mutable threshold, and each
+    logger's own level is re-derived to match, so ``-v/-q`` take effect on
+    loggers that were already created.
+    """
+
+    global _console_level
+    with _console_level_lock:
+        _console_level = _coerce_log_level(level, logging.WARNING)
+        for logger, base_level in _configured_loggers:
+            logger.setLevel(_effective_logger_level(base_level))
+
+
+def get_console_level() -> int:
+    """Return the current process-wide console log threshold."""
+
+    return _console_level
+
+
 def setup_logger(
     name: str,
     level: int = LOG_LEVEL,
@@ -106,8 +156,13 @@ def setup_logger(
     """
 
     logger = logging.getLogger(name)
-    logger.setLevel(level)
     logger.propagate = False
+    # Track the logger and pin its level to the console-threshold-aware value so
+    # ``-v`` can later lower it to DEBUG (see set_console_level / ADR-0009).
+    with _console_level_lock:
+        logger.setLevel(_effective_logger_level(level))
+        if all(existing is not logger for existing, _ in _configured_loggers):
+            _configured_loggers.append((logger, level))
 
     if not logger.handlers:
         class LevelSpecificFormatter(logging.Formatter):
@@ -143,16 +198,16 @@ def setup_logger(
 
         # 只在console_output为True时添加控制台处理器
         if console_output:
-            resolved_console_level = _coerce_log_level(
-                console_level or os.environ.get("VIDEOCAPTIONER_CONSOLE_LOG_LEVEL"),
-                logging.WARNING,
-            )
+            if console_level is not None:
+                set_console_level(console_level)
 
             class ConsoleFilter(logging.Filter):
                 def filter(self, record: logging.LogRecord) -> bool:
                     if getattr(record, "suppress_console", False):
                         return False
-                    return record.levelno >= resolved_console_level or bool(
+                    # Read the shared threshold live so set_console_level()
+                    # affects handlers created before the level was changed.
+                    return record.levelno >= _console_level or bool(
                         getattr(record, "console", False)
                     )
 

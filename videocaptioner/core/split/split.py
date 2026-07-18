@@ -1,5 +1,6 @@
 import atexit
 import difflib
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Union
 
@@ -144,6 +145,12 @@ class SubtitleSplitter:
         self.use_llm = use_llm
         self.progress_callback = progress_callback
         self.is_running = True
+        # Degrade counter surfaced in the stage summary (ADR-0009): segments that fell
+        # back to rule-based splitting because LLM segmentation raised. In pure-rules
+        # mode (use_llm=False) rules are the chosen path and are normally not counted
+        # (only a rules-side error would be).
+        self._stat_lock = threading.Lock()
+        self.rule_fallback_segments = 0
         self._init_thread_pool()
 
     def _init_thread_pool(self):
@@ -170,6 +177,9 @@ class SubtitleSplitter:
             RuntimeError: Raised on split failure
         """
         try:
+            # Reset per-run degrade counter.
+            with self._stat_lock:
+                self.rule_fallback_segments = 0
             # 1. Reading字幕
             if isinstance(subtitle_data, str):
                 asr_data = ASRData.from_subtitle_file(subtitle_data)
@@ -300,6 +310,8 @@ class SubtitleSplitter:
                 result = future.result()
             except Exception as e:
                 logger.error("Segment %s processing failed, falling back to rules: %s", index, e)
+                with self._stat_lock:
+                    self.rule_fallback_segments += 1
                 result = self._process_by_rules(asr_data_list[index].segments)
             processed_segments[index] = result
             completed += 1
@@ -308,6 +320,8 @@ class SubtitleSplitter:
 
         for index, result in enumerate(processed_segments):
             if result is None:
+                with self._stat_lock:
+                    self.rule_fallback_segments += 1
                 processed_segments[index] = self._process_by_rules(asr_data_list[index].segments)
         return [result for result in processed_segments if result is not None]
 
@@ -320,7 +334,10 @@ class SubtitleSplitter:
         try:
             return self._process_by_llm(asr_data_part.segments)
         except Exception as e:
-            logger.warning(f"LLM processing failed, falling back to rules: {str(e)}")
+            # Routine self-healing: rule-based split still produces valid output.
+            logger.debug(f"LLM processing failed, falling back to rules: {str(e)}")
+            with self._stat_lock:
+                self.rule_fallback_segments += 1
             return self._process_by_rules(asr_data_part.segments)
 
     def _process_by_llm(self, segments: List[ASRDataSeg]) -> List[ASRDataSeg]:
@@ -777,14 +794,16 @@ class SubtitleSplitter:
         def append_rule_fallback(start: int, end: int, reason: str) -> None:
             if start >= end:
                 return
-            logger.warning(
+            # Routine self-healing during LLM/ASR alignment: unmatched spans are
+            # covered by the deterministic rule splitter, output stays valid.
+            logger.debug(
                 f"Falling back to rule split for ASR segments {start}:{end}: {reason}"
             )
             new_segments.extend(self._process_by_rules(segments[start:end]))
 
         for sentence in sentences:
             if asr_index >= asr_len:
-                logger.warning(f"No ASR segments left for LLM sentence: {sentence}")
+                logger.debug(f"No ASR segments left for LLM sentence: {sentence}")
                 break
 
             logger.debug("==========")
@@ -865,7 +884,7 @@ class SubtitleSplitter:
                 emitted_until = max(emitted_until, asr_index)
                 unmatched_count = 0
             else:
-                logger.warning(f"Cannot match sentence: {sentence}")
+                logger.debug(f"Cannot match sentence: {sentence}")
                 unmatched_count += 1
                 if unmatched_count > max_unmatched:
                     append_rule_fallback(

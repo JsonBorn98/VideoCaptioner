@@ -6,6 +6,10 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
+from videocaptioner.core.utils.logger import setup_logger
+
+logger = setup_logger("dubbing.audio")
+
 
 def get_audio_duration_ms(path: str) -> int:
     audio = AudioSegment.from_file(path)
@@ -49,6 +53,13 @@ def create_timeline_audio(
     fmt = "mp3" if suffix == "mp3" else "wav"
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     timeline.export(output_path, format=fmt)
+    logger.info(
+        "timeline audio: %d clips over %dms -> %s (%s)",
+        len(segments),
+        duration_ms,
+        Path(output_path).name,
+        fmt,
+    )
 
 
 def mux_dubbed_audio(
@@ -63,6 +74,7 @@ def mux_dubbed_audio(
     """Replace or mix a video's audio track with dubbed audio."""
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     if mix_original_audio and _video_has_audio(video_path):
+        logger.info("mux dubbed audio: mixing with original -> %s", Path(output_path).name)
         filter_complex = (
             f"[0:a]volume={original_audio_volume}[a0];"
             f"[1:a]volume={dubbed_audio_volume}[a1];"
@@ -94,6 +106,7 @@ def mux_dubbed_audio(
             output_path,
         ]
     else:
+        logger.info("mux dubbed audio: replacing track -> %s", Path(output_path).name)
         cmd = [
             "ffmpeg",
             "-y",

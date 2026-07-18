@@ -51,6 +51,12 @@ def _new_report(asr_data: "ASRData", report: Optional[QualityReport]) -> Quality
     return report
 
 
+def _stage_changed(report: QualityReport, key: str) -> int:
+    """读取阶段累计变更数（不存在则 0），只读、不新建 StageReport。"""
+    sr = report.stages.get(key)
+    return sr.changed if sr is not None else 0
+
+
 def run_pre_stage(
     asr_data: "ASRData",
     cfg: PostprocessConfig,
@@ -77,6 +83,8 @@ def run_normalize_stage(
 ) -> Tuple["ASRData", QualityReport]:
     """优化后 / 翻译后：文本规范化（取代 remove_punctuation）。可重复调用。"""
     report = _new_report(asr_data, report)
+    before_quotes = _stage_changed(report, "normalize_quotes")
+    before_trim = _stage_changed(report, "trim_trailing")
     try:
         from .normalize import normalize_segments
 
@@ -85,6 +93,12 @@ def run_normalize_stage(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("文本规范化失败，已跳过: %s", exc)
+    quote_delta = _stage_changed(report, "normalize_quotes") - before_quotes
+    trim_delta = _stage_changed(report, "trim_trailing") - before_trim
+    if quote_delta or trim_delta:
+        logger.info(
+            "文本规范化：引号 %d 处 / 弱尾标点 %d 处", quote_delta, trim_delta
+        )
     return asr_data, report
 
 
@@ -186,6 +200,16 @@ def run_post_stage(
             asr_data, report = audit(asr_data, cfg, report)
         except Exception as exc:  # noqa: BLE001
             logger.warning("阅读速度审计失败，已跳过: %s", exc)
+        if report.audit is not None:
+            c = report.audit.counts()
+            logger.info(
+                "阅读速度审计：段 %d，硬警告 %d，舒适警告 %d，长时长 %d，重叠 %d",
+                report.audit.segment_count,
+                c["hard"],
+                c["comfort"],
+                c["long_duration"],
+                c["overlaps"],
+            )
 
     report.segment_count = len(asr_data.segments)
     return asr_data, report

@@ -156,17 +156,17 @@ class PostprocessSettingInterface(QWidget):
         ),
         (
             "speed_low_boundary_shift_ms",
-            "精准对齐",
+            "媒体增强对齐",
             lambda policy: policy.low_confidence_boundary_shift_ms,
         ),
         (
             "speed_medium_boundary_shift_ms",
-            "精准对齐",
+            "媒体增强对齐",
             lambda policy: policy.medium_confidence_boundary_shift_ms,
         ),
         (
             "speed_high_boundary_shift_ms",
-            "精准对齐",
+            "媒体增强对齐",
             lambda policy: policy.high_confidence_boundary_shift_ms,
         ),
     )
@@ -215,7 +215,7 @@ class PostprocessSettingInterface(QWidget):
             ("reading", self.tr("阅读目标")),
             ("timing", self.tr("时间与结构")),
             ("semantic", self.tr("语义修复")),
-            ("alignment", self.tr("精准对齐")),
+            ("alignment", self.tr("媒体增强对齐")),
             ("report", self.tr("报告存储")),
         ):
             self._addTab(route_key, title)
@@ -804,8 +804,11 @@ class PostprocessSettingInterface(QWidget):
         group = SettingCardGroup(self.tr("媒体增强时间轴"), tab.scrollWidget)
         self.preciseTimingCard = SwitchSettingCard(
             FIF.STOP_WATCH,
-            self.tr("精准时间轴"),
-            self.tr("关联媒体后调用 ForcedAligner；默认关闭，失败时降级到固定算法"),
+            self.tr("对齐时间轴"),
+            self.tr(
+                "需要先“关联媒体”才能生成对齐时间轴；未关联媒体时本项自动降级为"
+                "字幕内部估算时间轴。默认关闭，对齐失败时同样降级。"
+            ),
             cfg.speed_precise_timing,
             group,
         )

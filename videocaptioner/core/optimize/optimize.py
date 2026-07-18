@@ -6,6 +6,7 @@
 import atexit
 import difflib
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -62,6 +63,15 @@ class SubtitleOptimizer:
 
         self.is_running = True
         self.executor: Optional[ThreadPoolExecutor] = None
+        # Level-independent counters surfaced in the stage summary (ADR-0009); routine
+        # self-healing retries stay at DEBUG. failed_batches counts batches that kept the
+        # ORIGINAL text (a real degrade → drives the summary's [degraded] badge);
+        # maxed_batches counts batches whose validation never fully passed within
+        # MAX_STEPS but whose best repaired attempt was still applied (a softer quality
+        # signal, surfaced as a count only).
+        self._stat_lock = threading.Lock()
+        self.failed_batches = 0
+        self.maxed_batches = 0
         self._init_thread_pool()
 
     def _init_thread_pool(self) -> None:
@@ -79,6 +89,10 @@ class SubtitleOptimizer:
             优化后的ASRData对象
         """
         try:
+            # Reset per-run degrade counters.
+            with self._stat_lock:
+                self.failed_batches = 0
+                self.maxed_batches = 0
             # Reading字幕
             if isinstance(subtitle_data, str):
                 asr_data = ASRData.from_subtitle_file(subtitle_data)
@@ -150,6 +164,8 @@ class SubtitleOptimizer:
                 optimized_dict.update(result)
             except Exception as e:
                 logger.error(f"Optimization batch failed: {str(e)}")
+                with self._stat_lock:
+                    self.failed_batches += 1
                 optimized_dict.update(chunk)  # 失败时保留原文
 
         return optimized_dict
@@ -185,6 +201,8 @@ class SubtitleOptimizer:
 
         except Exception as e:
             logger.error(f"Optimization failed: {str(e)}")
+            with self._stat_lock:
+                self.failed_batches += 1
             return subtitle_chunk
 
     def agent_loop(self, subtitle_chunk: Dict[str, str]) -> Dict[str, str]:
@@ -253,8 +271,8 @@ class SubtitleOptimizer:
             if is_valid:
                 return self._repair_subtitle(subtitle_chunk, result_dict)
 
-            # 验证失败，添加反馈
-            logger.warning(
+            # 验证失败，添加反馈（常规自愈：agent-loop 会重试修正，非真实故障）
+            logger.debug(
                 f"优化验证失败，开始反馈循环 (第{step + 1}次尝试): {error_message}"
             )
             messages.append({"role": "assistant", "content": result_text})
@@ -268,8 +286,10 @@ class SubtitleOptimizer:
                 }
             )
 
-        # 达到最大步数
-        logger.warning(f"Max attempts reached({MAX_STEPS})，returning last result")
+        # 达到最大步数（常规自愈：返回最近一次结果继续处理，非真实故障）
+        with self._stat_lock:
+            self.maxed_batches += 1
+        logger.debug(f"Max attempts reached({MAX_STEPS})，returning last result")
         return (
             self._repair_subtitle(subtitle_chunk, last_result)
             if last_result

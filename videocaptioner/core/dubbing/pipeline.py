@@ -11,11 +11,14 @@ from videocaptioner.core.speech import (
     SynthesisRequest,
     create_speech_synthesizer,
 )
+from videocaptioner.core.utils.logger import setup_logger
 
 from .audio import change_tempo, create_timeline_audio, get_audio_duration_ms, mux_dubbed_audio
 from .models import DubbingConfig, DubbingResult, DubbingSegment, SpeakerProfile
 from .rewriter import rewrite_segments_if_needed
 from .subtitle_parser import load_dubbing_segments
+
+logger = setup_logger("dubbing.pipeline")
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -62,6 +65,13 @@ class DubbingPipeline:
             raise ValueError("No subtitle lines found for dubbing")
         self._apply_speakers(segments)
 
+        logger.info(
+            "dubbing start: %d segments, provider=%s, voice=%s",
+            len(segments),
+            self.config.provider,
+            self.config.voice or "-",
+        )
+
         cb(8, "rewriting long lines")
         rewrite_segments_if_needed(segments, self.config)
 
@@ -84,6 +94,12 @@ class DubbingPipeline:
                 cb(10 + int(completed / total * 75), f"synthesizing {completed}/{total}")
 
         segments = [seg for seg in ordered if seg is not None]
+        if len(segments) < total:
+            logger.error(
+                "dubbing: %d of %d segments produced no audio",
+                total - len(segments),
+                total,
+            )
         for segment in segments:
             timeline_items.append((segment.fitted_path, segment.start_ms))
             overflow_ms = segment.start_ms + segment.fitted_duration_ms - segment.end_ms
@@ -91,6 +107,9 @@ class DubbingPipeline:
                 warning = f"segment {segment.index} exceeds target by {overflow_ms} ms"
                 segment.warning = warning
                 warnings.append(warning)
+
+        if warnings:
+            logger.warning("dubbing: %d segment(s) exceed target duration", len(warnings))
 
         duration_ms = max(
             max(seg.end_ms for seg in segments),
@@ -122,6 +141,16 @@ class DubbingPipeline:
 
         self._write_report(out_audio.with_suffix(".dubbing.json"), segments, warnings)
         cb(100, "completed")
+        compressed = sum(1 for seg in segments if seg.speed_factor > 1.0)
+        logger.info(
+            "dubbing complete: %d segments synthesized, %d time-compressed, "
+            "duration=%dms, audio=%s%s",
+            len(segments),
+            compressed,
+            duration_ms,
+            out_audio.name,
+            f", video={out_video.name}" if out_video else "",
+        )
         return DubbingResult(
             audio_path=out_audio,
             video_path=out_video,

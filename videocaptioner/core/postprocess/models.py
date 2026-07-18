@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 from ..entities import SubtitleLayoutEnum
 from ..subtitle.io import canonical_stage_path
@@ -84,3 +84,10 @@ class PostprocessResult:
     warnings: tuple[str, ...] = ()
     succeeded: bool = True
     used_fallback: bool = False
+    # 媒体增强对齐 / 对齐时间轴 的可见结果（见 CONTEXT.md，标识符仍为 precise_timing）。
+    # precise_timing_outcome: None=未请求；"applied"=已应用对齐时间轴；
+    # "degraded_no_media"=对齐降级（未提供关联媒体）；"degraded_failed"=对齐降级（生成失败/空证据）。
+    # precise_timing_grades: 仅在 "applied" 时非 None，为按证据等级计数的
+    # (等级名, 数量) 序列，等级名取 "HIGH"/"MEDIUM"/"LOW"，按 HIGH→MEDIUM→LOW 排序、只含计数>0 者。
+    precise_timing_outcome: Optional[str] = None
+    precise_timing_grades: Optional[tuple[tuple[str, int], ...]] = None

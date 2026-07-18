@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
+from ..utils.logger import setup_logger
 from .models import CueSnapshot
 from .timing_evidence import (
     TimingAnchor,
@@ -23,6 +24,8 @@ from .timing_evidence import (
     TimingProvenance,
     TimingQualityGrade,
 )
+
+logger = setup_logger("speed.alignment")
 
 DEFAULT_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 ALIGNMENT_ADAPTER_VERSION = 1
@@ -187,6 +190,13 @@ def preflight_alignment(
                     if any(cue.end_ms > duration_ms for cue in cues):
                         issues.append("subtitle extends beyond media duration")
 
+    if issues:
+        logger.warning(
+            "对齐预检不合格（对齐降级）：lang=%s track=%d 原因=%s",
+            _normalize_language(source_language),
+            audio_track_index,
+            "；".join(issues),
+        )
     return AlignmentPreflight(not issues, tuple(issues), duration_ms, audio_track_index)
 
 
@@ -497,6 +507,14 @@ def align_timing_windows(
         media_duration_ms=preflight.media_duration_ms,
         config=selected,
     )
+    logger.info(
+        "媒体增强对齐开始：cues=%d 计划窗口=%d lang=%s track=%d model=%s",
+        len(cues),
+        len(plans),
+        _normalize_language(source_language),
+        audio_track_index,
+        aligner_model,
+    )
     cue_by_id = {cue.cue_id: cue for cue in cues}
     callable_aligner = aligner or _default_aligner
     options = dict(aligner_options or {})
@@ -533,14 +551,36 @@ def align_timing_windows(
                     evidence = _subtitle_fallback(plan, cue_by_id, str(exc))
                     failures.append(evidence.window_id)
                     issues.append(f"{evidence.window_id}: {exc}")
+                    logger.warning(
+                        "对齐窗口回退到字幕时间（对齐降级）：window=%s cues=%d 原因=%s",
+                        evidence.window_id,
+                        len(plan.cue_ids),
+                        exc,
+                    )
                 windows.append(evidence)
     except Exception as exc:
+        logger.warning(
+            "媒体增强对齐整体失败，全部 %d 个窗口回退到字幕时间（对齐降级）：%s",
+            len(plans),
+            exc,
+        )
         for plan in plans:
             evidence = _subtitle_fallback(plan, cue_by_id, str(exc))
             windows.append(evidence)
             failures.append(evidence.window_id)
             issues.append(f"{evidence.window_id}: {exc}")
 
+    grade_counts = {grade: 0 for grade in TimingQualityGrade}
+    for window in windows:
+        grade_counts[window.quality_grade] = grade_counts.get(window.quality_grade, 0) + 1
+    logger.info(
+        "媒体增强对齐结束：产出窗口=%d 回退窗口=%d 证据等级 HIGH=%d MEDIUM=%d LOW=%d",
+        len(windows),
+        len(failures),
+        grade_counts.get(TimingQualityGrade.HIGH, 0),
+        grade_counts.get(TimingQualityGrade.MEDIUM, 0),
+        grade_counts.get(TimingQualityGrade.LOW, 0),
+    )
     return AlignmentRunResult(
         preflight=preflight,
         plans=plans,
@@ -595,6 +635,9 @@ def load_or_align_timing(
         except ValueError:
             archived = None
         if archived is not None and archived.config_fingerprint == config_fingerprint:
+            logger.info(
+                "对齐时间轴缓存命中（sidecar）：windows=%d", len(archived.windows)
+            )
             return archived, (), True
 
     cached = read_cached_timing_bundle(
@@ -603,8 +646,10 @@ def load_or_align_timing(
         config_fingerprint,
     )
     if cached is not None:
+        logger.info("对齐时间轴缓存命中（app cache）：windows=%d", len(cached.windows))
         return cached, (), True
 
+    logger.info("对齐时间轴缓存未命中，开始重新对齐")
     alignment = align_timing_windows(
         media_path,
         cues,

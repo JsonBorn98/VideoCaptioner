@@ -106,7 +106,7 @@ class LLMTranslator(BaseTranslator):
             {"role": "user", "content": json.dumps(subtitle_dict, ensure_ascii=False)},
         ]
         # llm 反馈循环
-        for _ in range(self.MAX_STEPS):
+        for attempt in range(self.MAX_STEPS):
             response = call_llm(messages=messages, model=self.model)
             response_dict = json_repair.loads(
                 response.choices[0].message.content.strip()
@@ -122,6 +122,11 @@ class LLMTranslator(BaseTranslator):
                 # via v.get("native_translation"). Only normalize keys to str.
                 return {str(k): v for k, v in response_dict.items()}
             else:
+                # Routine self-healing retry (mirrors optimize's agent loop);
+                # a real, content-losing failure surfaces as the ValueError below.
+                logger.debug(
+                    f"翻译验证失败，开始反馈循环 (第{attempt + 1}次尝试): {error_message}"
+                )
                 messages.append(
                     {
                         "role": "assistant",

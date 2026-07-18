@@ -209,6 +209,11 @@ def run(args: Namespace, config: dict) -> int:
     progress = None if quiet else output.ProgressLine("Processing subtitles").start()
     _done_count = 0
     _total_count = max(len(asr_data.segments), 1)
+    # Level-independent per-stage summaries, rendered at the orchestration
+    # boundary just before the final "Done" line (see ADR-0009).
+    from videocaptioner.core.utils.stage_summary import StageSummary
+
+    stage_summaries: list[StageSummary] = []
 
     def callback(result):
         nonlocal _done_count
@@ -237,6 +242,17 @@ def run(args: Namespace, config: dict) -> int:
                 use_llm=need_split,
             )
             asr_data = splitter.split_subtitle(asr_data)
+            split_counts = [("段", len(asr_data.segments))]
+            fallbacks = getattr(splitter, "rule_fallback_segments", 0)
+            if fallbacks:
+                split_counts.append(("规则回退", fallbacks))
+            stage_summaries.append(
+                StageSummary(
+                    "split" if need_split else "merge",
+                    split_counts,
+                    status="degraded" if fallbacks else None,
+                )
+            )
 
         # 2. Optimize
         if need_optimize:
@@ -253,6 +269,20 @@ def run(args: Namespace, config: dict) -> int:
                 extra_rules="",
             )
             asr_data = optimizer.optimize_subtitle(asr_data)
+            optimize_counts = [("段", len(asr_data.segments))]
+            failed = getattr(optimizer, "failed_batches", 0)
+            maxed = getattr(optimizer, "maxed_batches", 0)
+            if failed:
+                optimize_counts.append(("批失败", failed))
+            if maxed:
+                optimize_counts.append(("校验未过", maxed))
+            stage_summaries.append(
+                StageSummary(
+                    "optimize",
+                    optimize_counts,
+                    status="degraded" if failed else None,
+                )
+            )
 
         # 3. Translate
         if need_translate:
@@ -284,6 +314,17 @@ def run(args: Namespace, config: dict) -> int:
                 update_callback=callback,
             )
             asr_data = translator.translate_subtitle(asr_data)
+            translate_counts = [("段", len(asr_data.segments))]
+            failed = getattr(translator, "failed_count", 0)
+            if failed:
+                translate_counts.append(("翻译失败", failed))
+            stage_summaries.append(
+                StageSummary(
+                    "translate",
+                    translate_counts,
+                    status="degraded" if failed else None,
+                )
+            )
 
         # 4. Save the initial subtitle. Postprocessing is a separate command/stage.
         from videocaptioner.core.subtitle.io import save_canonical_srt
@@ -292,8 +333,13 @@ def run(args: Namespace, config: dict) -> int:
         args.result_data = asr_data
 
         if progress:
+            progress.finish()  # stop spinner + clear line before the clean summary lines
+        if not quiet:
+            for stage_summary in stage_summaries:
+                output.stage(stage_summary)
+        if progress:
             n = len(asr_data.segments)
-            progress.finish(f"Done -> {output_path} ({n} segment{'' if n == 1 else 's'})")
+            output.success(f"Done -> {output_path} ({n} segment{'' if n == 1 else 's'})")
         if quiet:
             print(output_path)
         return EXIT.SUCCESS

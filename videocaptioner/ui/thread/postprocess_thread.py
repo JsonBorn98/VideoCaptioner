@@ -46,12 +46,12 @@ def _resolve_timing(task: PostprocessTask, data: ASRData, _layout):
         _detect_source_language(data),
     )
     if issues:
-        logger.warning("精准时间轴已降级: %s", "; ".join(issues))
+        logger.warning("对齐时间轴已降级: %s", "; ".join(issues))
         task.warnings.extend(issue for issue in issues if issue not in task.warnings)
-    if cache_hit:
-        logger.info("复用精准时间轴缓存: %d 个窗口", len(bundle.windows))
+    if cache_hit and bundle is not None:
+        logger.info("复用对齐时间轴缓存: %d 个窗口", len(bundle.windows))
     task.timing_bundle = bundle
-    return bundle.windows
+    return bundle.windows if bundle is not None else ()
 
 
 class PostprocessThread(QThread):

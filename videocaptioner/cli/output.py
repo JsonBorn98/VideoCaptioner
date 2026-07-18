@@ -2,7 +2,10 @@
 
 import sys
 import threading
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from videocaptioner.core.utils.stage_summary import StageSummary
 
 
 def info(msg: str) -> None:
@@ -19,6 +22,18 @@ def error(msg: str) -> None:
 
 def warn(msg: str) -> None:
     print(f"! Warning: {msg}", file=sys.stderr)
+
+
+def summary(text: str) -> None:
+    """Print a one-line stage summary (already-rendered text)."""
+    print(f"  {text}", file=sys.stderr)
+
+
+def stage(stage_summary: "StageSummary") -> None:
+    """Render and print a StageSummary as one concise line."""
+    from videocaptioner.core.utils.stage_summary import format_stage_summary
+
+    summary(format_stage_summary(stage_summary))
 
 
 def hint(msg: str) -> None:

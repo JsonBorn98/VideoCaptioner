@@ -31,6 +31,10 @@ class BaseTranslator(ABC):
         self.update_callback = update_callback
         self.executor = None
         self._cache = get_translate_cache()
+        # Level-independent degrade counters surfaced in the stage summary (ADR-0009):
+        # chunk-level failures that fell back to untranslated text.
+        self.failed_count = 0
+        self.total_segments = 0
 
         self._init_thread_pool()
 
@@ -98,6 +102,10 @@ class BaseTranslator(ABC):
                 logger.error(f"Translation chunk failed: {e}")
                 failed_count += len(future_to_chunk[future])
                 translated_list.extend(future_to_chunk[future])
+
+        # Record degrade counters for the stage summary before any raise below.
+        self.failed_count = failed_count
+        self.total_segments = total_segments
 
         # Raise if all or most translations failed
         if failed_count > 0 and total_segments > 0:

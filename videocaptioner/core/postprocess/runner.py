@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from ..asr.asr_data import ASRData
 from ..entities import SubtitleLayoutEnum
 from ..subtitle.io import clone_subtitle_data, import_subtitle, save_canonical_srt
+from ..utils.logger import setup_logger
 from . import run_post_stage, run_pre_stage
 from .config import PostprocessConfig
 from .models import PostprocessLayoutMode, PostprocessResult, PostprocessTask
@@ -18,6 +19,8 @@ from .report import QualityReport
 
 if TYPE_CHECKING:
     from ..speed.timing_evidence import TimingEvidenceWindow
+
+logger = setup_logger("postprocess.runner")
 
 TimingResolver = Callable[
     [PostprocessTask, ASRData, SubtitleLayoutEnum], Iterable["TimingEvidenceWindow"]
@@ -99,6 +102,25 @@ def _validate_output(data: ASRData) -> None:
         previous_start = segment.start_time
 
 
+def _summarize_timing_grades(
+    evidence: Iterable["TimingEvidenceWindow"],
+) -> tuple[tuple[str, int], ...]:
+    """Count precise-timing evidence windows by quality grade for the result.
+
+    Returns ``(grade_name, count)`` pairs ordered HIGH -> MEDIUM -> LOW,
+    including only grades with a non-zero count.  Grade names are the
+    ``TimingQualityGrade`` enum member names ("HIGH"/"MEDIUM"/"LOW").
+    """
+
+    from ..speed.timing_evidence import TimingQualityGrade
+
+    counts: dict[TimingQualityGrade, int] = {grade: 0 for grade in TimingQualityGrade}
+    for window in evidence:
+        counts[window.quality_grade] = counts.get(window.quality_grade, 0) + 1
+    ordered = (TimingQualityGrade.HIGH, TimingQualityGrade.MEDIUM, TimingQualityGrade.LOW)
+    return tuple((grade.name, counts[grade]) for grade in ordered if counts.get(grade))
+
+
 def run_postprocess_task(
     task: PostprocessTask,
     *,
@@ -116,6 +138,12 @@ def run_postprocess_task(
 
     task.status = "running"
     input_data, layout, confidence, warnings = _load_and_classify(task)
+    logger.info(
+        "后处理任务开始：%d 段（layout=%s，置信度=%.2f）",
+        len(input_data.segments),
+        layout.name,
+        confidence,
+    )
     original = clone_subtitle_data(input_data)
     # An invalid initial hand-off is not a postprocess failure and cannot be a
     # valid fallback.  Let the workflow terminate instead of claiming success.
@@ -125,6 +153,7 @@ def run_postprocess_task(
         task.status = "skipped"
         task.active_subtitle_path = task.initial_subtitle_path
         task.result_data = clone_subtitle_data(original)
+        logger.info("后处理任务跳过（未启用），沿用初版字幕")
         return PostprocessResult(
             task, original, original, report, layout, confidence, tuple(warnings), True, False
         )
@@ -136,15 +165,36 @@ def run_postprocess_task(
     config = PostprocessConfig(**asdict(config))
     task.config_snapshot = config
     evidence = tuple(timing_windows) if config.precise_timing else ()
+    # Visible outcome of 媒体增强对齐 / 对齐时间轴 (see CONTEXT.md).  None = not
+    # requested; otherwise one of "applied" / "degraded_no_media" / "degraded_failed".
+    precise_timing_outcome: str | None = None
+    precise_timing_grades: tuple[tuple[str, int], ...] | None = None
     if config.precise_timing:
         if timing_resolver is not None and task.media_path:
             try:
                 evidence = tuple(timing_resolver(task, original, layout))
                 warnings.extend(item for item in task.warnings if item not in warnings)
             except Exception as exc:  # noqa: BLE001
-                warnings.append(f"精准时间证据生成失败，已降级为字幕内部算法: {exc}")
+                warnings.append(f"对齐时间轴生成失败，已降级为字幕内部估算时间轴: {exc}")
+                # Drop any caller-supplied windows so "degraded_failed" truly
+                # means no media evidence was applied downstream.
+                evidence = ()
+                precise_timing_outcome = "degraded_failed"
+            else:
+                if evidence:
+                    precise_timing_outcome = "applied"
+                    precise_timing_grades = _summarize_timing_grades(evidence)
+                else:
+                    # Resolver ran but produced no usable evidence (e.g. preflight
+                    # ineligible / empty alignment) — a well-defined 对齐降级.
+                    precise_timing_outcome = "degraded_failed"
         elif not evidence:
-            warnings.append("已开启精准时间轴，但未提供媒体时间证据，已降级处理")
+            warnings.append("已开启对齐时间轴，但未提供媒体时间证据，已降级处理")
+            precise_timing_outcome = "degraded_no_media"
+        else:
+            # Precise timing requested with caller-supplied evidence and no resolver.
+            precise_timing_outcome = "applied"
+            precise_timing_grades = _summarize_timing_grades(evidence)
 
     if config.speed_mode == "analyze":
         # Analyze is a stage-wide dry run.  Text cleanup and timing mutation
@@ -172,6 +222,7 @@ def run_postprocess_task(
         task.result_data = clone_subtitle_data(original)
         warnings.append("分析模式仅生成报告，未写入后处理字幕")
         task.warnings = warnings
+        logger.info("后处理分析模式完成：仅生成报告，未写入字幕")
         return PostprocessResult(
             task,
             original,
@@ -182,6 +233,8 @@ def run_postprocess_task(
             tuple(warnings),
             True,
             False,
+            precise_timing_outcome,
+            precise_timing_grades,
         )
 
     try:
@@ -208,6 +261,7 @@ def run_postprocess_task(
         task.warnings = warnings
         task.active_subtitle_path = task.initial_subtitle_path
         task.result_data = clone_subtitle_data(original)
+        logger.warning("字幕后处理失败，已回退到初版字幕: %s", exc)
         return PostprocessResult(
             task,
             original,
@@ -218,6 +272,8 @@ def run_postprocess_task(
             tuple(warnings),
             False,
             True,
+            precise_timing_outcome,
+            precise_timing_grades,
         )
 
     task.status = "completed"
@@ -225,8 +281,19 @@ def run_postprocess_task(
     task.active_subtitle_path = str(output)
     task.result_data = clone_subtitle_data(working)
     task.warnings = warnings
+    logger.info("后处理完成：%d 段 -> %s", len(working.segments), output.name)
     return PostprocessResult(
-        task, original, working, report, layout, confidence, tuple(warnings), True, False
+        task,
+        original,
+        working,
+        report,
+        layout,
+        confidence,
+        tuple(warnings),
+        True,
+        False,
+        precise_timing_outcome,
+        precise_timing_grades,
     )
 
 

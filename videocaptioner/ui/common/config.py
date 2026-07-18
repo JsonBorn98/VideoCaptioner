@@ -398,6 +398,8 @@ class Config(QConfig):
         _POSTPROCESS_DEFAULTS.speed_primary,
         OptionsValidator(["translate", "layout", "original"]),
     )
+    # 领域术语：媒体增强对齐 / 对齐时间轴（见 CONTEXT.md）。配置组/键与字段名保持
+    # "SubtitleSpeed"/"PreciseTiming"/precise_timing 不变，仅 UI 显示串改用领域词。
     speed_precise_timing = ConfigItem(
         "SubtitleSpeed", "PreciseTiming", False, BoolValidator()
     )

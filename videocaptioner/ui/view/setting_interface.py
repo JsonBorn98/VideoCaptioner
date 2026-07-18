@@ -136,7 +136,7 @@ class SettingInterface(ScrollArea):
             self.tr("打开"),
             FIF.SPEED_HIGH,
             self.tr("字幕后处理设置"),
-            self.tr("文本、速度、时间轴、语义修复、精准对齐与报告集中管理"),
+            self.tr("文本、速度、时间轴、语义修复、媒体增强对齐与报告集中管理"),
             self.postprocessGroup,
         )
 

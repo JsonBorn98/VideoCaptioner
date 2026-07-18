@@ -100,8 +100,10 @@ class PostprocessConfig:
     """确定性校验不能判定时，调用独立语义复核。"""
     optimize_both_sides: bool = False
     """双语字幕默认只改写译文；开启后允许文本能力分别处理原文与译文。"""
+    # 领域术语：媒体增强对齐 / 对齐时间轴（见 CONTEXT.md）。代码标识符保持 precise_timing
+    # 不变，UI 显示串已改称"媒体增强对齐 / 对齐时间轴"；"精准对齐 / 精准时间轴"为旧称，勿再沿用。
     precise_timing: bool = False
-    """请求使用关联媒体生成精准时间证据；runner 本身不隐式加载模型。"""
+    """请求使用关联媒体生成对齐时间轴（媒体增强对齐）；runner 本身不隐式加载模型。"""
     save_timing_sidecar: bool = False
     """精准时间证据可用时，请求调用方保存可复用的 sidecar。"""
 

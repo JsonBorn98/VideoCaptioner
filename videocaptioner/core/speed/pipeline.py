@@ -10,6 +10,7 @@ import regex
 
 from ..asr.asr_data import ASRData, ASRDataSeg
 from ..entities import SubtitleLayoutEnum
+from ..utils.logger import setup_logger
 from .deterministic import (
     TimingChange,
     TimingCue,
@@ -41,6 +42,8 @@ from .timing_evidence import (
 from .validation import SemanticWindow, ValidationStatus, validate_semantic_window
 
 SpeedMode = Literal["apply", "analyze"]
+
+logger = setup_logger("speed.pipeline")
 
 
 @dataclass(frozen=True)
@@ -473,6 +476,15 @@ def optimize_speed(
         raise ValueError("speed mode must be 'apply' or 'analyze'")
     selected_policy = policy or get_speed_policy()
     evidence = tuple(timing_windows)
+    resolved_profile = profile_id or selected_policy.preset.value
+    logger.info(
+        "语速优化开始：cues=%d 主字幕=%s profile=%s mode=%s 时间轴证据窗口=%d",
+        len(data.segments),
+        primary_side,
+        resolved_profile,
+        mode,
+        len(evidence),
+    )
     primary_texts = [
         resolve_primary_text(segment, layout, primary_side) for segment in data.segments
     ]
@@ -631,5 +643,28 @@ def optimize_speed(
         reference_after=reference_after,
         structural_operations=structural_operations,
         semantic_records=semantic_records,
+    )
+    changed_cue_count = len({change.cue_id for change in result.changes})
+    semantic_accepted = sum(
+        1 for record in semantic_records if record.status is ValidationStatus.ACCEPTED
+    )
+    semantic_rolled_back = sum(
+        1 for record in semantic_records if record.status is ValidationStatus.ROLLED_BACK
+    )
+    if semantic_rolled_back:
+        logger.warning(
+            "语义修复回滚 %d 个窗口（未通过校验/未改善指标，主字幕=%s）",
+            semantic_rolled_back,
+            primary_side,
+        )
+    logger.info(
+        "语速优化结束：变更cue=%d 边界移动=%d 结构操作=%d 语义修复=%d 未解决超速=%d 无效cue=%d 主字幕=%s",
+        changed_cue_count,
+        len(result.changes),
+        len(structural_operations),
+        semantic_accepted,
+        len(unresolved),
+        len(invalid),
+        primary_side,
     )
     return output, result
