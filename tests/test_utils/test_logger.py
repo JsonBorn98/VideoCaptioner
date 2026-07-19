@@ -89,3 +89,19 @@ def test_registered_handler_observes_existing_and_future_loggers(tmp_path):
 
     existing.info("after unregister")
     assert observer.messages == ["from existing", "from future"]
+
+
+def test_suppress_console_keeps_exception_in_file_without_duplicate_output(tmp_path, capsys):
+    log_path = tmp_path / "exception.log"
+    logger = setup_logger("test.suppress.console", log_file=str(log_path))
+
+    for _ in range(10):
+        logger.error("native event failed", extra={"suppress_console": True})
+
+    for handler in logger.handlers:
+        handler.flush()
+
+    captured = capsys.readouterr()
+    assert "native event failed" not in captured.out
+    assert "native event failed" not in captured.err
+    assert log_path.read_text(encoding="utf-8").count("native event failed") == 10

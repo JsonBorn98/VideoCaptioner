@@ -36,6 +36,9 @@ dependencies = [
     "tomli>=2.0.0; python_version < '3.11'",
     "PyQt5==5.15.11",
     "PyQt-Fluent-Widgets==1.8.4",
+    # The Windows native-event guard relies on this base-class API; update with its tests.
+    "PyQt5-Frameless-Window==0.8.1",
+    "pywin32==312; sys_platform == 'win32'",
     "modelscope>=1.32.0",
     "psutil>=7.0.0",
     "GPUtil>=1.4.0",

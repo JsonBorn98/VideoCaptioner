@@ -34,7 +34,20 @@ def main():
         from qfluentwidgets import FluentTranslator
         sys.stdout = _stdout
 
+    logger = setup_logger("VideoCaptioner")
+
     from videocaptioner.ui.common.config import cfg
+    from videocaptioner.ui.common.windows_native_event import (
+        install_windows_frameless_native_event_guard,
+    )
+
+    # qframelesswindow does not handle transient cursor-coordinate access denial
+    # during secure-desktop/session switches. Patch its Windows base class once
+    # before creating any FluentWindow or frameless dialog.
+    install_windows_frameless_native_event_guard(
+        on_error=lambda exc: logger.warning("无法安装 Windows 无边框窗口事件守卫: %s", exc)
+    )
+
     from videocaptioner.ui.view.main_window import MainWindow
 
     # Qt platform plugin path
@@ -44,11 +57,12 @@ def main():
     )
     os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = plugin_path
 
-    # Logger + global exception hook
-    logger = setup_logger("VideoCaptioner")
-
+    # Global exception hook
     def exception_hook(exctype, value, tb):
-        logger.error("".join(traceback.format_exception(exctype, value, tb)))
+        logger.error(
+            "".join(traceback.format_exception(exctype, value, tb)),
+            extra={"suppress_console": True},
+        )
         sys.__excepthook__(exctype, value, tb)
 
     sys.excepthook = exception_hook
