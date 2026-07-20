@@ -1,4 +1,7 @@
-from videocaptioner.core.llm.check_llm import check_model_profile_connection
+from videocaptioner.core.llm.check_llm import (
+    CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
+    check_model_profile_connection,
+)
 from videocaptioner.core.llm.models import (
     LLMCallError,
     LLMErrorCategory,
@@ -49,6 +52,10 @@ def test_connection_probe_uses_gateway_for_every_native_transport():
             "stage": "connection_probe",
             "role": "utility",
         }
+        assert (
+            gateway.calls[0][1].max_output_tokens
+            == CONNECTION_PROBE_MAX_OUTPUT_TOKENS
+        )
         assert gateway.calls[0][2]["max_attempts"] == 1
 
 

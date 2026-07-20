@@ -16,6 +16,13 @@ from .models import (
     ProviderDialect,
 )
 
+# Reasoning-capable models may spend tens or hundreds of completion tokens on
+# hidden reasoning before emitting a one-token answer.  A tiny cap such as 8
+# therefore produces a valid HTTP response with no text and falsely reports a
+# broken connection.  Keep the probe bounded, but leave enough room for that
+# provider-side reasoning budget.
+CONNECTION_PROBE_MAX_OUTPUT_TOKENS = 512
+
 
 def check_model_profile_connection(
     profile: LLMModelProfile,
@@ -40,7 +47,7 @@ def check_model_profile_connection(
                     LLMMessage("user", "OK"),
                 ),
                 temperature=0,
-                max_output_tokens=8,
+                max_output_tokens=CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
                 cacheable_system_prefix=False,
                 metadata={"stage": "connection_probe", "role": "utility"},
             ),
