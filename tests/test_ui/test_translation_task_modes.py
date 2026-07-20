@@ -22,6 +22,7 @@ def test_translation_mode_cards_share_role_bindings_and_report_missing(tmp_path)
     _run_qt_script(
         f"""
 from PyQt5.QtWidgets import QApplication
+from qfluentwidgets import CardWidget, ComboBox, SimpleCardWidget, SpinBox, SwitchButton
 from videocaptioner.core.llm.models import LLMModelProfile, LLMTransport, ProviderDialect
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.translate.types import TranslationMode
@@ -41,6 +42,11 @@ try:
     widget = TranslationModeSelector(profile_store=store)
     assert len(widget.cards) == 3
     assert all('推荐' not in card.text() for card in widget.cards.values())
+    assert all(isinstance(card, CardWidget) for card in widget.cards.values())
+    assert isinstance(widget.enhanced_llm_panel, SimpleCardWidget)
+    assert isinstance(widget.main_profile_combo, ComboBox)
+    assert isinstance(widget.enhanced_batch_spin, SpinBox)
+    assert isinstance(widget.reflect_checkbox, SwitchButton)
 
     widget.cards[TranslationMode.ENHANCED_LLM].click()
     app.processEvents()
