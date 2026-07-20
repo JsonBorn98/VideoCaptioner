@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -61,7 +62,10 @@ from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.core.utils.platform_utils import open_folder, reveal_in_explorer
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
+from videocaptioner.ui.components.GlossaryReviewPage import GlossaryReviewPage
 from videocaptioner.ui.components.SubtitleSettingDialog import SubtitleSettingDialog
+from videocaptioner.ui.components.TranslationAuditPage import TranslationAuditPage
+from videocaptioner.ui.components.TranslationModeSelector import TranslationModeSelector
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.subtitle_thread import RetranslateThread, SubtitleThread
 
@@ -222,14 +226,15 @@ class SubtitleTableModel(QAbstractTableModel):
 class SubtitleInterface(QWidget):
     finished = pyqtSignal(str, str)
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, *, profile_store=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.task: Optional[SubtitleTask] = None
         self.subtitle_path: Optional[str] = None
         self.primary_srt_path: Optional[str] = None
         self._dirty = False
-        self.custom_prompt_text: str = cfg.custom_prompt_text.value
+        self.custom_prompt_text: str = cfg.main_translation_prompt.value
+        self._profile_store = profile_store
         self.setAttribute(Qt.WA_DeleteOnClose)  # type: ignore
         self._init_ui()
         self._setup_signals()
@@ -243,6 +248,7 @@ class SubtitleInterface(QWidget):
 
         self._setup_top_layout()
         self._setup_subtitle_table()
+        self._setup_translation_workspace()
         self._setup_bottom_layout()
 
     def set_values(self):
@@ -251,6 +257,8 @@ class SubtitleInterface(QWidget):
         self.optimize_button.setChecked(cfg.need_optimize.value)
         self.target_language_button.setText(cfg.target_language.value.value)
         self.target_language_button.setEnabled(cfg.need_translate.value)
+        self.translation_mode_selector.set_mode(cfg.translation_mode.value, persist=False)
+        self._refresh_start_availability(ignore_processing=True)
 
     def _setup_top_layout(self):
         # 创建水平布局
@@ -395,7 +403,31 @@ class SubtitleInterface(QWidget):
         # 添加右键菜单支持
         self.subtitle_table.setContextMenuPolicy(Qt.CustomContextMenu)  # type: ignore
         self.subtitle_table.customContextMenuRequested.connect(self.show_context_menu)
-        self.main_layout.addWidget(self.subtitle_table)
+
+    def _setup_translation_workspace(self) -> None:
+        """Create the shared editable workspace and the two full-size result pages."""
+
+        self.workspace_stack = QStackedWidget(self)
+        self.translation_workspace = QWidget(self.workspace_stack)
+        workspace_layout = QVBoxLayout(self.translation_workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        self.translation_mode_selector = TranslationModeSelector(
+            self.translation_workspace, profile_store=self._profile_store
+        )
+        self.translation_mode_selector.availability_changed.connect(
+            self._on_translation_availability_changed
+        )
+        workspace_layout.addWidget(self.translation_mode_selector)
+        workspace_layout.addWidget(self.subtitle_table, 1)
+
+        self.glossary_review_page = GlossaryReviewPage(self.workspace_stack)
+        self.glossary_review_page.confirmed.connect(self._submit_term_confirmation)
+        self.translation_audit_page = TranslationAuditPage(self.workspace_stack)
+        self.translation_audit_page.closed.connect(self._show_translation_workspace)
+        self.workspace_stack.addWidget(self.translation_workspace)
+        self.workspace_stack.addWidget(self.glossary_review_page)
+        self.workspace_stack.addWidget(self.translation_audit_page)
+        self.main_layout.addWidget(self.workspace_stack, 1)
 
     def _setup_bottom_layout(self):
         self.bottom_layout = QHBoxLayout()
@@ -425,7 +457,7 @@ class SubtitleInterface(QWidget):
     def show_prompt_dialog(self) -> None:
         dialog = PromptDialog(self)
         if dialog.exec_():
-            self.custom_prompt_text = cfg.custom_prompt_text.value
+            self.custom_prompt_text = cfg.main_translation_prompt.value
             self._update_prompt_button_style()
 
     def _update_prompt_button_style(self) -> None:
@@ -469,6 +501,22 @@ class SubtitleInterface(QWidget):
     def start_subtitle_optimization(self, need_create_task: bool = True) -> None:
         if self._is_processing():
             return
+        if (
+            need_create_task
+            and cfg.need_translate.value
+            and not self.translation_mode_selector.is_selected_mode_available
+        ):
+            missing = self.translation_mode_selector.missing_configuration(
+                self.translation_mode_selector.selected_mode
+            )
+            InfoBar.warning(
+                self.tr("翻译配置不完整"),
+                self.tr("缺少：") + "、".join(missing),
+                duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+            self._refresh_start_availability()
+            return
         if not self.subtitle_path:
             InfoBar.warning(
                 self.tr("警告"),
@@ -486,6 +534,9 @@ class SubtitleInterface(QWidget):
             self.task = TaskFactory.create_subtitle_task(
                 file_path=self.subtitle_path,
                 video_path=None,
+                imported_glossary_path=(
+                    self.translation_mode_selector.imported_glossary_path or None
+                ),
             )
             self.task.editor_data_json = deepcopy(self.model._data)
         if not self.task:
@@ -499,6 +550,12 @@ class SubtitleInterface(QWidget):
         self.subtitle_optimization_thread.update.connect(self.update_data)
         self.subtitle_optimization_thread.update_all.connect(self.update_all)
         self.subtitle_optimization_thread.error.connect(self.on_subtitle_optimization_error)
+        if hasattr(self.subtitle_optimization_thread, "term_confirmation_required"):
+            self.subtitle_optimization_thread.term_confirmation_required.connect(
+                self._show_term_confirmation
+            )
+        if hasattr(self.subtitle_optimization_thread, "audit_ready"):
+            self.subtitle_optimization_thread.audit_ready.connect(self._show_translation_audit)
         self.subtitle_optimization_thread.set_custom_prompt_text(self.custom_prompt_text)
         self.subtitle_optimization_thread.start()
         InfoBar.info(
@@ -514,7 +571,7 @@ class SubtitleInterface(QWidget):
         self.start_subtitle_optimization(need_create_task=False)
 
     def on_subtitle_optimization_finished(self, video_path: str, output_path: str) -> None:
-        self.start_button.setEnabled(True)
+        self._refresh_start_availability(ignore_processing=True)
         self.cancel_button.hide()
         self.progress_bar.setValue(100)
         self.primary_srt_path = output_path
@@ -535,7 +592,8 @@ class SubtitleInterface(QWidget):
         )
 
     def on_subtitle_optimization_error(self, error: str) -> None:
-        self.start_button.setEnabled(True)
+        self._show_translation_workspace()
+        self._refresh_start_availability(ignore_processing=True)
         self.cancel_button.hide()  # 隐藏取消按钮
         self.progress_bar.error()
         InfoBar.error(
@@ -548,6 +606,75 @@ class SubtitleInterface(QWidget):
     def on_subtitle_optimization_progress(self, value: int, status: str) -> None:
         self.progress_bar.setValue(value)
         self.status_label.setText(status)
+
+    def _on_translation_availability_changed(self, available: bool, reason: str) -> None:
+        self.start_button.setToolTip("" if available else reason)
+        self._refresh_start_availability()
+
+    def _refresh_start_availability(self, *, ignore_processing: bool = False) -> None:
+        if not hasattr(self, "start_button") or (
+            self._is_processing() and not ignore_processing
+        ):
+            return
+        available = (
+            not cfg.need_translate.value
+            or self.translation_mode_selector.is_selected_mode_available
+        )
+        self.start_button.setEnabled(available)
+        missing = self.translation_mode_selector.missing_configuration(
+            self.translation_mode_selector.selected_mode
+        )
+        self.start_button.setToolTip(
+            self.tr("缺少：") + "、".join(missing)
+            if cfg.need_translate.value and missing
+            else ""
+        )
+
+    def _show_term_confirmation(self, candidates) -> None:
+        source_by_id = {
+            int(key): str(value.get("original_subtitle", ""))
+            for key, value in self.model._data.items()
+        }
+        ordered_ids = sorted(source_by_id)
+        positions = {cue_id: position for position, cue_id in enumerate(ordered_ids)}
+        radius = (
+            self.task.subtitle_config.term_context_radius
+            if self.task is not None and self.task.subtitle_config is not None
+            else int(cfg.term_context_radius.value)
+        )
+        context = {}
+        for candidate in candidates:
+            representative_ids = candidate.representative_context_ids or tuple(
+                candidate.occurrence_ids[:5]
+            )
+            for cue_id in representative_ids:
+                position = positions.get(cue_id)
+                if position is None:
+                    continue
+                window = ordered_ids[
+                    max(0, position - radius) : min(len(ordered_ids), position + radius + 1)
+                ]
+                context[cue_id] = "\n".join(
+                    f"{'→' if value == cue_id else ' '} #{value} {source_by_id[value]}"
+                    for value in window
+                )
+        self.glossary_review_page.set_candidates(candidates, context)
+        self.workspace_stack.setCurrentWidget(self.glossary_review_page)
+        self.status_label.setText(self.tr("等待人工确认术语"))
+
+    def _submit_term_confirmation(self, candidates) -> None:
+        thread = getattr(self, "subtitle_optimization_thread", None)
+        if thread is not None:
+            thread.submit_term_confirmation(candidates)
+        self._show_translation_workspace()
+        self.status_label.setText(self.tr("继续翻译"))
+
+    def _show_translation_audit(self, report) -> None:
+        self.translation_audit_page.set_report(report)
+        self.workspace_stack.setCurrentWidget(self.translation_audit_page)
+
+    def _show_translation_workspace(self) -> None:
+        self.workspace_stack.setCurrentWidget(self.translation_workspace)
 
     def update_data(self, data):
         self.model.update_data(data)
@@ -948,7 +1075,7 @@ class SubtitleInterface(QWidget):
         self._retranslate_thread.start()
 
     def _on_retranslate_finished(self, result: dict) -> None:
-        self.start_button.setEnabled(True)
+        self._refresh_start_availability(ignore_processing=True)
         self.model.update_data(result, mark_dirty=True)
         self.progress_bar.setValue(100)
         self.status_label.setText(self.tr("重新翻译完成"))
@@ -960,7 +1087,7 @@ class SubtitleInterface(QWidget):
         )
 
     def _on_retranslate_error(self, error: str) -> None:
-        self.start_button.setEnabled(True)
+        self._refresh_start_availability(ignore_processing=True)
         self.progress_bar.error()
         self.status_label.setText(self.tr("重新翻译失败"))
         InfoBar.error(
@@ -999,7 +1126,8 @@ class SubtitleInterface(QWidget):
         """取消字幕校正"""
         if hasattr(self, "subtitle_optimization_thread"):
             self.subtitle_optimization_thread.stop()  # type: ignore
-            self.start_button.setEnabled(True)
+            self._show_translation_workspace()
+            self._refresh_start_availability()
             self.cancel_button.hide()
             self.progress_bar.resume()  # 恢复正常状态
             self.progress_bar.setValue(0)
@@ -1030,6 +1158,7 @@ class SubtitleInterface(QWidget):
         self.translate_button.setChecked(checked)
         # 控制翻译语言选择按钮的启用状态
         self.target_language_button.setEnabled(checked)
+        self._refresh_start_availability()
 
     def on_subtitle_layout_changed(self, layout: str) -> None:
         """处理字幕排布变更"""
@@ -1042,29 +1171,22 @@ class PromptDialog(MessageBoxBase):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setup_ui()
-        self.setWindowTitle(self.tr("文稿提示"))
+        self.setWindowTitle(self.tr("主翻译 Prompt"))
         # 连接按钮点击事件
         self.yesButton.clicked.connect(self.save_prompt)
 
     def setup_ui(self) -> None:
-        self.titleLabel = BodyLabel(self.tr("文稿提示"), self)
+        self.titleLabel = BodyLabel(self.tr("主翻译 Prompt"), self)
 
         # 添加文本编辑框
         self.text_edit = TextEdit(self)
         self.text_edit.setPlaceholderText(
             self.tr(
-                "请输入文稿提示（辅助校正字幕和翻译）\n\n"
-                "支持以下内容:\n"
-                "1. 术语表 - 专业术语、人名、特定词语的修正对照表\n"
-                "示例:\n机器学习->Machine Learning\n马斯克->Elon Musk\n打call->应援\n\n"
-                "2. 原字幕文稿 - 视频的原有文稿或相关内容\n"
-                "示例: 完整的演讲稿、课程讲义等\n\n"
-                "3. 修正要求 - 内容相关的具体修正要求\n"
-                "示例: 统一人称代词、规范专业术语等\n\n"
-                "注意: 使用小型LLM模型时建议控制文稿在1千字内。对于不同字幕文件,请使用与该字幕相关的文稿提示。"
+                "请输入主翻译角色的长期翻译要求。\n\n"
+                "例如：目标语语域、人名与专名偏好、必须保留的格式，以及领域术语规则。"
             )
         )
-        self.text_edit.setText(cfg.custom_prompt_text.value)
+        self.text_edit.setText(cfg.main_translation_prompt.value)
 
         self.text_edit.setMinimumWidth(420)
         self.text_edit.setMinimumHeight(380)
@@ -1084,7 +1206,7 @@ class PromptDialog(MessageBoxBase):
     def save_prompt(self) -> None:
         # 在点击确定按钮时保存提示文本到配置
         prompt_text = self.text_edit.toPlainText()
-        cfg.set(cfg.custom_prompt_text, prompt_text)
+        cfg.set(cfg.main_translation_prompt, prompt_text)
 
 
 if __name__ == "__main__":

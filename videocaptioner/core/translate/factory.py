@@ -2,6 +2,7 @@
 
 from typing import Callable, Optional
 
+from videocaptioner.core.llm import LLMGateway, LLMModelProfile
 from videocaptioner.core.translate.base import BaseTranslator
 from videocaptioner.core.translate.bing_translator import BingTranslator
 from videocaptioner.core.translate.deeplx_translator import DeepLXTranslator
@@ -26,6 +27,8 @@ class TranslatorFactory:
         custom_prompt: str = "",
         is_reflect: bool = False,
         update_callback: Optional[Callable] = None,
+        profile: Optional[LLMModelProfile] = None,
+        gateway: Optional[LLMGateway] = None,
     ) -> BaseTranslator:
         """创建翻译器实例"""
         try:
@@ -42,6 +45,8 @@ class TranslatorFactory:
                     custom_prompt=custom_prompt,
                     is_reflect=is_reflect,
                     update_callback=update_callback,
+                    profile=profile,
+                    gateway=gateway,
                 )
             elif translator_type == TranslatorType.GOOGLE:
                 batch_num = 5

@@ -5,6 +5,7 @@ from qfluentwidgets import SegmentedWidget
 
 from videocaptioner.core.llm.context import generate_task_id
 from videocaptioner.core.postprocess import PostprocessProfileStore
+from videocaptioner.core.translate.enhanced.models import TranslationExecutionMode
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.view.postprocess_interface import PostprocessInterface
@@ -21,6 +22,7 @@ class HomeInterface(QWidget):
         self._postprocess_enabled = True
         self._postprocess_profile_id = "balanced"
         self._postprocess_config_snapshot = None
+        self._subtitle_config_snapshot = None
         self._workflow_base_name: str | None = None
         self._workflow_export_policy = None
         self._active_subtitle_data = None
@@ -100,6 +102,14 @@ class HomeInterface(QWidget):
         )
         self._workflow_base_name = transcribe_task.workflow_base_name
         self._workflow_export_policy = transcribe_task.export_policy
+        self._subtitle_config_snapshot = TaskFactory.create_subtitle_task(
+            file_path,
+            file_path,
+            need_next_task=True,
+            workflow_base_name=self._workflow_base_name,
+            export_policy=self._workflow_export_policy,
+            translation_execution_mode=TranslationExecutionMode.GUI_WORKFLOW,
+        ).subtitle_config
         self._active_subtitle_data = None
         self.transcription_interface.set_task(transcribe_task)
         self.transcription_interface.process()
@@ -118,6 +128,8 @@ class HomeInterface(QWidget):
             workflow_base_name=self._workflow_base_name,
             input_data=input_data,
             export_policy=self._workflow_export_policy,
+            config_snapshot=self._subtitle_config_snapshot,
+            translation_execution_mode=TranslationExecutionMode.GUI_WORKFLOW,
         )
         self._workflow_base_name = subtitle_task.workflow_base_name
         self.subtitle_optimization_interface.set_task(subtitle_task)
@@ -172,6 +184,7 @@ class HomeInterface(QWidget):
         )
         self._current_task_id = None  # 流程结束
         self._postprocess_config_snapshot = None
+        self._subtitle_config_snapshot = None
         self._workflow_base_name = None
         self._workflow_export_policy = None
         self._active_subtitle_data = None

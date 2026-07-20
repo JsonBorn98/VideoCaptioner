@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 import uuid
 from dataclasses import dataclass, field
@@ -6,9 +8,16 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
+    from videocaptioner.core.llm.models import LLMModelProfile
     from videocaptioner.core.postprocess.models import PostprocessTask
     from videocaptioner.core.synthesis.models import EncodeSettings
-    from videocaptioner.core.translate.types import TargetLanguage
+    from videocaptioner.core.translate.enhanced.models import (
+        TermConfirmationMode,
+        TranslationAuditMode,
+        TranslationAuditReport,
+        TranslationExecutionMode,
+    )
+    from videocaptioner.core.translate.types import TargetLanguage, TranslationMode
 
 
 def _generate_task_id() -> str:
@@ -718,6 +727,11 @@ class SubtitleConfig:
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     llm_model: Optional[str] = None
+    # Existing split/optimize LLM remains a separate utility dependency; role
+    # prompts and provider-native translation profiles must not leak into it.
+    utility_llm_base_url: Optional[str] = None
+    utility_llm_api_key: Optional[str] = None
+    utility_llm_model: Optional[str] = None
     deeplx_endpoint: Optional[str] = None
     # 翻译服务
     translator_service: Optional[TranslatorServiceEnum] = None
@@ -726,6 +740,21 @@ class SubtitleConfig:
     need_reflect: bool = False
     thread_num: int = 10
     batch_size: int = 10
+    # Translation workflow and immutable role snapshots. The legacy connection
+    # fields above remain populated for callers that have not migrated to the
+    # profile-aware LLM gateway yet.
+    translation_mode: Optional[TranslationMode] = None
+    main_llm_profile: Optional[LLMModelProfile] = None
+    review_llm_profile: Optional[LLMModelProfile] = None
+    main_translation_prompt: str = ""
+    review_translation_prompt: str = ""
+    enhanced_batch_size: int = 10
+    term_context_radius: int = 10
+    boundary_context_radius: int = 3
+    term_confirmation_mode: TermConfirmationMode | str = "automatic"
+    translation_audit_mode: TranslationAuditMode | str = "report_only"
+    translation_execution_mode: TranslationExecutionMode | str = "gui_standalone"
+    imported_glossary_path: Optional[str] = None
     # 字幕布局和分割
     subtitle_layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP
     max_word_count_cjk: int = 12
@@ -736,6 +765,45 @@ class SubtitleConfig:
     subtitle_style_reference_width: int = 1280
     subtitle_style_reference_height: int = 720
     custom_prompt_text: Optional[str] = None
+
+    @staticmethod
+    def _enum_value(value) -> str:
+        return str(getattr(value, "value", value))
+
+    def effective_translation_mode(self) -> str:
+        """Return the explicit mode, or infer it for legacy task configs."""
+
+        if self.translation_mode is not None:
+            return self._enum_value(self.translation_mode)
+        if self.translator_service == TranslatorServiceEnum.OPENAI:
+            return "single_llm"
+        return "non_llm"
+
+    def is_translation_mode_available(self, mode=None) -> bool:
+        """Whether the requested mode has all mandatory model roles configured."""
+
+        selected = self._enum_value(mode) if mode is not None else self.effective_translation_mode()
+        if selected == "single_llm":
+            return self.main_llm_profile is not None
+        if selected == "enhanced_llm":
+            return self.main_llm_profile is not None and self.review_llm_profile is not None
+        if selected == "non_llm":
+            return self.translator_service in {
+                TranslatorServiceEnum.BING,
+                TranslatorServiceEnum.GOOGLE,
+                TranslatorServiceEnum.DEEPLX,
+            }
+        return False
+
+    def missing_translation_roles(self, mode=None) -> tuple[str, ...]:
+        selected = self._enum_value(mode) if mode is not None else self.effective_translation_mode()
+        missing: list[str] = []
+        if selected in {"single_llm", "enhanced_llm"} and self.main_llm_profile is None:
+            missing.append("main")
+        if selected == "enhanced_llm" and self.review_llm_profile is None:
+            missing.append("review")
+        return tuple(missing)
+
     def _mask_key(self, key: Optional[str]) -> str:
         """Mask sensitive key for display"""
         if not key or len(key) <= 8:
@@ -759,6 +827,7 @@ class SubtitleConfig:
 
         if self.need_translate:
             lines.append("Translate: Yes")
+            lines.append(f"  Mode: {self.effective_translation_mode()}")
             lines.append(
                 f"  Service: {self.translator_service.value if self.translator_service else 'None'}"
             )
@@ -890,6 +959,11 @@ class SubtitleTask:
     need_next_task: bool = True
 
     subtitle_config: Optional[SubtitleConfig] = None
+    glossary_path: Optional[str] = None
+    translation_audit_report_path: Optional[str] = None
+    translation_audit_report: Optional["TranslationAuditReport"] = field(
+        default=None, repr=False
+    )
 
 
 @dataclass
@@ -987,6 +1061,7 @@ class BatchTaskStatus(Enum):
     RUNNING = "处理中"
     COMPLETED = "已完成"
     FAILED = "失败"
+    CANCELLED = "已取消"
 
     def __str__(self):
         return self.value

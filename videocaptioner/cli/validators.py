@@ -101,6 +101,14 @@ def validate_llm(config: dict) -> bool:
             "--model",
         )
         return False
+    try:
+        from videocaptioner.cli.config import build_legacy_llm_profile
+
+        build_legacy_llm_profile(config)
+    except (TypeError, ValueError) as exc:
+        output.error(f"Invalid LLM profile configuration: {exc}")
+        output.hint("Check llm.work_context_tokens and llm.max_concurrency")
+        return False
     return True
 
 
@@ -193,11 +201,11 @@ def validate_subtitle(config: dict) -> bool:
 
     optimize = get(config, "subtitle.optimize", True)
     translate = get(config, "subtitle.translate", False)
-    translator = get(config, "translate.service", "bing")
+    translation_mode = str(get(config, "translate.mode", "enhanced_llm"))
 
     if optimize:
         needs_llm = True
-    if translate and translator == "llm":
+    if translate and translation_mode in {"single_llm", "enhanced_llm"}:
         needs_llm = True
     if get(config, "subtitle.compress_fast_subtitles", False):
         needs_llm = True

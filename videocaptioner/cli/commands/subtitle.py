@@ -51,6 +51,10 @@ _LANG_MAP = {
 }
 
 
+def _display_usage_value(value: object) -> str:
+    return "不可用" if value is None else str(value)
+
+
 def _resolve_target_language(code: str):
     """Resolve a BCP 47 code to a TargetLanguage enum value (case-insensitive)."""
     from videocaptioner.core.translate.types import TargetLanguage
@@ -92,8 +96,10 @@ def run(args: Namespace, config: dict) -> int:
     need_split = get(config, "subtitle.split", True)
 
     # If user explicitly specified translator or target language, enable translation
-    explicitly_wants_translate = getattr(args, "translator", None) or getattr(
-        args, "target_language", None
+    explicitly_wants_translate = (
+        getattr(args, "translator", None)
+        or getattr(args, "translation_mode", None)
+        or getattr(args, "target_language", None)
     )
     explicitly_no_translate = getattr(args, "no_translate", False)
     if explicitly_wants_translate and explicitly_no_translate:
@@ -103,12 +109,23 @@ def run(args: Namespace, config: dict) -> int:
     elif explicitly_wants_translate:
         need_translate = True
     translator_service = get(config, "translate.service", "bing")
+    translation_mode = str(get(config, "translate.mode", "enhanced_llm"))
+    valid_modes = {"non_llm", "single_llm", "enhanced_llm"}
+    if translation_mode not in valid_modes:
+        output.error(f"Unsupported translation mode: {translation_mode}")
+        output.hint("Supported modes: non_llm, single_llm, enhanced_llm")
+        return EXIT.USAGE_ERROR
+    if need_translate and translation_mode == "non_llm" and translator_service == "llm":
+        output.error("translate.service=llm is incompatible with non_llm mode")
+        output.hint("Choose bing, google, or deeplx, or use enhanced_llm mode")
+        return EXIT.USAGE_ERROR
+    llm_translation = need_translate and translation_mode != "non_llm"
 
     # Validate AFTER resolving the actual need_translate / need_optimize state
     needs_llm = (
         need_optimize
         or need_split
-        or (need_translate and translator_service == "llm")
+        or llm_translation
     )
     if needs_llm:
         from videocaptioner.cli.validators import validate_llm
@@ -117,17 +134,21 @@ def run(args: Namespace, config: dict) -> int:
             return EXIT.USAGE_ERROR
     target_lang_code = get(config, "translate.target_language", "zh-Hans")
     need_reflect = get(config, "translate.reflect", False)
-    if need_reflect and translator_service in ("bing", "google"):
-        output.warn("--reflect only works with LLM translator, ignored for " + translator_service)
+    if need_reflect and translation_mode != "single_llm":
+        output.warn("--reflect only works with single_llm mode; ignored")
         need_reflect = False
+    if get(config, "translate.glossary_path", "") and translation_mode != "enhanced_llm":
+        output.warn("--glossary only works with enhanced_llm mode; ignored")
+    if get(config, "translate.review_prompt", "") and translation_mode != "enhanced_llm":
+        output.warn("--review-prompt only works with enhanced_llm mode; ignored")
 
     # Warn on conflicting/ignored options
     if not need_translate and getattr(args, "layout", None):
         output.warn("--layout has no effect without translation (no bilingual output)")
     prompt_arg = getattr(args, "prompt", None)
     prompt_file_arg = getattr(args, "prompt_file", None)
-    if (prompt_arg or prompt_file_arg) and not needs_llm:
-        output.warn("--prompt/--prompt-file only works with LLM optimizer/translator")
+    if (prompt_arg or prompt_file_arg) and not llm_translation:
+        output.warn("--prompt/--prompt-file only configures LLM translation")
 
     thread_num = get(config, "subtitle.thread_num", 4)
     batch_size = get(config, "subtitle.batch_size", 20)
@@ -138,6 +159,13 @@ def run(args: Namespace, config: dict) -> int:
         return EXIT.USAGE_ERROR
     if batch_size < 1:
         output.error("--batch-size must be at least 1")
+        return EXIT.USAGE_ERROR
+    if (
+        need_translate
+        and translation_mode == "enhanced_llm"
+        and int(get(config, "translate.enhanced_batch_size", 10)) < 1
+    ):
+        output.error("translate.enhanced_batch_size must be at least 1")
         return EXIT.USAGE_ERROR
     layout_str = get(config, "synthesize.layout", "target-above")
     verbose = getattr(args, "verbose", False)
@@ -174,9 +202,9 @@ def run(args: Namespace, config: dict) -> int:
         os.environ["OPENAI_BASE_URL"] = llm_api_base
 
     # Load custom prompt (only if LLM features are needed)
-    custom_prompt = getattr(args, "prompt", None) or ""
+    custom_prompt = getattr(args, "prompt", None) or get(config, "translate.main_prompt", "")
     prompt_file = getattr(args, "prompt_file", None)
-    if prompt_file and needs_llm:
+    if prompt_file and llm_translation:
         p = Path(prompt_file)
         if not p.exists():
             output.error(f"Prompt file not found: {prompt_file}")
@@ -186,7 +214,10 @@ def run(args: Namespace, config: dict) -> int:
     if verbose:
         output.info(f"Optimize: {need_optimize}, Translate: {need_translate}")
         if need_translate:
-            output.info(f"Translator: {translator_service}, Target: {target_lang_code}")
+            output.info(
+                f"Translation mode: {translation_mode}, service: {translator_service}, "
+                f"target: {target_lang_code}"
+            )
         if needs_llm and llm_model:
             output.info(f"LLM: {llm_model} @ {llm_api_base}")
 
@@ -219,6 +250,8 @@ def run(args: Namespace, config: dict) -> int:
     )
 
     stage_summaries: list[StageSummary] = []
+    enhanced_usages = ()
+    enhanced_artifact_paths: tuple[str, str] | None = None
 
     def callback(result):
         nonlocal _done_count
@@ -266,7 +299,7 @@ def run(args: Namespace, config: dict) -> int:
                 thread_num=thread_num,
                 batch_num=batch_size,
                 model=llm_model,
-                custom_prompt=custom_prompt,
+                custom_prompt=get(config, "subtitle.optimization_prompt", ""),
                 update_callback=callback,
                 extra_rules="",
             )
@@ -292,26 +325,110 @@ def run(args: Namespace, config: dict) -> int:
                     progress.finish()  # Clean spinner without duplicate error
                 return EXIT.USAGE_ERROR
 
-            from videocaptioner.core.translate.factory import TranslatorFactory
-            from videocaptioner.core.translate.types import TranslatorType
+            if translation_mode == "enhanced_llm":
+                from videocaptioner.cli.config import build_legacy_llm_profile
+                from videocaptioner.core.translate.enhanced import run_enhanced_translation
+                from videocaptioner.core.translate.enhanced.defaults import (
+                    DEFAULT_MAIN_TRANSLATION_PROMPT,
+                    DEFAULT_REVIEW_TRANSLATION_PROMPT,
+                )
+                from videocaptioner.core.translate.enhanced.models import (
+                    EnhancedTranslationConfig,
+                    TranslationAuditMode,
+                    TranslationExecutionMode,
+                    TranslationRoleSnapshot,
+                )
 
-            type_map = {
-                "llm": TranslatorType.OPENAI,
-                "bing": TranslatorType.BING,
-                "google": TranslatorType.GOOGLE,
-            }
-            translator = TranslatorFactory.create_translator(
-                translator_type=type_map.get(translator_service, TranslatorType.OPENAI),
-                thread_num=thread_num,
-                batch_num=batch_size,
-                target_language=target_language,
-                model=llm_model,
-                custom_prompt=custom_prompt,
-                is_reflect=need_reflect,
-                update_callback=callback,
-            )
-            asr_data = translator.translate_subtitle(asr_data)
-            failed = getattr(translator, "failed_count", 0)
+                glossary_path = str(get(config, "translate.glossary_path", "") or "")
+                if glossary_path and not Path(glossary_path).is_file():
+                    output.error(f"Glossary file not found: {glossary_path}")
+                    if progress:
+                        progress.finish()
+                    return EXIT.FILE_NOT_FOUND
+                profile = build_legacy_llm_profile(config)
+                enhanced_config = EnhancedTranslationConfig(
+                    main_role=TranslationRoleSnapshot(
+                        "main", profile, custom_prompt or DEFAULT_MAIN_TRANSLATION_PROMPT
+                    ),
+                    review_role=TranslationRoleSnapshot(
+                        "review",
+                        profile,
+                        str(get(config, "translate.review_prompt", ""))
+                        or DEFAULT_REVIEW_TRANSLATION_PROMPT,
+                    ),
+                    source_language="auto",
+                    target_language=target_language.value,
+                    batch_size=int(get(config, "translate.enhanced_batch_size", 10)),
+                    term_context_radius=int(get(config, "translate.term_context_radius", 10)),
+                    boundary_context_radius=int(
+                        get(config, "translate.boundary_context_radius", 3)
+                    ),
+                    audit_mode=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+                    execution_mode=TranslationExecutionMode.CLI,
+                )
+                enhanced_run = run_enhanced_translation(
+                    asr_data,
+                    enhanced_config,
+                    output_dir=Path(output_path).parent,
+                    base_name=clean_stem,
+                    imported_glossary_path=glossary_path or None,
+                    progress=(
+                        (lambda value, message: progress.update(value, message))
+                        if progress
+                        else None
+                    ),
+                )
+                asr_data = enhanced_run.subtitle_data
+                args.glossary_path = str(enhanced_run.artifacts.glossary_path)
+                args.translation_audit_report_path = str(
+                    enhanced_run.artifacts.audit_report_path
+                )
+                args.translation_audit_report = enhanced_run.result.audit_report
+                enhanced_usages = tuple(
+                    getattr(enhanced_run.result.audit_report, "usages", ())
+                )
+                enhanced_artifact_paths = (
+                    args.glossary_path,
+                    args.translation_audit_report_path,
+                )
+                failed = 0
+            else:
+                from videocaptioner.core.translate.factory import TranslatorFactory
+                from videocaptioner.core.translate.types import TranslatorType
+
+                type_map = {
+                    "bing": TranslatorType.BING,
+                    "google": TranslatorType.GOOGLE,
+                    "deeplx": TranslatorType.DEEPLX,
+                }
+                if translation_mode == "single_llm":
+                    from videocaptioner.cli.config import build_legacy_llm_profile
+
+                    translator_type = TranslatorType.OPENAI
+                    profile = build_legacy_llm_profile(config)
+                else:
+                    translator_type = type_map.get(translator_service)
+                    profile = None
+                    if translator_type is None:
+                        raise ValueError(
+                            f"Unsupported non-LLM translation service: {translator_service}"
+                        )
+                    deeplx_endpoint = str(get(config, "translate.deeplx_endpoint", ""))
+                    if translator_service == "deeplx" and deeplx_endpoint:
+                        os.environ["DEEPLX_ENDPOINT"] = deeplx_endpoint
+                translator = TranslatorFactory.create_translator(
+                    translator_type=translator_type,
+                    thread_num=thread_num,
+                    batch_num=batch_size,
+                    target_language=target_language,
+                    model=llm_model,
+                    custom_prompt=custom_prompt,
+                    is_reflect=need_reflect,
+                    update_callback=callback,
+                    profile=profile,
+                )
+                asr_data = translator.translate_subtitle(asr_data)
+                failed = getattr(translator, "failed_count", 0)
             stage_summaries.append(
                 build_translate_stage_summary(
                     len(asr_data.segments),
@@ -330,6 +447,18 @@ def run(args: Namespace, config: dict) -> int:
         if not quiet:
             for stage_summary in stage_summaries:
                 output.stage(stage_summary)
+            for usage in enhanced_usages:
+                output.summary(
+                    "usage · "
+                    f"{usage.role}/{usage.stage} · {usage.calls} calls · "
+                    f"in {_display_usage_value(usage.input_tokens)} · "
+                    f"out {_display_usage_value(usage.output_tokens)} · "
+                    f"cache-read {_display_usage_value(usage.cache_read_tokens)} · "
+                    f"cache-write {_display_usage_value(usage.cache_write_tokens)}"
+                )
+            if enhanced_artifact_paths is not None:
+                output.info(f"Glossary: {enhanced_artifact_paths[0]}")
+                output.info(f"Translation audit: {enhanced_artifact_paths[1]}")
         if progress:
             n = len(asr_data.segments)
             output.success(f"Done -> {output_path} ({n} segment{'' if n == 1 else 's'})")

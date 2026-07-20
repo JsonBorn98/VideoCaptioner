@@ -1,12 +1,19 @@
 """LLM 翻译器（使用 OpenAI）"""
 
+import hashlib
 import json
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import json_repair
 import openai
 
-from videocaptioner.core.llm import call_llm
+from videocaptioner.core.llm import (
+    LLMGateway,
+    LLMMessage,
+    LLMModelProfile,
+    LLMRequest,
+    call_llm,
+)
 from videocaptioner.core.prompts import get_prompt
 from videocaptioner.core.translate.base import BaseTranslator, SubtitleProcessData, logger
 from videocaptioner.core.translate.types import TargetLanguage
@@ -27,6 +34,8 @@ class LLMTranslator(BaseTranslator):
         custom_prompt: str,
         is_reflect: bool,
         update_callback: Optional[Callable],
+        profile: Optional[LLMModelProfile] = None,
+        gateway: Optional[LLMGateway] = None,
     ):
         super().__init__(
             thread_num=thread_num,
@@ -38,6 +47,8 @@ class LLMTranslator(BaseTranslator):
         self.model = model
         self.custom_prompt = custom_prompt
         self.is_reflect = is_reflect
+        self.profile = profile
+        self.gateway = gateway or (LLMGateway() if profile is not None else None)
 
     def _translate_chunk(
         self, subtitle_chunk: List[SubtitleProcessData]
@@ -107,10 +118,8 @@ class LLMTranslator(BaseTranslator):
         ]
         # llm 反馈循环
         for attempt in range(self.MAX_STEPS):
-            response = call_llm(messages=messages, model=self.model)
-            response_dict = json_repair.loads(
-                response.choices[0].message.content.strip()
-            )
+            response_text = self._call_text(messages)
+            response_dict = json_repair.loads(response_text)
             if not isinstance(response_dict, dict):
                 response_dict = {}
             is_valid, error_message = self._validate_llm_response(
@@ -130,7 +139,7 @@ class LLMTranslator(BaseTranslator):
                 messages.append(
                     {
                         "role": "assistant",
-                        "content": json.dumps(response_dict, ensure_ascii=False),
+                        "content": response_text,
                     }
                 )
                 messages.append(
@@ -199,6 +208,24 @@ class LLMTranslator(BaseTranslator):
 
         return True, ""
 
+    def _call_text(self, messages: List[dict], *, temperature: float = 1) -> str:
+        if self.profile is not None:
+            assert self.gateway is not None
+            result = self.gateway.complete(
+                self.profile,
+                LLMRequest(
+                    messages=tuple(
+                        LLMMessage(str(message["role"]), str(message["content"]))
+                        for message in messages
+                    ),
+                    temperature=temperature,
+                    metadata={"stage": "single_llm_translation", "role": "main"},
+                ),
+            )
+            return result.text.strip()
+        response = call_llm(messages=messages, model=self.model, temperature=temperature)
+        return response.choices[0].message.content.strip()
+
     def _translate_chunk_single(
         self, subtitle_chunk: List[SubtitleProcessData]
     ) -> List[SubtitleProcessData]:
@@ -209,15 +236,13 @@ class LLMTranslator(BaseTranslator):
 
         for data in subtitle_chunk:
             try:
-                response = call_llm(
-                    messages=[
+                translated_text = self._call_text(
+                    [
                         {"role": "system", "content": single_prompt},
                         {"role": "user", "content": data.original_text},
                     ],
-                    model=self.model,
                     temperature=0.7,
                 )
-                translated_text = response.choices[0].message.content.strip()
                 data.translated_text = translated_text
             except Exception as e:
                 logger.error(f"Single item translation failed {data.index}: {str(e)}")
@@ -229,5 +254,13 @@ class LLMTranslator(BaseTranslator):
         class_name = self.__class__.__name__
         chunk_key = generate_cache_key(chunk)
         lang = self.target_language.value
-        model = self.model
-        return f"{class_name}:{chunk_key}:{lang}:{model}"
+        semantic_inputs = {
+            "model": self.model,
+            "profile": self.profile.to_dict() if self.profile is not None else None,
+            "custom_prompt": self.custom_prompt,
+            "reflect": self.is_reflect,
+        }
+        digest = hashlib.sha256(
+            json.dumps(semantic_inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return f"{class_name}:v2:{chunk_key}:{lang}:{digest}"

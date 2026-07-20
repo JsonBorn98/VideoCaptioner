@@ -380,10 +380,10 @@ def _build_subtitle_parser(subparsers) -> None:
             "Process subtitle files with up to 3 steps:\n"
             "  1. Split — Re-segment subtitles by semantic boundaries (LLM)\n"
             "  2. Optimize — Fix ASR errors, punctuation, formatting (LLM)\n"
-            "  3. Translate — Translate to another language (LLM, Bing, or Google)\n\n"
+            "  3. Translate — Use non-LLM, single-LLM, or enhanced dual-LLM workflow\n\n"
             "By default, optimize and split are enabled, translation is disabled.\n"
-            "Use --translator or --target-language to enable translation.\n"
-            "Bing and Google translators are free, LLM requires an API key."
+            "Use --translation-mode, --translator, or --target-language to enable translation.\n"
+            "Bing, Google, and DeepLX are non-LLM services; LLM modes require an API key."
         ),
     )
     p.add_argument("input", help="Subtitle file path (.srt, .ass, .vtt)")
@@ -416,8 +416,13 @@ def _build_subtitle_parser(subparsers) -> None:
     trans = p.add_argument_group("Translation options")
     trans.add_argument(
         "--translator",
-        choices=["llm", "bing", "google"],
-        help="Translation service (default: bing). bing and google are free",
+        choices=["llm", "bing", "google", "deeplx"],
+        help="Non-LLM service; legacy 'llm' selects enhanced_llm mode",
+    )
+    trans.add_argument(
+        "--translation-mode",
+        choices=["non_llm", "single_llm", "enhanced_llm"],
+        help="Translation workflow (non_llm, single_llm, or enhanced_llm)",
     )
     trans.add_argument(
         "--target-language",
@@ -427,7 +432,17 @@ def _build_subtitle_parser(subparsers) -> None:
     trans.add_argument(
         "--reflect",
         action="store_true",
-        help="Enable reflective translation (LLM only, higher quality)",
+        help="Enable reflective translation (single_llm only, higher quality)",
+    )
+    trans.add_argument(
+        "--glossary",
+        metavar="FILE",
+        help="Import a project .vcglossary.json file (enhanced_llm only)",
+    )
+    trans.add_argument(
+        "--review-prompt",
+        metavar="TEXT",
+        help="Custom senior-reviewer prompt (enhanced_llm only)",
     )
 
     sub = p.add_argument_group("Subtitle options")
@@ -727,8 +742,13 @@ def _build_process_parser(subparsers) -> None:
     )
     pipe.add_argument(
         "--translator",
-        choices=["llm", "bing", "google"],
-        help="Translation service (default: bing). bing and google are free",
+        choices=["llm", "bing", "google", "deeplx"],
+        help="Non-LLM service; legacy 'llm' selects enhanced_llm mode",
+    )
+    pipe.add_argument(
+        "--translation-mode",
+        choices=["non_llm", "single_llm", "enhanced_llm"],
+        help="Translation workflow",
     )
     pipe.add_argument(
         "--to", dest="target_language", metavar="CODE", help="Target language BCP 47 code"
@@ -736,7 +756,15 @@ def _build_process_parser(subparsers) -> None:
     p.add_argument(
         "--target-language", dest="target_language", metavar="CODE", help=argparse.SUPPRESS
     )
-    pipe.add_argument("--reflect", action="store_true", help="Reflective translation (LLM only)")
+    pipe.add_argument(
+        "--reflect", action="store_true", help="Reflective translation (single_llm only)"
+    )
+    pipe.add_argument(
+        "--glossary", metavar="FILE", help="Import a project glossary (enhanced_llm only)"
+    )
+    pipe.add_argument(
+        "--review-prompt", metavar="TEXT", help="Custom reviewer prompt (enhanced_llm only)"
+    )
     pipe.add_argument(
         "--quality",
         choices=["ultra", "high", "medium", "low"],
@@ -898,7 +926,14 @@ def _build_config_parser(subparsers) -> None:
     init_p.add_argument("--llm-model", metavar="NAME", help="LLM model")
     init_p.add_argument("--asr", choices=ASR_ENGINE_CHOICES, help="Default ASR engine")
     init_p.add_argument(
-        "--translator", choices=["llm", "bing", "google"], help="Default translation service"
+        "--translator",
+        choices=["llm", "bing", "google", "deeplx"],
+        help="Default non-LLM service; legacy llm selects enhanced_llm",
+    )
+    init_p.add_argument(
+        "--translation-mode",
+        choices=["non_llm", "single_llm", "enhanced_llm"],
+        help="Default translation workflow",
     )
     init_p.add_argument(
         "--target-language", "--to", dest="target_language", metavar="CODE", help=argparse.SUPPRESS
@@ -1060,6 +1095,7 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
     _set("subtitle.max_word_count_english", getattr(args, "max_english", None))
     _set("subtitle.thread_num", getattr(args, "thread_num", None))
     _set("subtitle.batch_size", getattr(args, "batch_size", None))
+    _set("translate.enhanced_batch_size", getattr(args, "batch_size", None))
 
     # Independent subtitle postprocessing
     if getattr(args, "no_postprocess", False):
@@ -1096,8 +1132,19 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
         _set("postprocess.llm_uncertain_review", False)
 
     # Translate
-    _set("translate.service", getattr(args, "translator", None))
+    translator = getattr(args, "translator", None)
+    if translator is not None:
+        _set("translate.service", translator)
+        _set(
+            "translate.mode",
+            "enhanced_llm" if translator == "llm" else "non_llm",
+        )
+    # An explicit mode is authoritative when both compatibility flags are used.
+    _set("translate.mode", getattr(args, "translation_mode", None))
     _set("translate.target_language", getattr(args, "target_language", None))
+    _set("translate.main_prompt", getattr(args, "prompt", None))
+    _set("translate.review_prompt", getattr(args, "review_prompt", None))
+    _set("translate.glossary_path", getattr(args, "glossary", None))
     if getattr(args, "reflect", False):
         _set("translate.reflect", True)
 

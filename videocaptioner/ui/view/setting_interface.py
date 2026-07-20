@@ -12,7 +12,6 @@ from qfluentwidgets import (
     OptionsSettingCard,
     PrimaryPushSettingCard,
     PushSettingCard,
-    RangeSettingCard,
     ScrollArea,
     SettingCardGroup,
     SwitchSettingCard,
@@ -32,7 +31,6 @@ from videocaptioner.core.entities import (
     LANGUAGES,
     LLMServiceEnum,
     TranscribeModelEnum,
-    TranslatorServiceEnum,
 )
 from videocaptioner.core.llm import check_whisper_connection
 from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
@@ -45,13 +43,15 @@ from videocaptioner.ui.components.EditComboBoxSettingCard import EditComboBoxSet
 from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
 from videocaptioner.ui.components.QwenASRSettingWidget import QwenModelDownloadDialog
 from videocaptioner.ui.components.SpinBoxSettingCard import SpinBoxSettingCard
+from videocaptioner.ui.components.TranslationSettingWidget import TranslationSettingWidget
 
 
 class SettingInterface(ScrollArea):
     """设置界面"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, translation_profile_store=None):
         super().__init__(parent=parent)
+        self._translationProfileStore = translation_profile_store
         self.setWindowTitle(self.tr("设置"))
         self.scrollWidget = QWidget()
         self.expandLayout = ExpandLayout(self.scrollWidget)
@@ -72,11 +72,9 @@ class SettingInterface(ScrollArea):
         """初始化所有设置组"""
         # 转录配置组
         self.transcribeGroup = SettingCardGroup(self.tr("转录配置"), self.scrollWidget)
-        # LLM配置组
-        self.llmGroup = SettingCardGroup(self.tr("LLM配置"), self.scrollWidget)
-        # 翻译服务组
-        self.translate_serviceGroup = SettingCardGroup(
-            self.tr("翻译服务"), self.scrollWidget
+        # 旧通用 LLM 工具仍服务于断句、校正；翻译角色在独立分页中配置。
+        self.llmGroup = SettingCardGroup(
+            self.tr("通用 LLM 工具配置"), self.scrollWidget
         )
         # 翻译与优化组
         self.translateGroup = SettingCardGroup(self.tr("翻译与优化"), self.scrollWidget)
@@ -104,8 +102,11 @@ class SettingInterface(ScrollArea):
         # LLM配置卡片
         self.__createLLMServiceCards()
 
-        # 翻译配置卡片
-        self.__createTranslateServiceCards()
+        # 三种平行翻译方式的独立配置入口
+        self.translationSettingsWidget = TranslationSettingWidget(
+            self.scrollWidget,
+            profile_store=self._translationProfileStore,
+        )
 
         # 翻译与优化配置卡片
         self.subtitleCorrectCard = SwitchSettingCard(
@@ -290,7 +291,7 @@ class SettingInterface(ScrollArea):
             cfg.llm_service,
             FIF.ROBOT,
             self.tr("LLM 提供商"),
-            self.tr("选择大模型提供商，用于字幕断句、优化、翻译"),
+            self.tr("用于字幕断句、字幕校正等通用工具，不决定翻译模式"),
             texts=[service.value for service in cfg.llm_service.validator.options],  # type: ignore
             parent=self.llmGroup,
         )
@@ -665,73 +666,6 @@ class SettingInterface(ScrollArea):
         ]:
             card.setVisible(False)
 
-    def __createTranslateServiceCards(self):
-        """创建翻译服务相关的配置卡片"""
-        # 翻译服务选择卡片
-        self.translatorServiceCard = ComboBoxSettingCard(
-            cfg.translator_service,
-            FIF.ROBOT,
-            self.tr("翻译服务"),
-            self.tr("选择翻译服务"),
-            texts=[
-                service.value
-                for service in cfg.translator_service.validator.options  # type: ignore
-            ],
-            parent=self.translate_serviceGroup,
-        )
-        self.translatorServiceCard.comboBox.setMinimumWidth(150)
-
-        # 反思翻译开关
-        self.needReflectTranslateCard = SwitchSettingCard(
-            FIF.EDIT,
-            self.tr("需要反思翻译"),
-            self.tr("启用反思翻译可以提高翻译质量，但耗费更多时间和token"),
-            cfg.need_reflect_translate,
-            self.translate_serviceGroup,
-        )
-
-        # DeepLx端点配置
-        self.deeplxEndpointCard = LineEditSettingCard(
-            cfg.deeplx_endpoint,
-            FIF.LINK,
-            self.tr("DeepLx 后端"),
-            self.tr("输入 DeepLx 的后端地址(开启deeplx翻译时必填)"),
-            "https://api.deeplx.org/translate",
-            self.translate_serviceGroup,
-        )
-
-        # 批处理大小配置
-        self.batchSizeCard = RangeSettingCard(
-            cfg.batch_size,
-            FIF.ALIGNMENT,
-            self.tr("批处理大小"),
-            self.tr("每批处理字幕的数量，建议为 10 的倍数"),
-            parent=self.translate_serviceGroup,
-        )
-
-        # 线程数配置
-        self.threadNumCard = RangeSettingCard(
-            cfg.thread_num,
-            FIF.SPEED_HIGH,
-            self.tr("线程数"),
-            self.tr(
-                "请求并行处理的数量，模型服务商允许的情况下建议尽可能大，数值越大速度越快"
-            ),
-            parent=self.translate_serviceGroup,
-        )
-
-        # 添加卡片到翻译服务组
-        self.translate_serviceGroup.addSettingCard(self.translatorServiceCard)
-        self.translate_serviceGroup.addSettingCard(self.needReflectTranslateCard)
-        self.translate_serviceGroup.addSettingCard(self.deeplxEndpointCard)
-        self.translate_serviceGroup.addSettingCard(self.batchSizeCard)
-        self.translate_serviceGroup.addSettingCard(self.threadNumCard)
-
-        # 初始化显示状态
-        self.__onTranslatorServiceChanged(
-            self.translatorServiceCard.comboBox.currentText()
-        )
-
     def __initWidget(self):
         self.resize(1000, 800)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
@@ -744,11 +678,6 @@ class SettingInterface(ScrollArea):
         self.scrollWidget.setObjectName("scrollWidget")
         # 初始化转录模型配置卡片的显示状态
         self.__onTranscribeModelChanged(self.transcribeModelCard.comboBox.currentText())
-
-        # 初始化翻译服务配置卡片的显示状态
-        self.__onTranslatorServiceChanged(
-            self.translatorServiceCard.comboBox.currentText()
-        )
 
         self.setStyleSheet(
             """
@@ -804,7 +733,7 @@ class SettingInterface(ScrollArea):
         self.expandLayout.setContentsMargins(36, 10, 36, 0)
         self.expandLayout.addWidget(self.transcribeGroup)
         self.expandLayout.addWidget(self.llmGroup)
-        self.expandLayout.addWidget(self.translate_serviceGroup)
+        self.expandLayout.addWidget(self.translationSettingsWidget)
         self.expandLayout.addWidget(self.translateGroup)
         self.expandLayout.addWidget(self.postprocessGroup)
         self.expandLayout.addWidget(self.subtitleGroup)
@@ -819,11 +748,6 @@ class SettingInterface(ScrollArea):
         # LLM服务切换
         self.llmServiceCard.comboBox.currentTextChanged.connect(
             self.__onLLMServiceChanged
-        )
-
-        # 翻译服务切换
-        self.translatorServiceCard.comboBox.currentTextChanged.connect(
-            self.__onTranslatorServiceChanged
         )
 
         # 转录模型切换
@@ -1081,29 +1005,6 @@ class SettingInterface(ScrollArea):
 
         # 更新布局
         self.llmGroup.adjustSize()
-        self.expandLayout.update()
-
-    def __onTranslatorServiceChanged(self, service):
-        openai_cards = [
-            self.needReflectTranslateCard,
-            self.batchSizeCard,
-        ]
-        deeplx_cards = [self.deeplxEndpointCard]
-
-        all_cards = openai_cards + deeplx_cards
-        for card in all_cards:
-            card.setVisible(False)
-
-        # 根据选择的服务显示相应的配置卡片
-        if service in [TranslatorServiceEnum.DEEPLX.value]:
-            for card in deeplx_cards:
-                card.setVisible(True)
-        elif service in [TranslatorServiceEnum.OPENAI.value]:
-            for card in openai_cards:
-                card.setVisible(True)
-
-        # 更新布局
-        self.translate_serviceGroup.adjustSize()
         self.expandLayout.update()
 
     def __onTranscribeModelChanged(self, model_name):

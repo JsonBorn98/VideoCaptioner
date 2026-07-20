@@ -12,6 +12,14 @@ class TranslatorType(Enum):
     DEEPLX = "deeplx"
 
 
+class TranslationMode(str, Enum):
+    """Top-level subtitle translation workflow selected by the user."""
+
+    NON_LLM = "non_llm"
+    SINGLE_LLM = "single_llm"
+    ENHANCED_LLM = "enhanced_llm"
+
+
 class TargetLanguage(Enum):
     """目标语言枚举"""
 

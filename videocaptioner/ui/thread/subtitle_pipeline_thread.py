@@ -1,10 +1,16 @@
 import datetime
+from dataclasses import replace
 from pathlib import Path
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from videocaptioner.core.entities import (
     FullProcessTask,
+)
+from videocaptioner.core.translate.enhanced.models import (
+    TermConfirmationMode,
+    TranslationAuditMode,
+    TranslationExecutionMode,
 )
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.ui.task_factory import TaskFactory
@@ -33,6 +39,22 @@ class SubtitlePipelineThread(QThread):
         super().__init__()
         self.task = task
         self.has_error = False
+        if task.subtitle_config is None:
+            task.subtitle_config = TaskFactory.create_subtitle_task(
+                task.file_path or "",
+                task.file_path,
+                need_next_task=True,
+                workflow_base_name=task.workflow_base_name,
+                export_policy=task.export_policy,
+                translation_execution_mode=TranslationExecutionMode.BATCH,
+            ).subtitle_config
+        else:
+            task.subtitle_config = replace(
+                task.subtitle_config,
+                translation_execution_mode=TranslationExecutionMode.BATCH,
+                term_confirmation_mode=TermConfirmationMode.AUTOMATIC,
+                translation_audit_mode=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+            )
 
     def run(self):
         try:
@@ -93,8 +115,9 @@ class SubtitlePipelineThread(QThread):
                 workflow_base_name=self.task.workflow_base_name,
                 input_data=transcribe_task.result_data,
                 export_policy=self.task.export_policy,
+                config_snapshot=self.task.subtitle_config,
+                translation_execution_mode=TranslationExecutionMode.BATCH,
             )
-            subtitle_task.subtitle_config = self.task.subtitle_config
             optimization_thread = SubtitleThread(subtitle_task)
             optimization_thread.progress.connect(
                 lambda value, msg: self.progress.emit(int(30 + value * 0.3), msg)

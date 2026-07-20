@@ -183,9 +183,20 @@ def _check_subtitle(config: dict) -> list[Check]:
     checks: list[Check] = []
     optimize = bool(get(config, "subtitle.optimize", True))
     split = bool(get(config, "subtitle.split", True))
+    translate = bool(get(config, "subtitle.translate", False))
     translator = get(config, "translate.service", "bing")
-    needs_llm = optimize or split or translator == "llm"
-    checks.append(Check("subtitle.processing", "ok", f"ai_polish={optimize}, split={split}, translator={translator}"))
+    translation_mode = get(config, "translate.mode", "enhanced_llm")
+    needs_llm = optimize or split or (
+        translate and translation_mode in {"single_llm", "enhanced_llm"}
+    )
+    checks.append(
+        Check(
+            "subtitle.processing",
+            "ok",
+            f"ai_polish={optimize}, split={split}, translate={translate}, "
+            f"translation_mode={translation_mode}, translator={translator}",
+        )
+    )
     if needs_llm and not get(config, "llm.api_key", ""):
         checks.append(Check("llm.api_key", "warn", "LLM API key is missing; AI polish/split/LLM translation will fail", "Run 'videocaptioner config set llm.api_key <key>' or disable AI polish/split"))
     if needs_llm and not get(config, "llm.model", ""):

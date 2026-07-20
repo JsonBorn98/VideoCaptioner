@@ -20,11 +20,23 @@ from videocaptioner.core.entities import (
     TranscribeModelEnum,
     TranscribeTask,
     TranscriptAndSubtitleTask,
+    TranslatorServiceEnum,
+)
+from videocaptioner.core.llm.models import LLMModelProfile
+from videocaptioner.core.llm.profiles import (
+    LLMModelProfileStore,
+    LLMProfileNotFoundError,
 )
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
 from videocaptioner.core.postprocess.profiles import PostprocessProfileStore
 from videocaptioner.core.subtitle import export_subtitle_atomic, save_canonical_srt
+from videocaptioner.core.translate.enhanced.models import (
+    TermConfirmationMode,
+    TranslationAuditMode,
+    TranslationExecutionMode,
+)
+from videocaptioner.core.translate.types import TranslationMode
 from videocaptioner.ui.common.config import cfg
 
 
@@ -36,6 +48,18 @@ def _safe_file_stem_from_source(source: str) -> str:
 
 class TaskFactory:
     """任务工厂类，用于创建各种类型的任务"""
+
+    @staticmethod
+    def _resolve_llm_profile(
+        store: LLMModelProfileStore,
+        profile_id: str,
+    ) -> Optional[LLMModelProfile]:
+        if not profile_id.strip():
+            return None
+        try:
+            return store.get(profile_id.strip())
+        except LLMProfileNotFoundError:
+            return None
 
     @staticmethod
     def _load_style_for_render_mode(style_name: str, render_mode: SubtitleRenderModeEnum):
@@ -272,20 +296,85 @@ class TaskFactory:
         workflow_base_name: Optional[str] = None,
         input_data=None,
         export_policy: Optional[SubtitleExportPolicy] = None,
+        config_snapshot: Optional[SubtitleConfig] = None,
+        profile_store: Optional[LLMModelProfileStore] = None,
+        translation_execution_mode: TranslationExecutionMode = (
+            TranslationExecutionMode.GUI_STANDALONE
+        ),
+        term_confirmation_mode: Optional[TermConfirmationMode] = None,
+        translation_audit_mode: Optional[TranslationAuditMode] = None,
+        imported_glossary_path: Optional[str] = None,
     ) -> SubtitleTask:
         """创建字幕任务"""
         output_name = Path(file_path).stem
         for prefix in ("【原始字幕】", "【下载字幕】", "【初版字幕】", "【后处理字幕】"):
             output_name = output_name.removeprefix(prefix)
         output_name = workflow_base_name or output_name
+        translation_mode = (
+            config_snapshot.translation_mode
+            if config_snapshot is not None
+            else cfg.translation_mode.value
+        )
+        translator_service = (
+            config_snapshot.translator_service
+            if config_snapshot is not None
+            else cfg.translator_service.value
+        )
+        if translation_mode in {TranslationMode.SINGLE_LLM, TranslationMode.ENHANCED_LLM}:
+            translator_service = TranslatorServiceEnum.OPENAI
+        need_translate = (
+            config_snapshot.need_translate
+            if config_snapshot is not None
+            else cfg.need_translate.value
+        )
         translator_suffix = (
-            f"-{cfg.translator_service.value.value}" if cfg.need_translate.value else ""
+            f"-{translator_service.value}" if need_translate and translator_service else ""
         )
         if translator_suffix and not output_name.endswith(translator_suffix):
             output_name += translator_suffix
         output_path = str(Path(file_path).parent / f"【初版字幕】{output_name}.srt")
 
-        # 根据当前选择的LLM服务获取对应的配置
+        if config_snapshot is not None:
+            task = SubtitleTask(
+                queued_at=datetime.datetime.now(),
+                subtitle_path=file_path,
+                video_path=video_path,
+                output_path=output_path,
+                subtitle_config=replace(config_snapshot),
+                need_next_task=need_next_task,
+                input_data=input_data,
+                workflow_base_name=output_name,
+                export_policy=export_policy or TaskFactory.create_subtitle_export_policy(),
+            )
+            if task_id:
+                task.task_id = task_id
+            return task
+
+        # Resolve role bindings into detached, frozen model profile snapshots.
+        main_profile_id = cfg.main_llm_profile_id.value
+        review_profile_id = cfg.review_llm_profile_id.value
+        needs_llm_profiles = translation_mode in {
+            TranslationMode.SINGLE_LLM,
+            TranslationMode.ENHANCED_LLM,
+        }
+        if (
+            needs_llm_profiles
+            and profile_store is None
+            and (main_profile_id.strip() or review_profile_id.strip())
+        ):
+            profile_store = LLMModelProfileStore()
+        main_profile = (
+            TaskFactory._resolve_llm_profile(profile_store, main_profile_id)
+            if needs_llm_profiles and profile_store is not None
+            else None
+        )
+        review_profile = (
+            TaskFactory._resolve_llm_profile(profile_store, review_profile_id)
+            if needs_llm_profiles and profile_store is not None
+            else None
+        )
+
+        # 根据当前选择的LLM服务获取对应的兼容配置
         current_service = cfg.llm_service.value
         if current_service == LLMServiceEnum.OPENAI:
             base_url = cfg.openai_api_base.value
@@ -320,6 +409,30 @@ class TaskFactory:
             api_key = ""
             llm_model = ""
 
+        # Single-model LLM and legacy LLM consumers both use the frozen main
+        # role. Retain the old scalar fields until all callers use profiles.
+        utility_base_url = base_url
+        utility_api_key = api_key
+        utility_llm_model = llm_model
+        if main_profile is not None:
+            base_url = main_profile.base_url
+            api_key = main_profile.api_key
+            llm_model = main_profile.model
+
+        if translation_execution_mode in {
+            TranslationExecutionMode.CLI,
+            TranslationExecutionMode.BATCH,
+        }:
+            effective_term_confirmation = TermConfirmationMode.AUTOMATIC
+            effective_audit_mode = (
+                translation_audit_mode or TranslationAuditMode.AUTO_FIX_OBJECTIVE
+            )
+        else:
+            effective_term_confirmation = (
+                term_confirmation_mode or cfg.term_confirmation_mode.value
+            )
+            effective_audit_mode = translation_audit_mode or cfg.translation_audit_mode.value
+
         reference_width, reference_height = TaskFactory.get_style_reference(
             cfg.subtitle_style_name.value,
             SubtitleRenderModeEnum.ASS_STYLE,
@@ -330,15 +443,30 @@ class TaskFactory:
             base_url=base_url,
             api_key=api_key,
             llm_model=llm_model,
+            utility_llm_base_url=utility_base_url,
+            utility_llm_api_key=utility_api_key,
+            utility_llm_model=utility_llm_model,
             deeplx_endpoint=cfg.deeplx_endpoint.value,
             # 翻译服务
-            translator_service=cfg.translator_service.value,
+            translator_service=translator_service,
             # 字幕处理
             need_reflect=cfg.need_reflect_translate.value,
             need_translate=cfg.need_translate.value,
             need_optimize=cfg.need_optimize.value,
             thread_num=cfg.thread_num.value,
             batch_size=cfg.batch_size.value,
+            translation_mode=translation_mode,
+            main_llm_profile=main_profile,
+            review_llm_profile=review_profile,
+            main_translation_prompt=cfg.main_translation_prompt.value,
+            review_translation_prompt=cfg.review_translation_prompt.value,
+            enhanced_batch_size=cfg.enhanced_batch_size.value,
+            term_context_radius=cfg.term_context_radius.value,
+            boundary_context_radius=3,
+            term_confirmation_mode=effective_term_confirmation,
+            translation_audit_mode=effective_audit_mode,
+            translation_execution_mode=translation_execution_mode,
+            imported_glossary_path=imported_glossary_path,
             # 字幕布局、样式
             subtitle_layout=cfg.subtitle_layout.value,  # Now returns SubtitleLayoutEnum
             subtitle_style=TaskFactory.get_ass_style(cfg.subtitle_style_name.value),
@@ -351,9 +479,8 @@ class TaskFactory:
             # 字幕翻译
             target_language=cfg.target_language.value,
             # 字幕提示
-            custom_prompt_text=cfg.custom_prompt_text.value,
+            custom_prompt_text=cfg.optimization_prompt_text.value,
         )
-
         task = SubtitleTask(
             queued_at=datetime.datetime.now(),
             subtitle_path=file_path,
@@ -553,6 +680,22 @@ class TaskFactory:
 
         workflow_base_name = _safe_file_stem_from_source(file_path)
         export_policy = TaskFactory.create_subtitle_export_policy()
+        if subtitle_config is None:
+            subtitle_config = TaskFactory.create_subtitle_task(
+                file_path,
+                file_path,
+                need_next_task=True,
+                workflow_base_name=workflow_base_name,
+                export_policy=export_policy,
+                translation_execution_mode=TranslationExecutionMode.BATCH,
+            ).subtitle_config
+        if subtitle_config is not None:
+            subtitle_config = replace(
+                subtitle_config,
+                translation_execution_mode=TranslationExecutionMode.BATCH,
+                term_confirmation_mode=TermConfirmationMode.AUTOMATIC,
+                translation_audit_mode=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+            )
         postprocess_task = TaskFactory.create_postprocess_task(
             file_path,
             file_path,

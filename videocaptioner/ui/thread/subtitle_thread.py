@@ -1,6 +1,7 @@
 import os
+import threading
 from pathlib import Path
-from typing import List
+from typing import List, Sequence
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -22,8 +23,20 @@ from videocaptioner.core.llm.context import (
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
 from videocaptioner.core.split.split import SubtitleSplitter
 from videocaptioner.core.subtitle import clone_subtitle_data
+from videocaptioner.core.translate.enhanced import (
+    CancellationToken,
+    EnhancedTranslationConfig,
+    run_enhanced_translation,
+)
+from videocaptioner.core.translate.enhanced.models import (
+    TermCandidate,
+    TermConfirmationMode,
+    TranslationAuditMode,
+    TranslationExecutionMode,
+    TranslationRoleSnapshot,
+)
 from videocaptioner.core.translate.factory import TranslatorFactory
-from videocaptioner.core.translate.types import TranslatorType
+from videocaptioner.core.translate.types import TranslationMode, TranslatorType
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.stage_summary import (
     build_optimize_stage_summary,
@@ -58,13 +71,29 @@ def create_translator_from_config(
 
     return TranslatorFactory.create_translator(
         translator_type=SERVICE_TO_TYPE[translator_service],
-        thread_num=config.thread_num,
+        thread_num=(
+            config.main_llm_profile.max_concurrency
+            if config.main_llm_profile is not None
+            and config.effective_translation_mode()
+            in {TranslationMode.SINGLE_LLM.value, TranslationMode.ENHANCED_LLM.value}
+            else config.thread_num
+        ),
         batch_num=config.batch_size,
         target_language=config.target_language,
         model=config.llm_model or "",
         custom_prompt=custom_prompt,
-        is_reflect=config.need_reflect,
+        is_reflect=(
+            config.need_reflect
+            if config.effective_translation_mode() == TranslationMode.SINGLE_LLM.value
+            else False
+        ),
         update_callback=callback,
+        profile=(
+            config.main_llm_profile
+            if config.effective_translation_mode()
+            in {TranslationMode.SINGLE_LLM.value, TranslationMode.ENHANCED_LLM.value}
+            else None
+        ),
     )
 
 
@@ -74,6 +103,9 @@ class SubtitleThread(QThread):
     update = pyqtSignal(dict)
     update_all = pyqtSignal(dict)
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+    term_confirmation_required = pyqtSignal(object)
+    audit_ready = pyqtSignal(object)
 
     def __init__(self, task: SubtitleTask):
         super().__init__()
@@ -82,6 +114,10 @@ class SubtitleThread(QThread):
         self.finished_subtitle_length = 0
         self.custom_prompt_text = ""
         self.optimizer = None
+        self.translator = None
+        self.cancellation = CancellationToken()
+        self._term_condition = threading.Condition()
+        self._confirmed_terms: Sequence[TermCandidate] | None = None
 
     def set_custom_prompt_text(self, text: str):
         self.custom_prompt_text = text
@@ -91,19 +127,99 @@ class SubtitleThread(QThread):
         config = self.task.subtitle_config
         if not config:
             raise Exception(self.tr("LLM API 未配置, 请检查LLM配置"))
-        if config.base_url and config.api_key and config.llm_model:
+        base_url = config.utility_llm_base_url or config.base_url
+        api_key = config.utility_llm_api_key or config.api_key
+        model = config.utility_llm_model or config.llm_model
+        if base_url and api_key and model:
             success, message = check_llm_connection(
-                config.base_url,
-                config.api_key,
-                config.llm_model,
+                base_url,
+                api_key,
+                model,
             )
             if not success:
                 raise Exception(f"{self.tr('LLM API 测试失败: ')}{message or ''}")
-            os.environ["OPENAI_BASE_URL"] = config.base_url
-            os.environ["OPENAI_API_KEY"] = config.api_key
+            os.environ["OPENAI_BASE_URL"] = base_url
+            os.environ["OPENAI_API_KEY"] = api_key
             return config
-        else:
-            raise Exception(self.tr("LLM API 未配置, 请检查LLM配置"))
+        raise Exception(self.tr("LLM API 未配置, 请检查LLM配置"))
+
+    @staticmethod
+    def _enum(value, enum_type):
+        return value if isinstance(value, enum_type) else enum_type(str(value))
+
+    def submit_term_confirmation(self, candidates: Sequence[TermCandidate]) -> None:
+        """Resume a manual enhanced task with the user's current selections."""
+
+        with self._term_condition:
+            self._confirmed_terms = tuple(candidates)
+            self._term_condition.notify_all()
+
+    def _confirm_terms(self, candidates: tuple[TermCandidate, ...]) -> Sequence[TermCandidate]:
+        with self._term_condition:
+            self._confirmed_terms = None
+            self.term_confirmation_required.emit(candidates)
+            while self._confirmed_terms is None and not self.cancellation.cancelled:
+                self._term_condition.wait(timeout=0.2)
+            if self.cancellation.cancelled:
+                raise InterruptedError("term confirmation cancelled")
+            assert self._confirmed_terms is not None
+            return self._confirmed_terms
+
+    def _run_enhanced_translation(
+        self, asr_data: ASRData, subtitle_config: SubtitleConfig
+    ) -> ASRData:
+        if subtitle_config.main_llm_profile is None or subtitle_config.review_llm_profile is None:
+            missing = ", ".join(subtitle_config.missing_translation_roles())
+            raise ValueError(f"增强型 LLM 翻译缺少模型角色: {missing}")
+        if subtitle_config.target_language is None:
+            raise ValueError("目标语言未配置")
+        config = EnhancedTranslationConfig(
+            main_role=TranslationRoleSnapshot(
+                "main",
+                subtitle_config.main_llm_profile,
+                subtitle_config.main_translation_prompt,
+            ),
+            review_role=TranslationRoleSnapshot(
+                "review",
+                subtitle_config.review_llm_profile,
+                subtitle_config.review_translation_prompt,
+            ),
+            source_language="auto",
+            target_language=subtitle_config.target_language.value,
+            batch_size=subtitle_config.enhanced_batch_size,
+            term_context_radius=subtitle_config.term_context_radius,
+            boundary_context_radius=subtitle_config.boundary_context_radius,
+            term_confirmation=self._enum(
+                subtitle_config.term_confirmation_mode, TermConfirmationMode
+            ),
+            audit_mode=self._enum(
+                subtitle_config.translation_audit_mode, TranslationAuditMode
+            ),
+            execution_mode=self._enum(
+                subtitle_config.translation_execution_mode, TranslationExecutionMode
+            ),
+        )
+        output_path = Path(self.task.output_path or self.task.subtitle_path)
+        run = run_enhanced_translation(
+            asr_data,
+            config,
+            output_dir=output_path.parent,
+            base_name=self.task.workflow_base_name or output_path.stem,
+            imported_glossary_path=subtitle_config.imported_glossary_path,
+            cancellation=self.cancellation,
+            progress=lambda value, message: self.progress.emit(value, self.tr(message)),
+            confirm_terms=(
+                self._confirm_terms
+                if config.term_confirmation is TermConfirmationMode.MANUAL
+                else None
+            ),
+        )
+        self.task.glossary_path = str(run.artifacts.glossary_path)
+        self.task.translation_audit_report_path = str(run.artifacts.audit_report_path)
+        self.task.translation_audit_report = run.result.audit_report
+        if config.execution_mode is TranslationExecutionMode.GUI_STANDALONE:
+            self.audit_ready.emit(run.result.audit_report)
+        return run.subtitle_data
 
     def run(self):
         # 设置任务上下文
@@ -141,7 +257,7 @@ class SubtitleThread(QThread):
                 self.update_all.emit(asr_data.to_json())
 
             # 验证 LLM 配置
-            if self.need_llm(subtitle_config, asr_data):
+            if self.need_legacy_llm(subtitle_config, asr_data):
                 self.progress.emit(2, self.tr("开始验证 LLM 配置..."))
                 subtitle_config = self._setup_llm_config()
 
@@ -156,7 +272,7 @@ class SubtitleThread(QThread):
                 logger.info("正在%s", "LLM字幕断句" if use_llm_split else "快速合并字幕")
                 splitter = SubtitleSplitter(
                     thread_num=subtitle_config.thread_num,
-                    model=subtitle_config.llm_model,
+                    model=subtitle_config.utility_llm_model or subtitle_config.llm_model,
                     max_word_count_cjk=subtitle_config.max_word_count_cjk,
                     max_word_count_english=subtitle_config.max_word_count_english,
                     use_llm=use_llm_split,
@@ -182,7 +298,7 @@ class SubtitleThread(QThread):
 
             # 3. 优化字幕
             context_info = f'The subtitles below are from a file named "{task_file}". Use this context to improve accuracy if needed.\n'
-            custom_prompt = context_info + (subtitle_config.custom_prompt_text or "") + "\n"
+            optimization_prompt = context_info + (subtitle_config.custom_prompt_text or "") + "\n"
             self.subtitle_length = len(asr_data.segments)
 
             if subtitle_config.need_optimize:
@@ -190,13 +306,14 @@ class SubtitleThread(QThread):
                 self.progress.emit(0, self.tr("优化字幕..."))
                 logger.info("正在优化字幕...")
                 self.finished_subtitle_length = 0
-                if not subtitle_config.llm_model:
+                utility_model = subtitle_config.utility_llm_model or subtitle_config.llm_model
+                if not utility_model:
                     raise Exception(self.tr("LLM 模型未配置"))
                 optimizer = SubtitleOptimizer(
                     thread_num=subtitle_config.thread_num,
                     batch_num=subtitle_config.batch_size,
-                    model=subtitle_config.llm_model,
-                    custom_prompt=custom_prompt or "",
+                    model=utility_model,
+                    custom_prompt=optimization_prompt or "",
                     update_callback=self.callback,
                 )
                 asr_data = optimizer.optimize_subtitle(asr_data)
@@ -219,16 +336,28 @@ class SubtitleThread(QThread):
                 if not subtitle_config.target_language:
                     raise Exception(self.tr("目标语言未配置"))
 
-                translator = create_translator_from_config(
-                    subtitle_config, custom_prompt, self.callback
-                )
-
-                asr_data = translator.translate_subtitle(asr_data)
+                if (
+                    subtitle_config.effective_translation_mode()
+                    == TranslationMode.ENHANCED_LLM.value
+                ):
+                    asr_data = self._run_enhanced_translation(asr_data, subtitle_config)
+                    translator = None
+                else:
+                    main_prompt = context_info + subtitle_config.main_translation_prompt + "\n"
+                    translator = create_translator_from_config(
+                        subtitle_config, main_prompt, self.callback
+                    )
+                    self.translator = translator
+                    try:
+                        asr_data = translator.translate_subtitle(asr_data)
+                    finally:
+                        translator.stop()
+                        self.translator = None
                 self.update_all.emit(asr_data.to_json())
                 publish_stage_summary(
                     build_translate_stage_summary(
                         len(asr_data.segments),
-                        failed_count=translator.failed_count,
+                        failed_count=translator.failed_count if translator else 0,
                     )
                 )
 
@@ -252,6 +381,10 @@ class SubtitleThread(QThread):
             logger.info(completed_message)
             self.finished.emit(self.task.video_path, self.task.output_path)
 
+        except InterruptedError:
+            logger.info("字幕处理已取消")
+            self.cancelled.emit()
+            self.progress.emit(100, self.tr("已取消"))
         except Exception as e:
             logger.exception(f"字幕处理失败: {str(e)}")
             self.error.emit(str(e))
@@ -259,20 +392,21 @@ class SubtitleThread(QThread):
         finally:
             clear_task_context()
 
-    def need_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
+    def need_legacy_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
         return (
             subtitle_config.need_optimize
             or (subtitle_config.need_split and asr_data.is_word_timestamp())
             or (
                 subtitle_config.need_translate
-                and subtitle_config.translator_service
-                not in [
-                    TranslatorServiceEnum.DEEPLX,
-                    TranslatorServiceEnum.BING,
-                    TranslatorServiceEnum.GOOGLE,
-                ]
+                and subtitle_config.effective_translation_mode()
+                == TranslationMode.SINGLE_LLM.value
+                and subtitle_config.main_llm_profile is None
             )
         )
+
+    # Backward-compatible public helper retained for existing callers/tests.
+    def need_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
+        return self.need_legacy_llm(subtitle_config, asr_data)
 
     def callback(self, result: List[SubtitleProcessData]):
         self.finished_subtitle_length += len(result)
@@ -291,6 +425,10 @@ class SubtitleThread(QThread):
     def stop(self):
         """停止所有处理"""
         try:
+            self.cancellation.cancel()
+            self.requestInterruption()
+            with self._term_condition:
+                self._term_condition.notify_all()
             # 先停止优化器
             if hasattr(self, "splitter") and self.splitter:
                 try:
@@ -304,11 +442,15 @@ class SubtitleThread(QThread):
                 except Exception as e:
                     logger.error(f"停止优化器时出错：{str(e)}")
 
-            # 终止线程
-            self.terminate()
+            if self.translator is not None:
+                try:
+                    self.translator.stop()
+                except Exception as e:
+                    logger.error(f"停止翻译器时出错：{str(e)}")
+
             # 等待最多3秒
             if not self.wait(3000):
-                logger.warning("线程未能在3秒内正常停止")
+                logger.warning("线程仍有在途请求，将在请求自然结束后丢弃结果")
 
             # 发送进度信号
             self.progress.emit(100, self.tr("已终止"))
@@ -356,16 +498,23 @@ class RetranslateThread(QThread):
 
             # 设置 LLM 环境变量（LLM 翻译需要）
             if config.translator_service == TranslatorServiceEnum.OPENAI:
-                if not (config.base_url and config.api_key and config.llm_model):
+                if config.main_llm_profile is not None:
+                    pass
+                elif not (config.base_url and config.api_key and config.llm_model):
                     raise Exception("LLM API 未配置，请检查 LLM 配置")
-                os.environ["OPENAI_BASE_URL"] = config.base_url
-                os.environ["OPENAI_API_KEY"] = config.api_key
+                else:
+                    os.environ["OPENAI_BASE_URL"] = config.base_url
+                    os.environ["OPENAI_API_KEY"] = config.api_key
 
             # 构建仅含选中行的 ASRData
             asr_data = ASRData.from_json(self.selected_data)
 
             # 创建翻译器并翻译
-            translator = create_translator_from_config(config, callback=self._callback)
+            translator = create_translator_from_config(
+                config,
+                custom_prompt=config.main_translation_prompt,
+                callback=self._callback,
+            )
             asr_data = translator.translate_subtitle(asr_data)
 
             # 构建 {原始行号: translated_text} 映射

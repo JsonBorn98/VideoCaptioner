@@ -80,6 +80,8 @@ DEFAULTS: Dict[str, Any] = {
         "api_key": "",
         "api_base": "https://api.openai.com/v1",
         "model": "gpt-4o-mini",
+        "work_context_tokens": 65536,
+        "max_concurrency": 4,
     },
     "whisper_api": {
         "api_key": "",
@@ -129,6 +131,7 @@ DEFAULTS: Dict[str, Any] = {
         "max_word_count_english": 12,
         "thread_num": 4,
         "batch_size": 20,
+        "optimization_prompt": "",
     },
     "postprocess": {
         # Complete workflows run the dedicated stage by default. The selected
@@ -138,10 +141,17 @@ DEFAULTS: Dict[str, Any] = {
         "media": "",
     },
     "translate": {
+        "mode": "enhanced_llm",
         "service": "bing",
         "target_language": "zh-Hans",
         "reflect": False,
         "deeplx_endpoint": "",
+        "main_prompt": "",
+        "review_prompt": "",
+        "enhanced_batch_size": 10,
+        "term_context_radius": 10,
+        "boundary_context_radius": 3,
+        "glossary_path": "",
     },
     "synthesize": {
         "subtitle_mode": "soft",
@@ -255,6 +265,14 @@ def build_config(
     config = deepcopy(DEFAULTS)
     # Layer 1: config file
     file_config = load_config_file(config_path)
+    # Configurations written before the three-mode CLI used ``service`` as the
+    # workflow selector.  Classify those files before merging defaults so an
+    # existing Bing/Google/DeepLX user is not silently moved to an LLM mode.
+    translate_config = file_config.get("translate")
+    if isinstance(translate_config, dict) and "mode" not in translate_config:
+        translate_config["mode"] = (
+            "enhanced_llm" if translate_config.get("service") == "llm" else "non_llm"
+        )
     config = _deep_merge(config, file_config)
     # Layer 2: environment variables
     env_config = load_env_overrides()
@@ -268,6 +286,32 @@ def build_config(
 def get(config: dict, key: str, default: Any = None) -> Any:
     """Convenience accessor for dotted keys."""
     return _get_nested(config, key, default)
+
+
+def build_legacy_llm_profile(config: dict):
+    """Build an immutable model profile from the CLI's legacy ``[llm]`` table.
+
+    The CLI intentionally keeps accepting the established flat configuration.
+    Both enhanced roles receive snapshots of this profile; they still use
+    separate role prompts and independent calls.
+    """
+    from videocaptioner.core.llm import (
+        LLMModelProfile,
+        LLMTransport,
+        ProviderDialect,
+    )
+
+    return LLMModelProfile(
+        profile_id="cli-legacy",
+        name="CLI legacy model",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url=str(get(config, "llm.api_base", "https://api.openai.com/v1")),
+        api_key=str(get(config, "llm.api_key", "")),
+        model=str(get(config, "llm.model", "")),
+        work_context_tokens=int(get(config, "llm.work_context_tokens", 65536)),
+        max_concurrency=int(get(config, "llm.max_concurrency", 4)),
+    )
 
 
 def ensure_config_dir() -> Path:

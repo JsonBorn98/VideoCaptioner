@@ -35,6 +35,24 @@ from videocaptioner.config import LLM_LOG_FILE, LOG_PATH
 PAGE_SIZE = 50
 
 
+def _normalized_log_usage(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Read both provider-neutral gateway logs and legacy OpenAI logs."""
+
+    normalized = entry.get("usage")
+    if isinstance(normalized, dict):
+        return normalized
+    legacy = entry.get("response", {}).get("usage", {})
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def _usage_number(usage: Dict[str, Any], *names: str) -> int:
+    for name in names:
+        value = usage.get(name)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return 0
+
+
 class LogDetailDialog(MessageBoxBase):
     """日志详情对话框"""
 
@@ -49,13 +67,17 @@ class LogDetailDialog(MessageBoxBase):
 
         # 提取信息
         time_str = self.log_entry.get("time", "")
-        model = self.log_entry.get("request", {}).get("model", "未知")
+        model = self.log_entry.get("request", {}).get("model") or self.log_entry.get(
+            "profile", {}
+        ).get("model", "未知")
         duration = self.log_entry.get("duration_ms", 0) / 1000
         stage = self.log_entry.get("stage", "") or "-"
+        role = self.log_entry.get("role", "") or "-"
+        attempt = self.log_entry.get("attempt")
 
-        usage = self.log_entry.get("response", {}).get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
+        usage = _normalized_log_usage(self.log_entry)
+        prompt_tokens = _usage_number(usage, "input_tokens", "prompt_tokens")
+        completion_tokens = _usage_number(usage, "output_tokens", "completion_tokens")
 
         # 顶部信息栏
         info_row = QHBoxLayout()
@@ -66,6 +88,8 @@ class LogDetailDialog(MessageBoxBase):
         items = [
             time_str,
             stage,
+            role,
+            f"attempt {attempt}" if attempt is not None else "",
             model,
             f"{duration:.1f}s",
             f"input token: {prompt_tokens}",
@@ -395,7 +419,9 @@ class LLMLogsInterface(QWidget):
             self.table.setItem(row, 3, self._create_item(stage))
 
             # 模型
-            model = log.get("request", {}).get("model", "未知")
+            model = log.get("request", {}).get("model") or log.get("profile", {}).get(
+                "model", "未知"
+            )
             self.table.setItem(row, 4, self._create_item(model))
 
             # 耗时
@@ -403,10 +429,12 @@ class LLMLogsInterface(QWidget):
             self.table.setItem(row, 5, self._create_item(f"{duration:.1f}s"))
 
             # 总 Tokens
-            usage = log.get("response", {}).get("usage") or {}
-            total_tokens = usage.get("total_tokens", 0)
+            usage = _normalized_log_usage(log)
+            total_tokens = _usage_number(usage, "total_tokens")
             if not total_tokens:
-                total_tokens = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+                total_tokens = _usage_number(
+                    usage, "input_tokens", "prompt_tokens"
+                ) + _usage_number(usage, "output_tokens", "completion_tokens")
             self.table.setItem(row, 6, self._create_item(str(total_tokens)))
 
         # 更新分页和统计

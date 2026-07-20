@@ -25,7 +25,11 @@ def run(args: Namespace, config: dict) -> int:
         no_synthesize = True
 
     # If user specified --translator or --target-language, enable translation
-    if getattr(args, "translator", None) or getattr(args, "target_language", None):
+    if (
+        getattr(args, "translator", None)
+        or getattr(args, "translation_mode", None)
+        or getattr(args, "target_language", None)
+    ):
         no_translate = False
 
     run_subtitle_stage = not no_optimize or not no_translate or not no_split
@@ -145,12 +149,15 @@ def run(args: Namespace, config: dict) -> int:
             api_base=getattr(args, "api_base", None),
             model=getattr(args, "model", None),
             translator=getattr(args, "translator", None),
+            translation_mode=getattr(args, "translation_mode", None),
             target_language=getattr(args, "target_language", None),
             reflect=getattr(args, "reflect", False),
             max_cjk=None,
             max_english=None,
             prompt=getattr(args, "prompt", None),
             prompt_file=getattr(args, "prompt_file", None),
+            review_prompt=getattr(args, "review_prompt", None),
+            glossary=getattr(args, "glossary", None),
             thread_num=getattr(args, "thread_num", None),
             batch_size=getattr(args, "batch_size", None),
             layout=getattr(args, "layout", None),

@@ -1,10 +1,59 @@
-"""LLM 连接测试工具"""
+"""Provider-neutral LLM connection and reference capability probes."""
 
 from typing import Literal, Optional
 
 import openai
 
 from videocaptioner.core.llm.client import normalize_base_url
+
+from .gateway import LLMGateway
+from .models import (
+    LLMCallError,
+    LLMMessage,
+    LLMModelProfile,
+    LLMRequest,
+    LLMTransport,
+    ProviderDialect,
+)
+
+
+def check_model_profile_connection(
+    profile: LLMModelProfile,
+    *,
+    gateway: Optional[LLMGateway] = None,
+) -> tuple[Literal[True], str] | tuple[Literal[False], str]:
+    """Test any supported profile with the same adapter used by real tasks.
+
+    This deliberately does not claim to discover the provider's technical
+    context window. A successful small request proves only that the selected
+    transport, credentials and model can complete a request.
+    """
+
+    owns_gateway = gateway is None
+    runtime = gateway or LLMGateway()
+    try:
+        result = runtime.complete(
+            profile,
+            LLMRequest(
+                messages=(
+                    LLMMessage("system", "Return only OK."),
+                    LLMMessage("user", "OK"),
+                ),
+                temperature=0,
+                max_output_tokens=8,
+                cacheable_system_prefix=False,
+                metadata={"stage": "connection_probe", "role": "utility"},
+            ),
+            max_attempts=1,
+        )
+        return True, result.text
+    except LLMCallError as exc:
+        return False, f"{exc.category.value}: {exc}"
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        if owns_gateway:
+            runtime.close()
 
 
 def check_llm_connection(
@@ -22,33 +71,16 @@ def check_llm_connection(
     返回:
         (是否成功, Error output或AI助手的回复)
     """
-    try:
-        # 创建OpenAI客户端并发送请求到API
-        base_url = normalize_base_url(base_url)
-        api_key = api_key.strip()
-        response = openai.OpenAI(
-            base_url=base_url, api_key=api_key, timeout=60
-        ).chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": 'Just respond with "Hello"!'},
-            ],
-            timeout=30,
-        )
-        return True, response.choices[0].message.content
-    except openai.APIConnectionError:
-        return False, "API Connection Error. Please check your network or VPN."
-    except openai.RateLimitError as e:
-        return False, "Rate Limit Error: " + str(e)
-    except openai.AuthenticationError:
-        return False, "Authentication Error. Please check your API key."
-    except openai.NotFoundError:
-        return False, "URL Not Found Error. Please check your Base URL."
-    except openai.OpenAIError as e:
-        return False, "OpenAI Error: " + str(e)
-    except Exception as e:
-        return False, str(e)
+    profile = LLMModelProfile(
+        profile_id="legacy-connection-check",
+        name="Legacy connection check",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url=normalize_base_url(base_url),
+        api_key=api_key.strip(),
+        model=model,
+    )
+    return check_model_profile_connection(profile)
 
 
 def get_available_models(base_url: str, api_key: str) -> list[str]:

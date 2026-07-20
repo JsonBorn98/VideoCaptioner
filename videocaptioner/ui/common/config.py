@@ -35,8 +35,17 @@ from videocaptioner.core.entities import (
 )
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.speed import available_speed_presets, get_speed_policy
-from videocaptioner.core.translate.types import TargetLanguage
+from videocaptioner.core.translate.enhanced.defaults import (
+    DEFAULT_MAIN_TRANSLATION_PROMPT,
+    DEFAULT_REVIEW_TRANSLATION_PROMPT,
+)
+from videocaptioner.core.translate.enhanced.models import (
+    TermConfirmationMode,
+    TranslationAuditMode,
+)
+from videocaptioner.core.translate.types import TargetLanguage, TranslationMode
 from videocaptioner.core.utils.platform_utils import get_available_transcribe_models
+from videocaptioner.ui.common.translation_migration import migrate_legacy_translation_settings
 
 _BALANCED_SPEED_POLICY = get_speed_policy()
 _POSTPROCESS_DEFAULTS = PostprocessConfig()
@@ -155,11 +164,49 @@ class Config(QConfig):
         OptionsValidator(TranslatorServiceEnum),
         EnumSerializer(TranslatorServiceEnum),
     )
+    translation_mode = OptionsConfigItem(
+        "Translate",
+        "TranslationMode",
+        TranslationMode.ENHANCED_LLM,
+        OptionsValidator(TranslationMode),
+        EnumSerializer(TranslationMode),
+    )
+    main_llm_profile_id = ConfigItem("Translate", "MainLLMProfileId", "")
+    review_llm_profile_id = ConfigItem("Translate", "ReviewLLMProfileId", "")
+    main_translation_prompt = ConfigItem(
+        "Translate", "MainTranslationPrompt", DEFAULT_MAIN_TRANSLATION_PROMPT
+    )
+    review_translation_prompt = ConfigItem(
+        "Translate", "ReviewTranslationPrompt", DEFAULT_REVIEW_TRANSLATION_PROMPT
+    )
+    translation_migration_version = ConfigItem(
+        "Translate", "TranslationMigrationVersion", 0
+    )
     need_reflect_translate = ConfigItem(
         "Translate", "NeedReflectTranslate", False, BoolValidator()
     )
     deeplx_endpoint = ConfigItem("Translate", "DeeplxEndpoint", "")
     batch_size = RangeConfigItem("Translate", "BatchSize", 10, RangeValidator(5, 50))
+    enhanced_batch_size = RangeConfigItem(
+        "Translate", "EnhancedBatchSize", 10, RangeValidator(1, 50)
+    )
+    term_context_radius = RangeConfigItem(
+        "Translate", "TermContextRadius", 10, RangeValidator(0, 50)
+    )
+    term_confirmation_mode = OptionsConfigItem(
+        "Translate",
+        "TermConfirmationMode",
+        TermConfirmationMode.AUTOMATIC,
+        OptionsValidator(TermConfirmationMode),
+        EnumSerializer(TermConfirmationMode),
+    )
+    translation_audit_mode = OptionsConfigItem(
+        "Translate",
+        "TranslationAuditMode",
+        TranslationAuditMode.REPORT_ONLY,
+        OptionsValidator(TranslationAuditMode),
+        EnumSerializer(TranslationAuditMode),
+    )
     thread_num = RangeConfigItem("Translate", "ThreadNum", 10, RangeValidator(1, 50))
 
     # ------------------- 转录配置 -------------------
@@ -312,6 +359,7 @@ class Config(QConfig):
         "Subtitle", "MaxWordCountEnglish", 20, RangeValidator(8, 100)
     )
     custom_prompt_text = ConfigItem("Subtitle", "CustomPromptText", "")
+    optimization_prompt_text = ConfigItem("Subtitle", "OptimizationPromptText", "")
 
     # 规则型后处理 / 审计
     # keep in sync with core/postprocess/config.py (PostprocessConfig)
@@ -675,4 +723,5 @@ class Config(QConfig):
 cfg = Config()
 cfg.themeMode.value = Theme.DARK
 cfg.themeColor.value = QColor("#ff28f08b")
+migrate_legacy_translation_settings(SETTINGS_PATH)
 qconfig.load(SETTINGS_PATH, cfg)

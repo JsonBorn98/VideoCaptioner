@@ -138,6 +138,8 @@ try:
     assert cfg.ffmpeg_source.value == 'default'
     print('OK')
 finally:
+    if 'w' in locals():
+        w.close()
     cfg.set(cfg.ffmpeg_source, saved)
 """
     )
@@ -440,7 +442,6 @@ w.close()
 print('OK')
 """
     )
-
 
 
 

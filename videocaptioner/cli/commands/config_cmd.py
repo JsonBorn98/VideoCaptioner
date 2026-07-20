@@ -132,7 +132,12 @@ def _interactive_init(args: Namespace, config_data: dict) -> int:
         _set_nested(config_data, "transcribe.asr", _prompt("ASR engine [bijian]: ", "bijian"))
         _set_nested(config_data, "subtitle.optimize", _yes_no("Enable AI subtitle polish? It fixes obvious ASR errors and punctuation. [Y/n]: ", True))
         _set_nested(config_data, "subtitle.split", _yes_no("Enable subtitle re-segmentation? [Y/n]: ", True))
-        translator = _prompt("Translator [bing] (bing/google/llm): ", "bing")
+        translation_mode = _prompt(
+            "Translation mode [enhanced_llm] (non_llm/single_llm/enhanced_llm): ",
+            "enhanced_llm",
+        )
+        _set_nested(config_data, "translate.mode", translation_mode)
+        translator = _prompt("Non-LLM translator [bing] (bing/google/deeplx): ", "bing")
         _set_nested(config_data, "translate.service", translator)
         print()
         print("LLM config is used for AI subtitle polish, LLM translation, and --adapt-length.")
@@ -174,6 +179,7 @@ def _build_onboarding_config(args: Namespace) -> dict:
         "llm_model": "llm.model",
         "asr": "transcribe.asr",
         "translator": "translate.service",
+        "translation_mode": "translate.mode",
         "tts_api_key": "dubbing.api_key",
         "dub_preset": "dubbing.preset",
         "voice": "dubbing.voice",
@@ -184,6 +190,13 @@ def _build_onboarding_config(args: Namespace) -> dict:
         value = getattr(args, attr, None)
         if value is not None:
             _set_nested(config_data, key, value)
+    translator = getattr(args, "translator", None)
+    if translator is not None and getattr(args, "translation_mode", None) is None:
+        _set_nested(
+            config_data,
+            "translate.mode",
+            "enhanced_llm" if translator == "llm" else "non_llm",
+        )
     if getattr(args, "no_optimize", False):
         _set_nested(config_data, "subtitle.optimize", False)
     if getattr(args, "no_split", False):
@@ -204,7 +217,7 @@ def _render_onboarding_template(config_data: dict) -> str:
     f.write("# [whisper_api] is only needed when transcribe.asr = \"whisper-api\".\n")
     f.write("# [transcribe] controls speech-to-text. bijian/jianying need no key; whisper-cpp needs a local binary/model.\n")
     f.write("# transcribe.mimo_asr is used by transcribe.asr = \"mimo-asr\"; transcribe.qwen is used by \"qwen-local\" and MiMo alignment.\n")
-    f.write("# [subtitle] split and AI polish use LLM; [translate] can use bing/google/llm.\n")
+    f.write("# [subtitle] split and AI polish use LLM; [translate] has three parallel modes.\n")
     f.write("# [synthesize] controls subtitle embedding/burning.\n")
     f.write("# [dubbing] preset selects provider/model/voice defaults; edge-* presets need no API key but require network access.\n")
     f.write("# timing controls speech fitting; audio_mode controls original audio.\n\n")
@@ -221,6 +234,8 @@ def _user_facing_config(config_data: dict) -> dict:
             "api_key": config_data["llm"]["api_key"],
             "api_base": config_data["llm"]["api_base"],
             "model": config_data["llm"]["model"],
+            "work_context_tokens": config_data["llm"]["work_context_tokens"],
+            "max_concurrency": config_data["llm"]["max_concurrency"],
         },
         "whisper_api": {
             "api_key": config_data["whisper_api"]["api_key"],
@@ -240,8 +255,12 @@ def _user_facing_config(config_data: dict) -> dict:
             "batch_size": config_data["subtitle"]["batch_size"],
         },
         "translate": {
+            "mode": config_data["translate"]["mode"],
             "service": config_data["translate"]["service"],
             "reflect": config_data["translate"]["reflect"],
+            "enhanced_batch_size": config_data["translate"]["enhanced_batch_size"],
+            "term_context_radius": config_data["translate"]["term_context_radius"],
+            "boundary_context_radius": config_data["translate"]["boundary_context_radius"],
         },
         "synthesize": {
             "subtitle_mode": config_data["synthesize"]["subtitle_mode"],

@@ -1,13 +1,17 @@
 import json
 import threading
 import time
-from datetime import datetime
-from typing import Any, Dict
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, Mapping, Optional
 
 import httpx
 
 from videocaptioner.config import LOG_PATH
 from videocaptioner.core.llm.context import get_task_context
+
+from .models import LLMCallError, LLMModelProfile, LLMRequest, LLMResult
 
 LLM_LOG_FILE = LOG_PATH / "llm_requests.jsonl"
 MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
@@ -15,6 +19,20 @@ MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 
 _log_lock = threading.Lock()
 _pending_requests: Dict[int, Dict[str, Any]] = {}  # 暂存请求信息，等待响应后合并
+
+
+@dataclass(frozen=True)
+class LLMRequestLogHandle:
+    """Immutable correlation data for one provider attempt.
+
+    The handle travels with the exact call instead of looking up a global
+    "first completed" request, so concurrent provider calls cannot be paired
+    with another request's response.
+    """
+
+    request_id: str
+    started_at: float
+    entry: Mapping[str, Any]
 
 
 # ==================== 日志写入 ====================
@@ -45,6 +63,105 @@ def _write_log(entry: Dict[str, Any]) -> None:
         pass
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump())
+        except Exception:
+            return repr(value)
+    return repr(value)
+
+
+def begin_gateway_request(
+    profile: LLMModelProfile,
+    request: LLMRequest,
+    *,
+    attempt: int,
+) -> LLMRequestLogHandle:
+    """Create correlation data for one gateway attempt without global state."""
+
+    ctx = get_task_context()
+    entry = {
+        "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "request_id": uuid.uuid4().hex,
+        "task_id": ctx.task_id if ctx else "",
+        "file_name": ctx.file_name if ctx else "",
+        "stage": request.metadata.get("stage", ctx.stage if ctx else ""),
+        "role": request.metadata.get("role", ""),
+        "attempt": attempt,
+        "profile": {
+            "id": profile.profile_id,
+            "name": profile.name,
+            "transport": profile.transport.value,
+            "dialect": profile.dialect.value,
+            "base_url": profile.base_url,
+            "model": profile.model,
+        },
+        "request": {
+            "messages": [
+                {"role": message.role, "content": message.content}
+                for message in request.messages
+            ],
+            "temperature": request.temperature,
+            "max_output_tokens": request.max_output_tokens,
+            "response_schema": _json_safe(request.response_schema),
+            "cacheable_system_prefix": request.cacheable_system_prefix,
+            "metadata": dict(request.metadata),
+        },
+    }
+    return LLMRequestLogHandle(
+        request_id=str(entry["request_id"]),
+        started_at=time.perf_counter(),
+        entry=entry,
+    )
+
+
+def finish_gateway_request(
+    handle: LLMRequestLogHandle,
+    *,
+    result: Optional[LLMResult] = None,
+    error: Optional[BaseException] = None,
+) -> None:
+    """Write one completed gateway attempt with normalized usage fields."""
+
+    entry = dict(handle.entry)
+    entry["duration_ms"] = max(
+        0, int((time.perf_counter() - handle.started_at) * 1000)
+    )
+    if error is None and result is not None:
+        entry["status"] = "success"
+        entry["usage"] = {
+            "input_tokens": result.usage.input_tokens,
+            "output_tokens": result.usage.output_tokens,
+            "cache_read_tokens": result.usage.cache_read_tokens,
+            "cache_write_tokens": result.usage.cache_write_tokens,
+            "reasoning_tokens": result.usage.reasoning_tokens,
+        }
+        entry["response"] = _json_safe(result.raw)
+    else:
+        entry["status"] = "error"
+        error_entry: dict[str, Any] = {
+            "type": type(error).__name__ if error is not None else "UnknownError",
+            "message": str(error or "unknown provider error"),
+        }
+        if isinstance(error, LLMCallError):
+            error_entry.update(
+                {
+                    "category": error.category.value,
+                    "retryable": error.retryable,
+                    "status_code": error.status_code,
+                }
+            )
+        entry["error"] = error_entry
+    _write_log(entry)
+
+
 # ==================== HTTPX Hooks ====================
 
 
@@ -58,23 +175,24 @@ def _on_request(request: httpx.Request) -> None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         request_body = {"raw": request.content.decode("utf-8", errors="replace")}
 
-    _pending_requests[id(request)] = {
-        "start_time": time.time(),
-        "url": str(request.url),
-        "request": request_body,
-    }
+    with _log_lock:
+        _pending_requests[id(request)] = {
+            "start_time": time.time(),
+            "url": str(request.url),
+            "request": request_body,
+        }
 
 
 def _on_response(response: httpx.Response) -> None:
     """响应接收后: 记录状态码和耗时"""
     request = response.request
-    pending = _pending_requests.get(id(request))
-    if not pending:
-        return
-
-    pending["status"] = response.status_code
-    pending["duration_ms"] = int((time.time() - pending["start_time"]) * 1000)
-    pending["completed"] = True  # 标记响应已完成
+    with _log_lock:
+        pending = _pending_requests.get(id(request))
+        if not pending:
+            return
+        pending["status"] = response.status_code
+        pending["duration_ms"] = int((time.time() - pending["start_time"]) * 1000)
+        pending["completed"] = True  # 标记响应已完成
 
 
 # ==================== 公开 API ====================

@@ -499,10 +499,11 @@ class BatchProcessInterface(QWidget):
 
     def cancel_task(self, file_path: str):
         self.batch_thread.stop_task(file_path)
-        # 从表格中移除任务
         for row in range(self.task_table.rowCount()):
             if self.task_table.item(row, 0).toolTip() == file_path:
-                self.task_table.removeRow(row)
+                status_item = self.task_table.item(row, 2)
+                status_item.setText(str(BatchTaskStatus.CANCELLED))
+                status_item.setForeground(QColor("#9A6700"))
                 break
 
     def clear_tasks(self):
