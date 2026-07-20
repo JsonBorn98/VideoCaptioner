@@ -163,8 +163,10 @@ def test_llm_log_usage_reader_supports_gateway_and_legacy_entries():
     legacy_entry = {
         "response": {"usage": {"prompt_tokens": 10, "completion_tokens": 2}}
     }
+    empty_response_entry = {"response": None, "request": None, "profile": None}
 
     gateway_usage = _normalized_log_usage(gateway_entry)
     legacy_usage = _normalized_log_usage(legacy_entry)
     assert _usage_number(gateway_usage, "input_tokens", "prompt_tokens") == 12
     assert _usage_number(legacy_usage, "input_tokens", "prompt_tokens") == 10
+    assert _normalized_log_usage(empty_response_entry) == {}

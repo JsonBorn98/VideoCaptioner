@@ -35,13 +35,18 @@ from videocaptioner.config import LLM_LOG_FILE, LOG_PATH
 PAGE_SIZE = 50
 
 
+def _log_mapping(entry: Dict[str, Any], key: str) -> Dict[str, Any]:
+    value = entry.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _normalized_log_usage(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Read both provider-neutral gateway logs and legacy OpenAI logs."""
 
-    normalized = entry.get("usage")
-    if isinstance(normalized, dict):
+    normalized = _log_mapping(entry, "usage")
+    if normalized:
         return normalized
-    legacy = entry.get("response", {}).get("usage", {})
+    legacy = _log_mapping(entry, "response").get("usage", {})
     return legacy if isinstance(legacy, dict) else {}
 
 
@@ -67,8 +72,8 @@ class LogDetailDialog(MessageBoxBase):
 
         # 提取信息
         time_str = self.log_entry.get("time", "")
-        model = self.log_entry.get("request", {}).get("model") or self.log_entry.get(
-            "profile", {}
+        model = _log_mapping(self.log_entry, "request").get("model") or _log_mapping(
+            self.log_entry, "profile"
         ).get("model", "未知")
         duration = self.log_entry.get("duration_ms", 0) / 1000
         stage = self.log_entry.get("stage", "") or "-"
@@ -419,9 +424,9 @@ class LLMLogsInterface(QWidget):
             self.table.setItem(row, 3, self._create_item(stage))
 
             # 模型
-            model = log.get("request", {}).get("model") or log.get("profile", {}).get(
-                "model", "未知"
-            )
+            model = _log_mapping(log, "request").get("model") or _log_mapping(
+                log, "profile"
+            ).get("model", "未知")
             self.table.setItem(row, 4, self._create_item(model))
 
             # 耗时
