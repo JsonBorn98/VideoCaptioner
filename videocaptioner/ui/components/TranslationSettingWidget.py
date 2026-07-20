@@ -355,16 +355,17 @@ class TranslationSettingWidget(QWidget):
         self._probeThreads: set[ModelContextProbeThread] = set()
         self._buildPages()
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(self.titleLabel)
-        layout.addWidget(self.subtitleLabel)
-        layout.addWidget(self.pivot, 0, Qt.AlignLeft)  # type: ignore
-        layout.addWidget(self.stackedWidget)
+        self.rootLayout = QVBoxLayout(self)
+        self.rootLayout.setContentsMargins(0, 0, 0, 0)
+        self.rootLayout.setSpacing(8)
+        self.rootLayout.addWidget(self.titleLabel)
+        self.rootLayout.addWidget(self.subtitleLabel)
+        self.rootLayout.addWidget(self.pivot, 0, Qt.AlignLeft)  # type: ignore
+        self.rootLayout.addWidget(self.stackedWidget)
         self.stackedWidget.currentChanged.connect(self._onPageChanged)
         self.stackedWidget.setCurrentWidget(self.pages["non-llm"])
         self.pivot.setCurrentItem("non-llm")
+        self._syncContentHeight()
         self.profilesChanged.connect(self.refreshProfiles)
         self.refreshProfiles()
 
@@ -523,6 +524,26 @@ class TranslationSettingWidget(QWidget):
         widget = self.stackedWidget.widget(index)
         if widget:
             self.pivot.setCurrentItem(widget.objectName().removeprefix("translation-"))
+            self._syncContentHeight()
+
+    def _syncContentHeight(self) -> None:
+        """Expose the current page's natural height to the parent ExpandLayout.
+
+        qfluentwidgets' ``ExpandLayout`` preserves each child widget's existing
+        height instead of consulting its size hint.  Without an explicit resize,
+        this compound settings widget is embedded at Qt's initial 30 px height
+        and all cards overlap.  Keeping the stack and wrapper at the active
+        page's natural height also avoids reserving the much taller enhanced
+        page while a compact page is selected.
+        """
+        page = self.stackedWidget.currentWidget()
+        if page is None:
+            return
+        if page.layout() is not None:
+            page.layout().activate()
+        self.stackedWidget.setFixedHeight(page.sizeHint().height())
+        self.rootLayout.activate()
+        self.setFixedHeight(self.rootLayout.sizeHint().height())
 
     def refreshProfiles(self) -> None:
         profiles = self.profileStore.list()

@@ -55,6 +55,27 @@ def test_translation_tabs_are_navigation_only_and_reflect_is_single_llm_only(tmp
         cfg.set(cfg.translation_mode, old_mode)
 
 
+def test_translation_settings_expose_active_page_height_to_expand_layout(tmp_path):
+    widget = TranslationSettingWidget(
+        profile_store=LLMModelProfileStore(tmp_path / "profiles.json")
+    )
+    widget.show()
+    app.processEvents()
+
+    compact_height = widget.height()
+    assert compact_height > widget.pivot.height()
+    assert widget.stackedWidget.height() == widget.pages["non-llm"].sizeHint().height()
+
+    widget.stackedWidget.setCurrentWidget(widget.pages["enhanced-llm"])
+    app.processEvents()
+    assert widget.height() > compact_height
+    assert (
+        widget.stackedWidget.height()
+        == widget.pages["enhanced-llm"].sizeHint().height()
+    )
+    widget.close()
+
+
 def test_profile_selectors_show_names_and_share_the_unique_role_binding(tmp_path):
     store = LLMModelProfileStore(tmp_path / "profiles.json")
     first = store.save(_profile("first", "日常翻译", "model-internal-a"))
@@ -170,4 +191,5 @@ def test_setting_interface_embeds_translation_widget_and_relabels_legacy_llm(tmp
     assert widget.translationSettingsWidget is not None
     assert widget.llmGroup.titleLabel.text() == "通用 LLM 工具配置"
     assert widget.translationSettingsWidget.stackedWidget.count() == 3
+    assert widget.translationSettingsWidget.height() > 200
     widget.close()
