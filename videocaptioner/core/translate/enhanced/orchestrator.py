@@ -88,6 +88,25 @@ _TRANSLATE_INSTRUCTION = """Translate every item in translation_subjects into th
 
 _AUDIT_INSTRUCTION = """Audit source and translated subtitles for semantic fidelity, omissions, additions, source copying, facts, negation, references, terminology, continuity, target-language quality and format integrity. Return only real issues and include a suggested translation when useful. Do not assess timing, CPS, line breaking, merging, layout, gaps or generic punctuation cleanup."""
 
+
+def _structured_output_instruction(schema: Mapping[str, Any]) -> str:
+    """Describe the exact contract for providers that only support JSON mode.
+
+    Native structured-output transports receive ``response_schema`` separately,
+    but a generic OpenAI-compatible endpoint commonly reduces that request to
+    ``response_format=json_object``.  JSON mode guarantees valid JSON, not the
+    field names or value shapes.  Keeping the exact schema in the dynamic stage
+    instruction makes the same request portable across both classes of API.
+    """
+
+    encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "Return one JSON object that conforms exactly to this JSON Schema. "
+        "Use the specified field names and value types; do not add, rename, "
+        "flatten, or omit fields:\n"
+        f"{encoded}"
+    )
+
 _ANALYSIS_SCHEMA: Mapping[str, Any] = {
     "type": "object",
     "properties": {
@@ -436,12 +455,15 @@ class EnhancedTranslationOrchestrator:
         validator: Callable[[Any], T],
         mechanical_attempts: int = 3,
     ) -> T:
+        structured_instruction = (
+            f"{instruction}\n\n{_structured_output_instruction(schema)}"
+        )
         assembly = assemble_prompt(
             system_constraints=_SYSTEM_CONSTRAINTS,
             user_role_prompt=role.user_prompt,
             context_brief=brief,
             glossary_entries=glossary_entries,
-            stage_instruction=instruction,
+            stage_instruction=structured_instruction,
             dynamic_subtitles=payload,
             glossary_version="1",
         )
@@ -512,7 +534,12 @@ class EnhancedTranslationOrchestrator:
     ) -> tuple[TranslationContextBrief, tuple[TermCandidate, ...]]:
         role = self.config.main_role
         budget = self._runtime_budget(role)
-        fixed = estimate_tokens(_SYSTEM_CONSTRAINTS + role.user_prompt + _ANALYSIS_INSTRUCTION)
+        fixed = estimate_tokens(
+            _SYSTEM_CONSTRAINTS
+            + role.user_prompt
+            + _ANALYSIS_INSTRUCTION
+            + _structured_output_instruction(_ANALYSIS_SCHEMA)
+        )
         windows = plan_analysis_windows(
             cues,
             working_context_tokens=budget,
@@ -912,6 +939,7 @@ class EnhancedTranslationOrchestrator:
             + brief.as_prompt_text()
             + json.dumps([entry.entry_id for entry in glossary.entries])
             + _TRANSLATE_INSTRUCTION
+            + _structured_output_instruction(_TRANSLATION_SCHEMA)
         )
         try:
             batches = plan_translation_batches(
@@ -1029,7 +1057,11 @@ class EnhancedTranslationOrchestrator:
             batch_size=self.config.batch_size,
             working_context_tokens=budget,
             fixed_prompt_tokens=estimate_tokens(
-                _SYSTEM_CONSTRAINTS + role.user_prompt + brief.as_prompt_text() + _AUDIT_INSTRUCTION
+                _SYSTEM_CONSTRAINTS
+                + role.user_prompt
+                + brief.as_prompt_text()
+                + _AUDIT_INSTRUCTION
+                + _structured_output_instruction(_AUDIT_SCHEMA)
             ),
             output_reserve_tokens=self._output_reserve(budget),
             context_radius=self.config.boundary_context_radius,

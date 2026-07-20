@@ -175,6 +175,8 @@ def test_automatic_full_chain_uses_directional_term_review_and_three_pass_roles(
     assert "MAIN USER PROMPT" in analysis_request.messages[0].content
     assert cues[0].text not in analysis_request.messages[0].content
     assert cues[0].text in analysis_request.messages[1].content
+    assert "conforms exactly to this JSON Schema" in analysis_request.messages[1].content
+    assert '"required":["brief","candidates"]' in analysis_request.messages[1].content
 
     translation_request = gateway.stage_calls["translation"][0]
     assert "MAIN USER PROMPT" in translation_request.messages[0].content
