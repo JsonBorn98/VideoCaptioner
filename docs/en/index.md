@@ -1,167 +1,77 @@
 ---
 layout: home
-title: VideoCaptioner - AI Video Subtitle Tool | Free & Open Source
+title: VideoCaptioner - Video Subtitle Workbench
 titleTemplate: false
-description: Free and open-source AI-powered video subtitle tool. Supports Whisper speech recognition, LLM intelligent segmentation, subtitle optimization, and 99-language translation. Perfect for YouTube, Bilibili, and more.
-
-head:
-  - - meta
-    - name: keywords
-      content: VideoCaptioner,video subtitle generator,AI automatic subtitles,Whisper subtitles,LLM subtitle translation,free subtitle tool,open source caption software,video transcription,speech to text,subtitle maker,YouTube subtitle tool,multilingual subtitles,automatic caption generator,subtitle editing software,video captioning,AI subtitle creator,subtitle optimization,video to text converter
-  - - meta
-    - property: og:title
-      content: VideoCaptioner - AI Video Subtitle Tool | Free & Open Source
-  - - meta
-    - property: og:description
-      content: Free & open-source AI subtitle tool powered by Whisper & LLM. Supports 99 languages with intelligent segmentation, professional translation, and one-click processing. Perfect for content creators on YouTube, Bilibili, and other platforms.
-  - - meta
-    - property: og:url
-      content: https://jsonborn98.github.io/VideoCaptioner/en/
-  - - meta
-    - property: og:locale
-      content: en_US
-  - - meta
-    - property: og:type
-      content: website
-  - - meta
-    - property: article:published_time
-      content: 2024-01-01T00:00:00Z
-  - - meta
-    - property: article:modified_time
-      content: 2025-01-25T00:00:00Z
-  - - meta
-    - name: twitter:title
-      content: VideoCaptioner - AI Video Subtitle Tool | Free & Open Source
-  - - meta
-    - name: twitter:description
-      content: Free AI-powered subtitle tool with Whisper & LLM. Supports 99 languages, intelligent segmentation, and professional translation. Perfect for content creators.
+description: A desktop and CLI workbench for transcription and forced alignment, dual-role LLM translation review, subtitle postprocessing, and controllable FFmpeg export.
 
 hero:
   name: VideoCaptioner
-  text: Professional Video Subtitle Processing
-  tagline: Open Source · LLM-Powered · Process 14-minute video in 4 minutes, cost less than $0.002
+  text: Video Subtitle Workbench
+  tagline: Transcribe · Translate and Review · Postprocess · Synthesize
   image:
     src: /logo.png
     alt: VideoCaptioner
   actions:
     - theme: brand
-      text: Get Started
-      link: /en/guide/getting-started
+      text: Read the Guide
+      link: /guide/getting-started
     - theme: alt
       text: GitHub Repository
       link: https://github.com/JsonBorn98/VideoCaptioner
 
 features:
-  - icon: ⚡
-    title: Lightning Fast, Ultra Low Cost
-    details: Process 14-minute video in just 4 minutes, cost less than $0.002. Powered by Whisper + LLM stack for quality and speed.
-
-  - icon: 🧠
-    title: LLM-Powered Intelligence
-    details: Beyond speech recognition. LLM semantic segmentation, auto error correction, terminology unification, expression optimization for professional results.
-
+  - icon: 🎙️
+    title: Transcription and Precise Timing
+    details: MiMo API and managed local Qwen3 ASR, Qwen3-ForcedAligner, VAD-aware chunking, persistent workers, and guarded fallback timelines.
   - icon: 🌐
-    title: Multilingual Support
-    details: Recognize 99 languages, translate to 37 languages. Reflection translation mechanism ensures quality with precise timeline alignment.
-
-  - icon: 📖
-    title: Fully Open Source & Free
-    details: MIT license, no hidden fees. Run locally for complete data privacy control. Community-driven continuous improvement.
-
-  - icon: 💻
-    title: No High-End Hardware
-    details: Run Whisper on CPU, optional GPU acceleration. Choose between cloud API or local offline processing.
-
-  - icon: 📦
-    title: Batch Processing
-    details: Drag and drop videos for automatic processing with batch queue support. From recognition to translation to synthesis, zero manual intervention.
-
+    title: Dual-Role LLM Translation
+    details: A main translator and an independent senior reviewer collaborate through full-context analysis, terminology adjudication, reusable glossaries, and a final audit.
+  - icon: 📐
+    title: Adaptive Subtitle Postprocessing
+    details: Repair short gaps, cue duration, reading speed, punctuation, overlap, and difficult overspeed cases with deterministic validation and optional LLM assistance.
+  - icon: 🎞️
+    title: Controllable FFmpeg Export
+    details: Fast stream-copy soft-subtitle muxing plus controllable hard-subtitle encoding with software or NVENC/QSV/AMF encoders, CQ/ABR, command preview, custom arguments, and live logs.
   - icon: 🎨
-    title: Professional Subtitle Styles
-    details: Built-in style templates. Support hard/soft subtitles with SRT/ASS/VTT multi-format output.
-
-  - icon: 🔧
-    title: Advanced Features
-    details: VAD voice detection, vocal separation, word-level timestamps, manuscript matching, custom prompts, and more.
-
-  - icon: 🖥️
-    title: Cross-Platform Desktop App
-    details: Windows/macOS/Linux installers available. Modern PyQt5 interface with real-time preview and quick editing.
+    title: Bilingual Styling and Stage Delivery
+    details: Preserve bilingual layouts, use extended ASS fields and font presets, keep canonical SRT checkpoints, and optionally export ASS or VTT after each completed subtitle stage.
+  - icon: 📋
+    title: Observable Long-Running Tasks
+    details: A dedicated GUI run log and structured GUI/CLI stage summaries expose actual artifacts, alignment fallbacks, rule fallbacks, and failures.
 ---
 
-## Interface Preview
+## Current distribution status
 
-<div align="center">
-  <img src="https://h1.appinn.me/file/1731487405884_main.png" alt="Software Interface Preview" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-</div>
+This fork does not yet publish a public desktop Release. Run it from source for now:
 
-## Quick Experience
-
-::: code-group
-
-```bash [Windows]
-# Download and run the installer directly
-# Or run from source
+```bash
 git clone https://github.com/JsonBorn98/VideoCaptioner.git
 cd VideoCaptioner
-run.bat
+uv sync --python 3.12
+uv run videocaptioner
 ```
 
-```bash [macOS/Linux]
-# Use automatic installation script
-git clone https://github.com/JsonBorn98/VideoCaptioner.git
-cd VideoCaptioner
-chmod +x run.sh
-./run.sh
+The optional Qwen runtime and model weights are installed separately from the main
+application environment through the GUI component manager. Source-only CLI users can
+instead run `uv sync --python 3.12 --extra qwen`, which deliberately installs the heavy
+Qwen and PyTorch dependencies into the project environment.
+
+## Workflow
+
+```text
+media
+  → ASR and word-level alignment
+  → local merging or LLM segmentation
+  → subtitle optimization
+  → non-LLM, single-LLM, or dual-role LLM translation
+  → subtitle postprocessing and QA
+  → soft-subtitle muxing or hard-subtitle synthesis
 ```
 
-:::
+See the [Chinese user guide](/guide/getting-started) and
+[CLI reference](/cli) for the currently maintained documentation.
 
-## Why Choose VideoCaptioner?
+## License and attribution
 
-- **🎯 Efficient Processing**: Full processing of a 14-minute video takes only about 4 minutes, costing less than ¥0.01
-- **🌟 Quality Assurance**: Uses advanced Whisper models and large language models to ensure subtitle quality
-- **💡 Intelligent Optimization**: Automatically corrects typos, unifies terminology, optimizes expressions
-- **🚀 Easy to Use**: Drag and drop videos for fully automatic processing, no complex configuration needed
-
-## Core Features
-
-### Speech Recognition & Transcription
-
-- Supports Whisper API, FasterWhisper, WhisperCpp, and other engines
-- Supports 99 language recognition
-- Supports VAD (Voice Activity Detection)
-- Supports vocal separation
-
-### Intelligent Subtitle Processing
-
-- LLM semantic segmentation for smoother reading
-- Automatically optimizes terminology, code snippets, mathematical formulas
-- Supports manuscript matching to improve accuracy
-- Precise subtitle timeline alignment
-
-### High-Quality Translation
-
-- Supports LLM translation, Google Translate, Bing Translate, DeepLX
-- Reflection translation mechanism improves translation quality
-- Maintains complete timeline consistency
-- Supports 37 target languages
-
-### Video Synthesis
-
-- Supports hard subtitles and soft subtitles
-- Rich subtitle style templates
-- Supports multiple subtitle formats (SRT, ASS, VTT, TXT)
-- Supports batch video processing
-
-## Get Started
-
-Ready to begin? Check out the [Getting Started Guide](/en/guide/getting-started) to learn how to use VideoCaptioner.
-
-<style>
-:root {
-  --vp-home-hero-name-color: transparent;
-  --vp-home-hero-name-background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-</style>
-
+Released under GPL-3.0. Original copyright notices remain in the LICENSE file
+and Git history.

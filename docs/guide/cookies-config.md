@@ -6,7 +6,7 @@
 
 在使用 VideoCaptioner 下载视频时，你可能会遇到以下错误：
 
-![Cookie 错误提示](https://h1.appinn.me/file/1731487405884_cookies_error.png)
+![Cookie 错误提示](/cookies_error.png)
 
 这通常是因为：
 
@@ -50,7 +50,7 @@
 2. 选择 **"Export Cookies"** 或类似选项
 3. 扩展会自动下载一个 `cookies.txt` 文件
 
-![导出 Cookie 示例](https://h1.appinn.me/file/1731487405884_cookies_export.png)
+![导出 Cookie 示例](/cookies_export.png)
 
 :::warning 注意事项
 
@@ -133,7 +133,8 @@ VideoCaptioner/
 
 ### 支持哪些视频网站？
 
-VideoCaptioner 使用 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 作为下载引擎，支持 1000+ 个视频网站，包括：
+VideoCaptioner 使用 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 作为下载引擎。实际支持范围
+随当前安装的 yt-dlp 版本变化，常见平台包括：
 
 - 🎬 YouTube、Bilibili、抖音、快手
 - 📺 爱奇艺、腾讯视频、优酷
@@ -150,5 +151,5 @@ VideoCaptioner 使用 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 作为下载引
 配置完成后，你可以：
 
 - 查看 [快速开始指南](./getting-started.md) 下载并处理视频
-- 了解 [批量处理功能](./batch-processing.md) 处理多个视频
-- 探索 [视频下载技巧](./video-download.md)
+- 了解 [完整工作流程](./workflow.md)
+- 遇到问题时查看 [常见问题](./faq.md)

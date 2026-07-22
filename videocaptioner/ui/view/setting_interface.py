@@ -21,7 +21,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
-from videocaptioner.config import AUTHOR, FEEDBACK_URL, HELP_URL, RELEASE_URL, VERSION, YEAR
+from videocaptioner.config import FEEDBACK_URL, HELP_URL, RELEASE_URL, VERSION
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
     INFOBAR_DURATION_SUCCESS,
@@ -247,15 +247,10 @@ class SettingInterface(ScrollArea):
             self.aboutGroup,
         )
         self.aboutCard = PrimaryPushSettingCard(
-            self.tr("检查更新"),
+            self.tr("查看发布版本"),
             FIF.INFO,
             self.tr("关于"),
-            "© "
-            + self.tr("版权所有")
-            + f" {YEAR}, {AUTHOR}. "
-            + self.tr("版本")
-            + " "
-            + VERSION,
+            f"VideoCaptioner {VERSION} · GPL-3.0",
             self.aboutGroup,
         )
 
@@ -296,18 +291,6 @@ class SettingInterface(ScrollArea):
             parent=self.llmGroup,
         )
         self.llmServiceCard.comboBox.setMinimumWidth(150)
-
-        # 创建OPENAI官方API链接卡片
-        self.openaiOfficialApiCard = HyperlinkCard(
-            "https://api.videocaptioner.cn/register?aff=UrLB",
-            self.tr("访问"),
-            FIF.DEVELOPER_TOOLS,
-            self.tr("VideoCaptioner 官方API"),
-            self.tr("集成多种大语言模型，支持高并发字幕优化、翻译"),
-            self.llmGroup,
-        )
-        # 默认隐藏
-        self.openaiOfficialApiCard.setVisible(False)
 
         # 定义每个服务的配置
         service_configs = {
@@ -721,8 +704,6 @@ class SettingInterface(ScrollArea):
 
         # 添加LLM配置卡片
         self.llmGroup.addSettingCard(self.llmServiceCard)
-        # 添加OPENAI官方API链接卡片
-        self.llmGroup.addSettingCard(self.openaiOfficialApiCard)
         for config in self.llm_service_configs.values():
             for card in config["cards"]:
                 self.llmGroup.addSettingCard(card)
@@ -977,9 +958,6 @@ class SettingInterface(ScrollArea):
             for card in config["cards"]:
                 card.setVisible(False)
 
-        # 隐藏OPENAI官方API链接卡片
-        self.openaiOfficialApiCard.setVisible(False)
-
         # 显示选中服务的卡片
         if current_service in self.llm_service_configs:
             for card in self.llm_service_configs[current_service]["cards"]:
@@ -998,10 +976,6 @@ class SettingInterface(ScrollArea):
                 # 如果API Key为空，设置默认值 "lm-studio"
                 if not service_config["api_key"].lineEdit.text():
                     service_config["api_key"].lineEdit.setText("lm-studio")
-
-            # 如果是OPENAI服务，显示官方API链接卡片
-            if current_service == LLMServiceEnum.OPENAI:
-                self.openaiOfficialApiCard.setVisible(True)
 
         # 更新布局
         self.llmGroup.adjustSize()

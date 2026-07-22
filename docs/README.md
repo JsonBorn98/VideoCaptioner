@@ -22,7 +22,7 @@ bun install
 bun run docs:dev
 ```
 
-访问 http://localhost:5173 查看文档
+访问 `http://localhost:5173/VideoCaptioner/` 查看文档。
 
 ### 构建文档
 
@@ -125,7 +125,7 @@ head:
 
 ## 🔍 SEO 优化
 
-本文档系统已经过全面 SEO 优化，详情请查看 [SEO_OPTIMIZATION.md](../SEO_OPTIMIZATION.md)。
+文档站提供基础 metadata、Open Graph、JSON-LD、canonical URL 和 sitemap。
 
 ### 已实施的 SEO 功能
 
@@ -261,4 +261,4 @@ VitePress 默认提供本地搜索，已在 `config.mts` 中配置。
 
 更多 VitePress 使用方法请参考 [官方文档](https://vitepress.dev/)。
 
-更多 SEO 优化细节请查看 [SEO_OPTIMIZATION.md](../SEO_OPTIMIZATION.md)。
+SEO 配置集中在 `docs/.vitepress/config.mts`。

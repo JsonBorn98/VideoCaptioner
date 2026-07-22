@@ -28,5 +28,5 @@ result = transcribe(
 详细 API 说明请参考源代码和 `CLAUDE.md` 文档。
 
 相关文档：
-- [架构设计](/dev/architecture)
+- [架构设计](./architecture)
 - [贡献指南](/dev/contributing)

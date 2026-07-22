@@ -58,11 +58,12 @@
 永不重叠；最小留白恒等于 `最大闭合间隙 − 最小补偿`。此外，延长后不超过普通字幕最长
 显示时长；音乐/歌词、孤立标题卡、短文本长显示等受保护段一律跳过。它只延长上一段
 结尾、绝不缩短，是速度优化确定最终时轴后的最后一步时轴处理。设计详见
-[ADR-0005](https://github.com/WEIFENG2333/VideoCaptioner)（`docs/adr/0005`）。
+[ADR-0005](/adr/0005-tail-compensation-clamped-curve)。
 
 尾部补偿默认关闭。在“字幕后处理设置 → 时轴 → 尾部补偿”分组下开启，用滑块或数字框
 精确调整最小补偿、最大补偿间隙与最大补偿（旋钮范围会随约束实时收紧，配不出非法
-曲线）；这些参数随所选方案（profile）保存，可一键恢复出厂值。CLI 通过方案配置。
+曲线）；这些参数随所选方案（profile）保存，可一键恢复出厂值。自定义完整方案需在 GUI
+中从内置模板复制并编辑，CLI 再通过稳定方案 ID 使用；CLI 本身不创建或编辑完整方案。
 
 
 ## 保存与导出
@@ -77,18 +78,22 @@
 输入文件不会被覆盖。如果后处理失败，完整 workflow 会回退到已保存的初版字幕；独立
 页面会保留原输入和已有工作稿。
 
+开启 `--qa-report` 会在结果旁写入 `.qa.md`；速度阶段产生审计结果时会自动写入
+`.speed-changes.json`。只有精确时间轴成功应用并启用保存选项时，才会生成
+`.vctiming.json` 时间证据。
+
 ## CLI 示例
 
 ```bash
 # 使用均衡方案处理成型字幕
-videocaptioner postprocess input.srt --profile balanced
+uv run videocaptioner postprocess input.srt --profile balanced
 
 # 明确双语输入结构，并以译文为速度优化主侧
-videocaptioner postprocess bilingual.srt \
-  --layout source-above --speed-primary translate
+uv run videocaptioner postprocess bilingual.srt \
+  --layout source-above --primary-side translate
 
 # 关联视频并启用精准时间证据
-videocaptioner postprocess input.srt --media video.mp4 --precise-timing
+uv run videocaptioner postprocess input.srt --media video.mp4 --precise-timing
 ```
 
 完整参数见 [CLI 参考](/cli#postprocess-独立字幕后处理)。

@@ -1,272 +1,174 @@
 ---
 title: 快速开始 - VideoCaptioner
-description: 快速安装和配置 VideoCaptioner，5分钟开始处理你的第一个视频字幕。支持 Windows、macOS、Linux 多平台。
-head:
-  - - meta
-    - name: keywords
-      content: VideoCaptioner安装,快速开始,视频字幕教程,Whisper安装,LLM配置,字幕处理入门
+description: 从源码启动 VideoCaptioner，并配置转录、翻译、字幕后处理与 FFmpeg 合成。
 ---
 
 # 快速开始
 
-本指南将帮助你快速上手 VideoCaptioner，开始处理你的第一个视频字幕。
+当前 fork 尚未发布公开桌面 Release。现阶段请从源码运行；首个 fork Release 发布后，
+桌面包会重新成为普通用户的首选入口。
 
 ## 系统要求
 
-- **Windows**: Windows 10/11 (64位)
-- **macOS**: macOS 10.15 或更高版本
-- **Linux**: Ubuntu 20.04+ / Debian 11+ / Fedora 35+
-- **Python**: Python 3.10-3.12（仅源码开发需要；推荐 3.12）
-- **内存**: 建议 4GB 以上（使用本地 Whisper 需要 8GB+）
+- Windows 10/11、macOS 或常见 Linux 发行版
+- Python 3.10–3.12（推荐 3.12）
+- Git 与 [uv](https://docs.astral.sh/uv/)
+- FFmpeg / FFprobe；源码环境可使用系统安装或项目配置的核心
+- 本地 Qwen3 ASR 需要额外磁盘、内存和独立 Runtime；CUDA 模式需要兼容的 NVIDIA 环境
 
-## 安装方式
-
-### 普通用户：下载桌面 Release
-
-本 fork 面向普通用户发布二进制桌面包，不发布 PyPI 包。桌面包会内置 `ffmpeg` / `ffprobe` 和 `uv`，基础功能不要求本机安装 Python。
-
-1. 从 [Release](https://github.com/JsonBorn98/VideoCaptioner/releases) 页面下载最新版本。
-2. 选择与你系统匹配的 `VideoCaptioner-<version>-<platform>.zip`。
-3. 解压后运行 `VideoCaptioner` / `VideoCaptioner.exe`。
-4. 首次运行后可在设置里配置 LLM、ASR、翻译等功能。
-
-::: tip 提示
-如果只使用必剪语音识别、必应/谷歌翻译等基础能力，可以先不配置 API Key。
-:::
-
-### Qwen 本地 ASR 组件
-
-Qwen3ASR / Qwen3-ForcedAligner 依赖 `qwen-asr`、PyTorch 和模型权重，默认不会打进桌面包。需要时在软件中打开：
-
-**设置 → 转录配置 → Qwen 组件管理**
-
-然后按顺序执行：
-
-1. 根据机器选择 **安装 CPU 运行时** 或 **安装 CUDA 运行时**。
-   - 没有 NVIDIA GPU、只想先验证功能，选择 CPU。
-   - 有 NVIDIA GPU 并准备把 Qwen 的 **运行设备** 设为 `cuda:0`，选择 CUDA。
-2. 等待安装进度完成。CUDA 运行时会下载较大的 PyTorch wheel，时间较长是正常现象。
-3. 下载 `Qwen3-ASR` 和 `Qwen3-ForcedAligner` 模型。
-4. 选择 `Qwen3ASR [Local]`，或在 MiMoASR 中使用本地 Qwen 对齐。
-
-Qwen 运行时安装在独立的 `runtimes/qwen` 环境中，不会污染主程序环境。源码启动 GUI 时也推荐使用这里的组件管理安装 Qwen 运行时。
-
-::: warning CUDA 安装检查
-安装 CUDA 运行时后，组件管理里应显示类似 `PyTorch 2.11.0+cu128 (CUDA 12.8, CUDA available)`。如果显示 `+cpu`，说明 PyTorch 被解析成 CPU 版，请关闭正在运行的转录任务后重新点击 **安装 CUDA 运行时**。
-:::
-
-### 开发者：源码运行
-
-源码运行使用 `uv` 管理 Python 环境。不要使用上游旧文档中的 `pip install -r requirements.txt` 或 `python main.py`。
+## 安装与启动
 
 ```bash
 git clone https://github.com/JsonBorn98/VideoCaptioner.git
 cd VideoCaptioner
 
-# 安装依赖并启动 GUI
 uv sync --python 3.12
 uv run videocaptioner doctor --profile gui
 uv run videocaptioner
 ```
 
-需要 Qwen 依赖的源码开发环境：
+CLI：
 
 ```bash
-# 推荐：先启动 GUI，再通过 Qwen 组件管理安装独立 runtime
-uv run videocaptioner
-uv run videocaptioner doctor --profile qwen
+uv run videocaptioner --help
+uv run videocaptioner transcribe --help
 ```
 
-只有在调试 `qwen-asr` 源码级集成、希望把 Qwen 依赖装进当前 `.venv` 时，才需要执行：
+项目不发布 PyPI 包，不建议使用 `pip install videocaptioner`。
+
+## 选择转录方案
+
+在 **设置 → 转录配置** 中选择后端：
+
+| 后端 | 运行方式 | 主要特点 |
+|---|---|---|
+| MiMo ASR | API + 可选本地对齐 | 并发文本转录，可用 Qwen3-ForcedAligner 补齐精确时间轴 |
+| Qwen3ASR [Local] | 本地 Runtime | 本地 ASR、字词级对齐、CPU/CUDA 可选 |
+| FasterWhisper | 本地 | 通用 Whisper 生态后端 |
+| WhisperCpp | 本地 | 轻量本地后端 |
+| Whisper API | API | OpenAI-compatible 音频转录 |
+| 必剪 / 剪映 | 在线 | 无需 LLM Key 的兼容后端，适用范围受服务本身限制 |
+
+不要把 VAD 与词级对齐混为一谈：VAD 用于识别语音区间、寻找分块边界和跳过静音；
+字词级时间证据由 ASR 或 ForcedAligner 生成。
+
+详细参数见 [ASR 配置](/config/asr)。
+
+## 安装 Qwen 本地组件
+
+通过 GUI 组件管理安装时，Qwen3-ASR、Qwen3-ForcedAligner 与 PyTorch 位于独立
+Runtime，不会混入主程序环境；模型权重保存在应用模型目录。
+
+1. 打开 **设置 → 转录配置 → Qwen 组件管理**。
+2. 选择 **CPU Runtime** 或 **CUDA Runtime**。
+3. 等待 Runtime 安装与状态检查完成。
+4. 下载 Qwen3-ASR 与 Qwen3-ForcedAligner 模型。
+5. 返回转录配置，选择 `Qwen3ASR [Local]`，或为 MiMo 启用本地对齐。
+
+Runtime 位于独立的 `runtimes/qwen`。只使用源码 CLI、无法通过 GUI 创建 Runtime 时，
+可把 Qwen 依赖直接同步到当前项目 `.venv`：
 
 ```bash
 uv sync --python 3.12 --extra qwen
 ```
 
-## 基础配置
+该方式会把 PyTorch 等重型依赖装入主项目环境，可用
+`uv run python -c "import qwen_asr, torch; print(torch.__version__)"` 检查依赖。
+`uv run videocaptioner doctor --profile qwen` 专门检查 GUI 管理的独立 Runtime 与应用模型
+目录，不用于判断当前 `.venv` 的 extra 是否安装成功。模型会在首次使用或通过组件管理时
+下载，请预留与所选模型、PyTorch 和缓存相匹配的磁盘空间。CUDA 是否可用还取决于显卡、
+驱动及所安装的 PyTorch build。
 
-在开始处理视频之前，建议先完成以下基础配置：
+## 配置翻译
 
-### 1. LLM API 配置（可选但推荐）
+翻译有三种模式：
 
-LLM 用于字幕断句、优化和翻译。软件内置了基础模型，但配置自己的 API 可以获得更好的效果。
+| 模式 | 说明 |
+|---|---|
+| 非 LLM | Bing、Google、DeepLX |
+| 单 LLM | 一个模型完成翻译，可选反思 |
+| 增强型双角色 LLM | 主翻译 + 高级校对，含术语表和完整审计 |
 
-打开 **设置 → LLM 配置**，选择以下任一服务：
+增强模式需要先创建 LLM 模型方案。GUI 可为两个角色绑定不同方案；CLI 当前使用同一个
+legacy profile 承担两个角色。GUI 命名方案支持 OpenAI-compatible、Anthropic Messages
+与 Gemini transport；CLI legacy profile 当前按 OpenAI-compatible 配置。完整说明见
+[LLM 模型方案](/config/llm)与[翻译模式](/config/translator)。
 
-| 服务商           | 特点               | 推荐模型                                |
-| ---------------- | ------------------ | --------------------------------------- |
-| **OpenAI**       | 质量最好           | `gpt-4o-mini` (经济), `gpt-4o` (高质量) |
-| **DeepSeek**     | 性价比高           | `deepseek-chat`                         |
-| **SiliconCloud** | 国内可用，并发较低 | `Qwen/Qwen2.5-72B-Instruct`             |
-| **Ollama**       | 本地运行，完全免费 | `llama3.1:8b`                           |
+## 运行完整工作流
 
-详细配置方法请查看 [LLM 配置指南](/config/llm)。
+GUI 的完整任务按以下顺序执行：
 
-### 2. 语音识别配置
+```text
+转录与时间轴
+  → 本地聚合或 LLM 语义断句
+  → 字幕优化
+  → 翻译
+  → 字幕后处理与 QA
+  → 视频合成
+```
 
-打开 **设置 → 转录配置**，选择语音识别引擎：
+每个字幕阶段都会保留规范 SRT 检查点；后处理失败时会保留初版字幕，不覆盖输入。
+详情见 [工作流程](/guide/workflow)。
 
-| 引擎                 | 支持语言 | 运行方式 | 推荐场景                      |
-| -------------------- | -------- | -------- | ----------------------------- |
-| **FasterWhisper** ⭐ | 99种语言 | 本地     | 最推荐，准确度高，支持GPU加速 |
-| **B接口**            | 中英文   | 在线     | 快速测试，无需下载模型        |
-| **J接口**            | 中英文   | 在线     | 备用选项                      |
-| **WhisperCpp**       | 99种语言 | 本地     | 轻量级本地方案                |
-| **Whisper API**      | 99种语言 | 在线     | 使用 OpenAI API               |
+## 分步使用
 
-::: tip 推荐配置
+### 只转录
 
-- **中文视频**: FasterWhisper + Medium 模型或以上
-- **英文视频**: FasterWhisper + Small 模型即可
-- **其他语言**: FasterWhisper + Large-v2 模型
+```bash
+uv run videocaptioner transcribe video.mp4 \
+  --asr qwen-local --word-timestamps
+```
 
-首次使用需要在软件内下载模型，国内网络可直接下载。
-:::
+### 翻译已有字幕
 
-详细配置方法请查看 [ASR 配置指南](/config/asr)。
+```bash
+uv run videocaptioner subtitle input.srt \
+  --translation-mode enhanced_llm \
+  --target-language en
+```
 
-### 3. 翻译配置（可选）
+### 修复闪轴、单句时长与阅读速度
 
-如果需要翻译字幕，打开 **设置 → 翻译配置**：
+```bash
+uv run videocaptioner postprocess input.srt \
+  --profile balanced --qa-report
+```
 
-| 翻译服务        | 特点                 | 推荐场景     |
-| --------------- | -------------------- | ------------ |
-| **LLM 翻译** ⭐ | 质量最好，理解上下文 | 追求翻译质量 |
-| **Bing 翻译**   | 速度快，免费         | 快速翻译     |
-| **Google 翻译** | 速度快，需要科学上网 | 英语翻译     |
-| **DeepLX**      | 质量好，需要自建服务 | 专业翻译     |
+### 合成视频
 
-详细配置方法请查看 [翻译配置指南](/config/translator)。
+```bash
+uv run videocaptioner synthesize video.mp4 -s subtitle.srt \
+  --subtitle-mode hard \
+  --video-encoder h264_nvenc \
+  --cq 23
+```
 
-## 开始处理视频
+先检查最终 FFmpeg 命令但不执行：
 
-### 全流程处理（最简单）
+```bash
+uv run videocaptioner synthesize video.mp4 -s subtitle.srt \
+  --subtitle-mode hard --video-encoder h264_nvenc --print-command
+```
 
-这是最简单的方式，一键完成所有步骤：
+完整参数见 [CLI 参考](/cli)与 [FFmpeg 合成导出](/guide/video-synthesis)。
 
-1. 在主界面点击 **"任务创建"** 标签
-2. 拖拽视频文件到窗口，或点击选择文件
-   - 也可以输入 YouTube、B站等视频链接
-3. 点击 **"开始全流程处理"** 按钮
-4. 等待处理完成，输出文件保存在 `work-dir/` 目录
+## 日志与产物
 
-::: info 处理流程
-全流程会依次执行：
+- **运行日志**：查看 GUI/CLI 各阶段进度、回退和产物。
+- **LLM 请求日志**：按 stage、role、attempt 记录请求与响应。
+- **翻译产物**：初版字幕、`.vcglossary.json`、Markdown 审计报告。
+- **后处理产物**：规范 SRT、可选 `.qa.md`、速度阶段 `.speed-changes.json`，以及可选
+  `.vctiming.json`。
+- **合成日志**：FFmpeg 命令、Console 输出和编码器能力探测结果。
 
-1. 语音识别转录
-2. 字幕智能断句（可选）
-3. 字幕优化（可选）
-4. 字幕翻译（可选）
-5. 视频合成
-   :::
-
-### 分步处理
-
-如果你需要更精细的控制，可以分步处理：
-
-#### 步骤 1：语音识别转录
-
-1. 切换到 **"语音转录"** 标签
-2. 选择视频或音频文件
-3. 配置转录参数：
-   - 转录语言（自动检测或手动指定）
-   - VAD 方法（建议保持默认）
-   - 是否启用音频分离（嘈杂环境推荐）
-4. 点击 **"开始转录"**
-5. 转录完成后会生成字幕文件
-
-#### 步骤 2：字幕优化与翻译
-
-1. 切换到 **"字幕优化与翻译"** 标签
-2. 加载字幕文件（自动加载或手动选择）
-3. 配置处理选项：
-   - **智能断句**：重新分段，阅读更流畅
-   - **字幕校正**：修正错别字、优化格式
-   - **字幕翻译**：翻译为目标语言
-4. （可选）填写文稿提示，提升准确度
-5. 点击 **"开始处理"**
-6. 处理完成后可以实时预览和编辑
-
-#### 步骤 3：字幕视频合成
-
-1. 切换到 **"字幕视频合成"** 标签
-2. 选择字幕样式（科普风、新闻风等）
-3. 选择合成方式：
-   - **硬字幕**：烧录到视频中
-   - **软字幕**：内嵌字幕轨道（需要播放器支持）
-4. 点击 **"开始合成"**
-5. 输出视频保存在 `work-dir/` 目录
-
-## 实用技巧
-
-### 1. 提升字幕质量
-
-- ✅ 使用 FasterWhisper Large-v2 模型
-- ✅ 启用 VAD 过滤，减少幻觉
-- ✅ 在嘈杂环境中启用音频分离
-- ✅ 使用智能断句（语义分段）
-- ✅ 填写文稿提示（术语表、原文稿等）
-
-### 2. 加快处理速度
-
-- ✅ 使用在线 ASR（B接口/J接口）跳过模型下载
-- ✅ 提高 LLM 并发线程数（如果 API 支持）
-- ✅ 使用软字幕合成（速度极快）
-- ✅ 关闭不需要的功能（如翻译、优化）
-
-### 3. 批量处理
-
-如果需要处理多个视频：
-
-1. 切换到 **"批量处理"** 标签
-2. 选择处理类型（批量转录/字幕处理/视频合成）
-3. 添加视频文件到队列
-4. 点击 **"开始批量处理"**
-
-详细说明请查看 [批量处理指南](/guide/batch-processing)。
-
-## 常见问题
-
-### 转录时出现幻觉或重复
-
-::: details 解决方案
-
-- 启用 VAD 过滤
-- 更换更大的模型（如 Medium → Large）
-- 尝试 Large-v2 而不是 Large-v3
-- 在嘈杂环境中启用音频分离
-  :::
-
-### LLM 请求失败
-
-::: details 解决方案
-
-- 检查 API Key 是否正确
-- 检查 Base URL 是否正确
-- 降低线程数（某些服务商限制并发）
-- 检查网络连接
-- 查看日志文件获取详细错误信息
-  :::
-
-### 字幕时间轴不准确
-
-::: details 解决方案
-
-- 使用 FasterWhisper（时间轴最准确）
-- 启用智能断句时使用语义分段模式
-- 手动在字幕编辑界面调整
-  :::
-
-更多问题请查看 [常见问题解答](/guide/faq)。
+LLM 请求日志可能包含字幕与 Prompt 全文，分享日志前请检查敏感内容。
 
 ## 下一步
 
-- 📖 了解 [工作流程](/guide/workflow)
-- ⚙️ 查看 [详细配置指南](/guide/configuration)
-- 🎨 自定义 [字幕样式](/guide/subtitle-style)
-- 📝 使用 [文稿匹配](/guide/manuscript) 提升准确度
+- [ASR 与时间轴配置](/config/asr)
+- [翻译模式与双角色校对](/config/translator)
+- [字幕后处理](/guide/subtitle-postprocessing)
+- [FFmpeg 合成导出](/guide/video-synthesis)
+- [常见问题](/guide/faq)
 
----
-
-如果在使用过程中遇到问题，欢迎提交 [Issue](https://github.com/JsonBorn98/VideoCaptioner/issues) 或加入社区讨论。
-
+遇到问题可在 [GitHub Issues](https://github.com/JsonBorn98/VideoCaptioner/issues) 提交可复现信息。

@@ -1,325 +1,134 @@
----
-title: LLM 配置指南 - VideoCaptioner
-description: 详细的 LLM API 配置教程，支持 OpenAI、DeepSeek、SiliconCloud、Gemini、Ollama 等多种服务商。包含费用估算和优化建议。
-head:
-  - - meta
-    - name: keywords
-      content: LLM配置,OpenAI API,DeepSeek,Gemini API,Ollama,字幕优化,AI翻译,大语言模型配置
----
+# LLM 模型方案
 
-# LLM 配置指南
+VideoCaptioner 的 LLM 能力用于语义断句、字幕优化、单 LLM 翻译、增强型双角色翻译，
+以及可选的字幕后处理语义修复。API Key 由用户自行配置，项目不提供或推广 API 中转服务。
 
-LLM（大语言模型）是 VideoCaptioner 的核心功能之一，用于字幕断句、优化和翻译。本指南将帮助你配置 LLM API。
+## 两类配置
 
-## 为什么需要配置 LLM？
+### 通用 LLM 配置
 
-- **字幕断句**：使用 LLM 进行语义分析，生成自然流畅的字幕分段
-- **字幕优化**：自动修正错别字、统一专业术语、优化格式
-- **字幕翻译**：结合上下文的高质量翻译
+通用配置继续服务于字幕断句、字幕优化和部分兼容功能。可选择 OpenAI、DeepSeek、
+SiliconCloud、Ollama、LM Studio 等预设，或填写 OpenAI-compatible 地址。
 
-::: tip 提示
-软件内置了基础 LLM 模型可供测试使用，但配置自己的 API 可以获得：
+### 命名模型方案
 
-- ✅ 更稳定的服务
-- ✅ 更高的并发能力
-- ✅ 更好的处理质量
-  :::
+增强型翻译使用可复用的命名模型方案。每个方案保存：
 
-## 支持的 LLM 服务商
+- 方案名称
+- Transport 与 dialect
+- Base URL
+- API Key
+- 模型名称
+- 工作上下文预算
+- 最大并发
 
-VideoCaptioner 支持多种 LLM 服务商，你可以根据自己的需求选择：
+GUI 可以为主翻译和高级校对分别绑定方案，也可以让两个角色复用同一方案。
 
-| 服务商           | 特点                    | 推荐场景     |
-| ---------------- | ----------------------- | ------------ |
-| **OpenAI**       | 质量最好，API 稳定      | 追求极致质量 |
-| **DeepSeek**     | 性价比高，中文优秀      | 中文内容处理 |
-| **SiliconCloud** | 国内可用，模型丰富      | 国内用户     |
-| **Gemini**       | Google 出品，免费额度大 | 预算有限     |
-| **Ollama**       | 完全本地运行，免费      | 隐私敏感场景 |
-| **LM Studio**    | 本地运行，图形化界面    | 本地部署     |
-| **ChatGLM**      | 国产模型                | 国内用户     |
+## 支持的 Transport
 
-## 配置方法
+| Transport | 说明 |
+|---|---|
+| OpenAI-compatible | OpenAI Chat Completions 及兼容服务 |
+| Anthropic Messages | Anthropic 原生 Messages API |
+| Gemini | Google Gemini 原生 API |
 
-### 方式一：使用 SiliconCloud
+不同服务对 response schema、Prompt cache、reasoning token 和 usage 字段的支持并不相同。
+VideoCaptioner 会通过对应 adapter 统一请求和 usage 记录，但不会伪造服务端未返回的统计。
 
-[SiliconCloud](https://cloud.siliconflow.cn) 集成了国内多家大模型厂商，使用方便。
+## GUI 配置步骤
 
-**步骤：**
+1. 打开 **设置 → 翻译设置**。
+2. 在模型方案区域创建方案。
+3. 选择 Transport，填写 Base URL、API Key 和模型名称。
+4. 设置工作上下文预算与最大并发。
+5. 点击连接检查。
+6. 在翻译模式页把方案绑定给主翻译、单 LLM 或高级校对角色。
 
-1. **注册账号**
+连接检查只验证当前凭据、端点和模型是否能完成最小请求。实际长字幕仍可能受配额、
+并发限制、上下文长度或服务端策略影响。
 
-   访问 [SiliconCloud](https://cloud.siliconflow.cn) 注册账号
+## 常见端点示例
 
-2. **获取 API Key**
+以下仅用于说明字段格式，请以各服务商当前官方文档为准：
 
-   登录后，在 [设置页面](https://cloud.siliconflow.cn/account/ak) 获取 API Key
+| 服务 | Base URL 示例 |
+|---|---|
+| OpenAI | `https://api.openai.com/v1` |
+| DeepSeek | `https://api.deepseek.com/v1` |
+| SiliconCloud | `https://api.siliconflow.cn/v1` |
+| Ollama | `http://localhost:11434/v1` |
+| LM Studio | `http://localhost:1234/v1` |
 
-   ![获取API Key](https://h1.appinn.me/file/get_api.png)
+项目不保证任何第三方服务的价格、地区可用性、并发额度或模型列表。
 
-3. **在 VideoCaptioner 中配置**
+## CLI 兼容配置
 
-   打开 VideoCaptioner，进入 **设置 → LLM 配置**：
-   - **LLM 服务**: 选择 `SiliconCloud`
-   - **API Base URL**: `https://api.siliconflow.cn/v1`
-   - **API Key**: 粘贴你的 API Key
-   - 点击 **"检查连接"** 测试配置
-   - **模型选择**: 推荐 `Qwen/Qwen2.5-72B-Instruct` 或 `deepseek-ai/DeepSeek-V3`
+CLI 当前使用 legacy `[llm]` 配置：
 
-   ![配置示例](/api-setting.png)
-
-4. **配置线程数**
-
-   SiliconCloud 并发能力有限，建议设置：
-   - **线程数**: 5 或更少
-
-::: warning 注意
-自 2025 年 2 月 6 日起，未实名用户每日最多请求 DeepSeek-V3 模型 100 次。具体限制以服务商当前规则为准。
-:::
-
-### 方式二：使用 OpenAI
-
-如果你有 OpenAI 账号和 API Key：
-
-1. 访问 [OpenAI Platform](https://platform.openai.com) 获取 API Key
-
-2. 在 VideoCaptioner 中配置：
-   - **LLM 服务**: 选择 `OpenAI`
-   - **API Base URL**: `https://api.openai.com/v1`
-   - **API Key**: 你的 OpenAI API Key
-   - **模型选择**:
-     - 经济实惠：`gpt-4o-mini`
-     - 高质量：`gpt-4o` 或 `gpt-4-turbo`
-
-3. **线程数配置**：
-   - OpenAI API 支持较高并发，可设置 10-20 个线程
-
-### 方式三：使用 DeepSeek
-
-[DeepSeek](https://platform.deepseek.com) 是一个性价比极高的国产 LLM。
-
-1. 访问 [DeepSeek 平台](https://platform.deepseek.com) 注册并获取 API Key
-
-2. 在 VideoCaptioner 中配置：
-   - **LLM 服务**: 选择 `DeepSeek`
-   - **API Base URL**: `https://api.deepseek.com/v1`
-   - **API Key**: 你的 DeepSeek API Key
-   - **模型选择**: `deepseek-chat` 或 `deepseek-coder`
-
-3. **线程数配置**：
-   - 建议 5-10 个线程
-
-### 方式四：使用 OpenAI-compatible 服务
-
-如果你使用的是兼容 OpenAI API 的第三方服务，通常可以按以下方式配置：
-
-- **LLM 服务**: 选择 `OpenAI`（兼容模式）
-- **API Base URL**: 填写服务商提供的 `/v1` 地址
-- **API Key**: 填写服务商提供的密钥
-- **模型选择**: 填写该服务支持的模型名称
-
-线程数和可用模型以服务商文档为准；如果出现超时或 429 错误，请降低线程数。
-
-### 方式五：本地部署 Ollama
-
-如果你希望完全本地运行，保护隐私：
-
-1. **安装 Ollama**
-
-   访问 [Ollama 官网](https://ollama.com) 下载并安装
-
-2. **下载模型**
-
-   ```bash
-   # 下载推荐模型
-   ollama pull llama3.1:8b
-
-   # 或下载更大的模型
-   ollama pull qwen2.5:14b
-   ```
-
-3. **启动 Ollama 服务**
-
-   ```bash
-   ollama serve
-   ```
-
-4. **在 VideoCaptioner 中配置**
-   - **LLM 服务**: 选择 `Ollama`
-   - **API Base URL**: `http://localhost:11434/v1`
-   - **API Key**: 留空或填写任意值
-   - **模型选择**: 你下载的模型名称（如 `llama3.1:8b`）
-
-5. **线程数配置**
-
-   根据你的硬件配置：
-   - **CPU**: 2-4 个线程
-   - **GPU**: 4-8 个线程
-
-::: warning 注意
-本地模型的质量通常不如云端 API，建议使用 14B 以上参数的模型。
-:::
-
-## 高级配置
-
-### 自定义提示词
-
-在字幕优化和翻译时，你可以添加自定义提示词来改善输出质量：
-
-**示例：**
-
-```
-请注意以下专业术语：
-- 机器学习 -> Machine Learning
-- 深度学习 -> Deep Learning
-- 神经网络 -> Neural Network
-
-请保持技术术语的准确性，不要过度意译。
+```bash
+uv run videocaptioner config set llm.api_key <your-key>
+uv run videocaptioner config set llm.api_base https://api.openai.com/v1
+uv run videocaptioner config set llm.model <model-name>
 ```
 
-在 **字幕优化与翻译** 页面的 **"文稿提示"** 输入框中填写。
+也可以在单次命令中传入：
 
-### 并发线程数调优
-
-线程数影响处理速度和成本：
-
-| API 类型     | 推荐线程数 | 说明           |
-| ------------ | ---------- | -------------- |
-| OpenAI       | 10-20      | 支持高并发     |
-| DeepSeek     | 5-10       | 有一定并发限制 |
-| SiliconCloud | 3-5        | 并发能力较弱   |
-| 兼容服务     | 以服务商文档为准 | 不同服务限制差异较大 |
-| Ollama 本地  | 2-8        | 取决于硬件性能 |
-
-::: tip 提示
-如果遇到 **请求超时** 或 **429 错误**，说明并发过高，需要降低线程数。
-:::
-
-### 温度参数（Temperature）
-
-温度参数控制模型输出的随机性：
-
-- **0.1-0.3**：输出更稳定、保守（推荐用于字幕优化）
-- **0.5-0.7**：输出更自然、灵活（推荐用于翻译）
-- **0.8-1.0**：输出更有创意（不推荐）
-
-默认值 `0.3` 适用于大多数场景。
-
-## 费用估算
-
-使用 LLM API 会产生一定费用，以下是参考估算：
-
-**示例：处理 14 分钟视频**
-
-- **转录字数**：约 2000 字
-- **使用模型**：`gpt-4o-mini`
-- **处理流程**：断句 + 优化 + 翻译
-- **总费用**：< ¥0.01
-
-::: info 说明
-
-- LLM 仅处理文本内容，不包含时间轴信息，Token 消耗很少
-- 翻译采用 "翻译-反思-翻译" 方法，费用会相应增加
-- 使用批量处理时，费用基本按视频数量线性增长
-  :::
-
-## 常见问题
-
-### 连接测试失败
-
-::: details 解决方案
-
-1. **检查 API Key 格式**
-   - OpenAI: 以 `sk-` 开头
-   - 其他服务商可能有不同格式
-
-2. **检查 Base URL**
-   - 必须包含 `/v1` 后缀
-   - 不要有多余的斜杠
-
-3. **检查网络连接**
-   - 某些服务商需要科学上网
-   - 检查防火墙设置
-
-4. **查看详细错误**
-   - 在 **设置 → 日志** 中查看详细错误信息
-     :::
-
-### 请求频繁失败
-
-::: details 解决方案
-
-1. **降低线程数**
-   - 从 20 降低到 10 或 5
-
-2. **检查 API 额度**
-   - 登录服务商平台查看余额
-
-3. **更换服务商**
-   - 尝试其他 OpenAI-compatible 服务或官方 API
-
-4. **检查模型可用性**
-   - 某些模型可能有地区限制
-     :::
-
-### 输出质量不佳
-
-::: details 解决方案
-
-1. **更换更好的模型**
-   - `gpt-4o-mini` → `gpt-4o`
-   - `gemini-1.5-flash` → `gemini-2.0-flash-exp`
-
-2. **调整温度参数**
-   - 降低温度（如 0.3 → 0.1）获得更稳定输出
-
-3. **添加文稿提示**
-   - 在文稿提示中添加术语表和修正要求
-
-4. **使用反思翻译**
-   - 在翻译设置中启用 "反思翻译"
-     :::
-
-## 推荐配置方案
-
-### 新手推荐
-
-```
-服务商: OpenAI 或 OpenAI-compatible 服务
-模型: gpt-4o-mini
-线程数: 5-10
-温度: 0.3
+```bash
+uv run videocaptioner subtitle input.srt \
+  --api-key <your-key> \
+  --api-base https://api.openai.com/v1 \
+  --model <model-name>
 ```
 
-### 追求质量
+配置优先级为：
 
-```
-服务商: OpenAI 或你信任的兼容服务
-模型: gpt-4o
-线程数: 5-10
-温度: 0.3
-反思翻译: 开启
+```text
+命令行参数 > 环境变量 > 配置文件 > 默认值
 ```
 
-### 预算有限
+增强型 CLI 翻译会把同一个 legacy profile 同时用于主翻译和高级校对。需要为两个角色
+选择不同模型时，请在 GUI 中使用命名模型方案。
 
-```
-服务商: SiliconCloud
-模型: Qwen/Qwen2.5-72B-Instruct
-线程数: 5
-温度: 0.3
-```
+## 并发与上下文预算
 
-### 隐私优先
+- 从较低并发开始，根据服务商的 rate limit 和本地网络逐步调整。
+- 429 或频繁超时时应降低并发，而不是无限重试。
+- 工作上下文预算应小于模型的公开上限，为系统指令、响应和服务端差异留出空间。
+- 增强翻译遇到 context-limit 时，会在当前任务内降低预算到更保守的档位并重新规划；
+  已保存方案不会被静默改写。
 
-```
-服务商: Ollama（本地）
-模型: qwen2.5:14b
-线程数: 4
-温度: 0.5
-```
+## API Key 与日志
+
+- API Key 保存在用户本地配置中，不会上传到项目服务器。
+- 不要把设置文件、终端历史或测试凭据提交到 Git。
+- `llm_requests.jsonl` 会记录完整请求和响应，可能包含字幕与 Prompt 全文。
+- 分享诊断日志前请先检查并清理敏感内容。
+
+## 排障
+
+### 连接失败
+
+1. 检查 Base URL 是否包含服务要求的版本路径。
+2. 检查 API Key、模型名和 Transport 是否匹配。
+3. 检查代理、防火墙和地区限制。
+4. 查看 GUI 请求日志或 `app.log` 中的结构化错误类别。
+
+### 429、超时或并发错误
+
+1. 降低最大并发。
+2. 查看服务商配额与 rate limit。
+3. 减小单批上下文预算。
+4. 确认没有多个任务同时复用同一配额。
+
+### 输出格式错误
+
+增强翻译会对 schema 和字幕 ID 做机械校验并有限重试。重试耗尽时，必要阶段会失败退出，
+不会继续产生看似成功但缺失审计的字幕。
 
 ---
 
-如果还有其他问题，欢迎在 [GitHub Issues](https://github.com/JsonBorn98/VideoCaptioner/issues) 提问。
+相关文档：
 
+- [翻译模式与双角色校对](/config/translator)
+- [CLI 参考](/cli)
+- [常见问题](/guide/faq)

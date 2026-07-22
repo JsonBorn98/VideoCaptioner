@@ -10,13 +10,11 @@ try:
     VERSION = _raw_version.split(".dev")[0]
 except Exception:
     VERSION = "0.0.0-dev"
-YEAR = 2026
 APP_NAME = "VideoCaptioner"
-AUTHOR = "Weifeng"
 
 HELP_URL = "https://github.com/JsonBorn98/VideoCaptioner"
 GITHUB_REPO_URL = "https://github.com/JsonBorn98/VideoCaptioner"
-RELEASE_URL = "https://github.com/JsonBorn98/VideoCaptioner/releases/latest"
+RELEASE_URL = "https://github.com/JsonBorn98/VideoCaptioner/releases"
 FEEDBACK_URL = "https://github.com/JsonBorn98/VideoCaptioner/issues"
 
 # Detect whether running from source tree or pip-installed

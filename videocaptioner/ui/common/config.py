@@ -711,11 +711,6 @@ class Config(QConfig):
         restart=True,
     )
 
-    # ------------------- 更新配置 -------------------
-    checkUpdateAtStartUp = ConfigItem(
-        "Update", "CheckUpdateAtStartUp", True, BoolValidator()
-    )
-
     # ------------------- 缓存配置 -------------------
     cache_enabled = ConfigItem("Cache", "CacheEnabled", True, BoolValidator())
 

@@ -1,6 +1,6 @@
 # 任务方案：字幕视频合成模块重构（Handbrake 式编码控制）
 
-> 领域词汇见 [`CONTEXT-VIDEO-SYNTHESIS.md`](../../CONTEXT-VIDEO-SYNTHESIS.md)；关键决策见 `docs/adr/0006~0008`。
+> 领域词汇见仓库根目录 `CONTEXT-VIDEO-SYNTHESIS.md`；关键决策见 `docs/adr/0006~0008`。
 > 本文是需求 grilling 后形成的实施蓝图，所有设计点均有对应决策记录。
 
 ## 1. 背景与现状

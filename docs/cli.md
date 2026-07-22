@@ -2,7 +2,8 @@
 
 ## 安装
 
-普通用户请下载 GitHub Release 桌面包。本 fork 不发布 PyPI 包，`pip install videocaptioner` 不再作为推荐安装方式。
+当前 fork 尚未发布公开桌面 Release，也不发布 PyPI 包。现阶段请从源码运行；
+`pip install videocaptioner` 不是受支持的安装方式。
 
 源码开发环境：
 
@@ -11,8 +12,12 @@ uv sync --python 3.12
 uv run videocaptioner --help
 ```
 
-免费功能（转录、必应/谷歌翻译）无需任何配置，安装后直接使用。
-需要桌面版时运行 `videocaptioner-gui`、`videocaptioner gui`，或直接运行无参数的 `videocaptioner`。
+必剪转录、必应/谷歌翻译等兼容后端无需 LLM 配置；其他后端按各自要求配置 Runtime 或 API。
+需要桌面版时运行 `uv run videocaptioner-gui`、`uv run videocaptioner gui`，或直接运行
+`uv run videocaptioner`。
+
+下文为便于阅读统一使用裸 `videocaptioner` 命令。源码用户应在命令前加 `uv run`，
+或先激活项目 `.venv`；桌面包自带的 CLI 无需此前缀。
 
 ---
 
@@ -82,7 +87,7 @@ videocaptioner transcribe <文件> [选项]
 
 1. **拆分与断句** — 按现有字数上限和语义边界重组字幕
 2. **优化** — 修正 ASR 错误和翻译前文本（LLM）
-3. **翻译** — 翻译到其他语言（LLM / 必应 / 谷歌）
+3. **翻译** — 非 LLM、单 LLM 或增强型双角色 LLM 工作流
 
 该命令只生成可直接使用的初版字幕，不执行标点清理、阅读速度优化、间隙修复或媒体对齐。
 普通 cue 级字幕继续沿用原有估算字词时间与重新断句逻辑。默认开启拆分和文本优化，翻译默认
@@ -98,20 +103,27 @@ videocaptioner subtitle <字幕文件> [选项]
 
 | 选项 | 说明 |
 |------|------|
-| `--translator` | 翻译服务：`llm`(默认) `bing`(免费) `google`(免费) |
+| `--translator` | 非 LLM 服务：`bing`、`google`、`deeplx`；旧值 `llm` 会选择增强模式 |
+| `--translation-mode` | `non_llm`、`single_llm` 或 `enhanced_llm` |
 | `--target-language CODE` | 目标语言 BCP 47 代码：`zh-Hans` `en` `ja` `ko` `fr` `de` 等 |
 | `--no-optimize` | 跳过优化 |
 | `--no-translate` | 跳过翻译 |
 | `--no-split` | 关闭 LLM 智能断句，使用本地快速合并 |
 | `--max-cjk N` | CJK 单段最大字符数 |
 | `--max-english N` | 英文单段最大单词数 |
-| `--reflect` | 反思式翻译（仅 LLM，质量更高但更慢） |
+| `--reflect` | 反思式翻译，仅 `single_llm` |
+| `--glossary FILE` | 导入 `.vcglossary.json`，仅 `enhanced_llm` |
+| `--review-prompt TEXT` | 高级校对 Prompt，仅 `enhanced_llm` |
 | `--layout` | 双语布局：`target-above` `source-above` `target-only` `source-only` |
 | `--prompt TEXT` | 自定义提示词（辅助 LLM 优化/翻译） |
 | `--api-key` | LLM API 密钥（或设置 `OPENAI_API_KEY` 环境变量） |
 | `--api-base` | LLM API 地址（或设置 `OPENAI_BASE_URL` 环境变量） |
 | `--model` | LLM 模型名（如 gpt-4o-mini） |
 | `-o PATH` | 规范 SRT 输出文件或目录；其他扩展名会替换为 `.srt` |
+
+增强模式会保存项目术语表、Markdown 审计报告和分阶段 token usage。CLI 使用非交互
+术语确认与客观问题自动修复策略；两个角色当前共用一个 legacy 模型 profile。
+完整说明见[翻译模式与双角色校对](/config/translator)。
 
 ### `postprocess` — 独立字幕后处理
 
@@ -145,9 +157,16 @@ videocaptioner postprocess <字幕文件> [选项]
 | `--qa-report` | 在输出旁生成统一 Markdown 质量报告 |
 | `-o PATH` | 规范 SRT 输出路径；其他扩展名会替换为 `.srt` |
 
+`--qa-report` 生成 `<输出名>.qa.md`；只要速度阶段产生审计结果，还会自动生成
+`<输出名>.speed-changes.json`。仅在精确时间轴实际应用且启用
+`--speed-save-timing-sidecar` 时生成 `.vctiming.json`。自定义完整后处理方案需在 GUI 的
+“字幕后处理设置”中创建和编辑，CLI 使用其稳定 ID；`--speed-profile-file` 只临时加载
+已导出的速度策略 JSON，不会导入或改写应用方案库。
+
 ### `synthesize` — 字幕视频合成
 
-将字幕烧录到视频中，支持美观的样式化字幕。
+把字幕作为软字幕轨道封装，或通过 ASS / 圆角背景硬烧到画面。软字幕路径直接复制
+视频/音频流并添加字幕轨；硬字幕路径使用集中编码引擎。
 
 ```bash
 videocaptioner synthesize <视频> -s <字幕> [选项]
@@ -157,12 +176,38 @@ videocaptioner synthesize <视频> -s <字幕> [选项]
 |------|------|
 | `-s FILE` | **必填**，字幕文件 |
 | `--subtitle-mode` | `soft`(默认,嵌入轨道) 或 `hard`(烧录画面) |
-| `--quality` | 视频质量：`ultra`(CRF18) `high`(CRF23) `medium`(默认,CRF28) `low`(CRF32) |
+| `--quality` | CQ 数值档位：`ultra`(18) `high`(23) `medium`(默认,28) `low`(32)；未显式给 `--cq` 时使用 |
 | `--layout` | 双语字幕布局 |
+| `--video-encoder` | 硬字幕编码器：x264/x265/SVT-AV1/AOM-AV1/VP9、NVENC/QSV/AMF，或自定义编码器 |
+| `--encode-mode` | `cq` 或 `abr` |
+| `--cq` / `--bitrate` | 编码器原生 CQ 数值，或 ABR 平均视频码率（kbps） |
+| `--two-pass` | CPU ABR 两遍编码 |
+| `--preset` / `--tune` / `--profile` / `--level` | 编码器高级选项 |
+| `--fast-decode` | x264/x265 fast-decode tune |
+| `--height` / `--fps` | 输出高度与帧率 |
+| `--vfr` / `--cfr` | 可变或恒定帧率 |
+| `--audio-encoder` | `copy`、AAC、Opus、AC3、MP3 或 FLAC |
+| `--audio-bitrate` | 音频重编码码率（kbps） |
+| `--container` | `mp4` 或 `mkv` |
+| `--faststart` / `--no-faststart` | MP4 faststart |
+| `--keep-metadata` / `--no-keep-metadata` | 元数据策略 |
+| `--extra-args` | 追加自定义 FFmpeg 参数 |
+| `--print-command` | 只打印将执行的命令 |
+| `--raw-ffmpeg` | 执行原始 FFmpeg argv；可执行文件仍使用受管核心 |
 | `--style NAME` | 样式预设（运行 `videocaptioner style` 查看） |
 | `--style-override JSON` | 内联 JSON 覆盖样式字段，如 `'{"outline_color": "#ff0000"}'` |
 | `--render-mode` | 渲染模式：`ass`(默认,描边样式) 或 `rounded`(圆角背景) |
 | `--font-file PATH` | 自定义字体文件 (.ttf/.otf) |
+
+显式 `--cq` 优先于 `--quality`；`--encode-mode abr` 时由 `--bitrate` 控制视频码率，
+上述 CQ 档位不参与码率计算。CQ 的具体含义由编码器决定，并非所有编码器都使用 CRF。
+硬字幕必须重编码，不能视频直通；CLI 在硬字幕路径选择 `copy` 时会回退到 x264。
+容器、视频编码和音频编码的组合最终由当前 FFmpeg build 校验，例如需要更宽松封装兼容性
+时优先选择 MKV，并在执行前使用 `--print-command` 检查命令。
+
+结构化编码参数、`--extra-args` 和 `--print-command` 当前仅适用于硬字幕路径。默认软字幕
+路径固定复制视频/音频流，并按 MP4/MKV 选择字幕 codec；如需完全自定义软字幕命令，使用
+`--raw-ffmpeg` 并在命令中自行加入字幕输入、映射和 codec。
 
 #### 字幕样式
 
@@ -189,6 +234,9 @@ videocaptioner synthesize video.mp4 -s sub.srt --subtitle-mode hard \
 ```
 
 运行 `videocaptioner style` 查看所有预设及其参数。样式选项仅对硬字幕（`--subtitle-mode hard`）生效。
+
+GUI 还提供编码器编译/硬件真实可用性探测、只读命令预览、FFmpeg Console，以及
+暂停、继续和停止控制。完整说明见 [FFmpeg 合成导出](/guide/video-synthesis)。
 
 ---
 
@@ -259,6 +307,7 @@ videocaptioner process <音视频文件> [选项]
 |------|------|
 | `--no-synthesize` | 跳过视频合成（只输出字幕） |
 | `--no-postprocess` | 跳过字幕后处理，直接使用初版字幕 |
+| `--to CODE` | 目标语言 BCP 47 代码；`--target-language CODE` 是兼容别名 |
 | `--dub` | 在转录/处理字幕后生成配音音轨或配音视频 |
 | `--dub-only` | 只输出配音结果，跳过字幕烧录/嵌入 |
 
@@ -324,11 +373,14 @@ videocaptioner config init --print-template
 ### `doctor` — 环境诊断
 
 ```bash
-videocaptioner doctor          # 检查依赖和配置
-videocaptioner doctor --json   # Agent/CI 友好的 JSON 输出
+videocaptioner doctor                    # 检查全部常用依赖和配置
+videocaptioner doctor --profile gui      # 聚焦 GUI 启动环境
+videocaptioner doctor --profile qwen     # 聚焦 Qwen Runtime 与模型目录
+videocaptioner doctor --json             # Agent/CI 友好的 JSON 输出
 ```
 
-会检查 Python、FFmpeg/FFprobe、yt-dlp、配置文件、ASR、LLM、翻译和配音关键配置。缺失项会给出对应修复命令。
+`--profile` 支持 `all`（默认）、`gui` 和 `qwen`。完整检查会覆盖 Python、
+FFmpeg/FFprobe、yt-dlp、配置文件、ASR、LLM、翻译和配音关键配置；缺失项会给出对应修复命令。
 
 ---
 

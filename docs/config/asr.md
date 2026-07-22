@@ -68,7 +68,7 @@
 
 - 桌面 Release：打开 **设置 → 转录配置 → Qwen 组件管理**，选择 **安装 CPU 运行时** 或 **安装 CUDA 运行时**，再下载 ASR / ForcedAligner 模型。
 - 源码运行 GUI：同样推荐在 **Qwen 组件管理** 中安装独立运行时，然后用 `uv run videocaptioner doctor --profile qwen` 检查状态。
-- 源码级调试 `qwen-asr` 集成：如果确实希望把依赖装进当前 `.venv`，再执行 `uv sync --python 3.12 --extra qwen`。
+- 仅使用源码 CLI，或需要调试 `qwen-asr` 集成：可执行 `uv sync --python 3.12 --extra qwen`，把依赖装进当前 `.venv`；该路径不会创建独立 Runtime，`doctor --profile qwen` 也不会把它识别为 GUI managed-runtime。
 
 Qwen runtime 会安装到用户数据目录下的独立 `runtimes/qwen` 环境，避免把 PyTorch / qwen-asr 混入主程序包。源码运行时路径通常是项目目录下的 `AppData/runtimes/qwen`；桌面 Release 会使用系统用户数据目录。
 

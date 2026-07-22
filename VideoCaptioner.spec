@@ -122,7 +122,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="VideoCaptioner.app",
-        bundle_identifier="com.weifeng.videocaptioner",
+        bundle_identifier="io.github.jsonborn98.videocaptioner",
         info_plist={
             "CFBundleName": "VideoCaptioner",
             "CFBundleDisplayName": "VideoCaptioner",

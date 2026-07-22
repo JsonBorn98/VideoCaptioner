@@ -183,7 +183,7 @@ def run(args: Namespace, config: dict) -> int:
     crf, preset = _QUALITY_MAP.get(quality, (28, "medium"))
     soft = subtitle_mode == "soft"
 
-    # New engine settings from flags (CQ falls back to the --quality tier's CRF)
+    # New engine settings from flags (native CQ falls back to the --quality tier value)
     encode_settings = _build_encode_settings(args, quality)
     if not soft and encode_settings.video_encoder == "copy":
         from dataclasses import replace
@@ -326,7 +326,7 @@ def _register_font(font_file: str) -> None:
 
 
 def _build_encode_settings(args: Namespace, quality_tier: str):
-    """Build EncodeSettings from CLI flags; CQ falls back to the --quality tier's CRF."""
+    """Build EncodeSettings; native CQ falls back to the legacy quality tier value."""
     from videocaptioner.core.synthesis.models import EncodeSettings
 
     tier_crf = {"ultra": 18, "high": 23, "medium": 28, "low": 32}.get(quality_tier, 28)

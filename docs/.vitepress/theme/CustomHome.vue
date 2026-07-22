@@ -7,29 +7,29 @@
         <div class="hero-content">
           <div class="hero-badge">
             <span class="badge-emoji">🎬</span>
-            开源免费 · 用心打造
+            Fork 独立维护 · GPL-3.0
           </div>
           <h1 class="hero-title">
-            给你的视频<br>
-            <span class="gradient-text">一副好字幕</span>
+            从转录到成片<br>
+            <span class="gradient-text">每一步都可控</span>
           </h1>
           <p class="hero-description">
-            不只是转录文字，更懂语义和语境<br>
-            让 AI 帮你把字幕做得像人工精修一样好
+            精确时间轴、双角色翻译校对、字幕后处理与专业编码<br>
+            GUI 与 CLI 共享核心流程，并分别服务交互精修与批量自动化
           </p>
           <div class="hero-stats-inline">
-            <span class="stat-inline">⚡ 4分钟处理14分钟视频</span>
+            <span class="stat-inline">🎙️ MiMo / Qwen / Whisper</span>
             <span class="stat-divider">·</span>
-            <span class="stat-inline">💰 成本不足 ¥0.01</span>
+            <span class="stat-inline">🌐 双角色 LLM 翻译</span>
             <span class="stat-divider">·</span>
-            <span class="stat-inline">🌍 支持99种语言</span>
+            <span class="stat-inline">🎞️ 14 个编码器目录项</span>
           </div>
           <div class="hero-actions">
-            <a href="/guide/getting-started" class="btn-primary">
+            <a :href="withBase('/guide/getting-started')" class="btn-primary">
               <span>立即开始</span>
               <span class="btn-arrow">→</span>
             </a>
-            <a href="https://github.com/WEIFENG2333/VideoCaptioner" class="btn-secondary">
+            <a href="https://github.com/JsonBorn98/VideoCaptioner" class="btn-secondary">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
               </svg>
@@ -40,8 +40,8 @@
         <div class="hero-visual">
           <div class="visual-card">
             <div class="card-decoration"></div>
-            <img src="https://h1.appinn.me/file/1731487405884_main.png" alt="VideoCaptioner 界面预览">
-            <div class="card-badge">实时预览</div>
+            <img :src="withBase('/main.png')" alt="VideoCaptioner 界面预览">
+            <div class="card-badge">字幕工作台</div>
           </div>
         </div>
       </div>
@@ -52,20 +52,20 @@
       <div class="container">
         <div class="stats-grid">
           <div class="stat-item">
-            <div class="stat-number">95%+</div>
-            <div class="stat-label">识别准确度</div>
+            <div class="stat-number">3</div>
+            <div class="stat-label">翻译工作模式</div>
           </div>
           <div class="stat-item">
-            <div class="stat-number">99</div>
-            <div class="stat-label">支持语言</div>
+            <div class="stat-number">14</div>
+            <div class="stat-label">编码器目录项</div>
           </div>
           <div class="stat-item">
-            <div class="stat-number">4min</div>
-            <div class="stat-label">处理14分钟视频</div>
+            <div class="stat-number">SRT/VTT/ASS</div>
+            <div class="stat-label">字幕输入与导出</div>
           </div>
           <div class="stat-item">
-            <div class="stat-number">¥0.01</div>
-            <div class="stat-label">单视频成本</div>
+            <div class="stat-number">GUI + CLI</div>
+            <div class="stat-label">桌面与自动化入口</div>
           </div>
         </div>
       </div>
@@ -75,51 +75,51 @@
     <section class="features-section">
       <div class="container">
         <div class="section-header">
-          <h2 class="section-title">我们在乎的事情</h2>
-          <p class="section-subtitle">这些功能，都是为了让你更轻松</p>
+          <h2 class="section-title">Fork 核心增强</h2>
+          <p class="section-subtitle">围绕字幕生产链路补齐可控性、质量保障和交付能力</p>
         </div>
         <div class="features-grid">
           <div class="feature-card">
             <div class="feature-icon-wrap">
-              <div class="feature-icon">⚡</div>
+              <div class="feature-icon">🎙️</div>
             </div>
-            <h3 class="feature-title">快，真的快</h3>
-            <p class="feature-desc">14分钟视频只需4分钟处理。你去泡杯咖啡的功夫，字幕就好了</p>
+            <h3 class="feature-title">专业转录与时间轴</h3>
+            <p class="feature-desc">MiMo API、Qwen3 本地 ASR 和 Qwen3-ForcedAligner，配合 VAD 分块、常驻 Worker、异常重试和降级时间轴。</p>
           </div>
           <div class="feature-card">
             <div class="feature-icon-wrap">
-              <div class="feature-icon">🧠</div>
+              <div class="feature-icon">🌐</div>
             </div>
-            <h3 class="feature-title">懂语义，不只是转录</h3>
-            <p class="feature-desc">LLM 会帮你智能断句、纠正错别字、统一专业术语。就像有个助手在帮你</p>
+            <h3 class="feature-title">双角色翻译校对</h3>
+            <p class="feature-desc">主翻译与高级校对分别负责全文分析、术语裁决、分批翻译和完整审计，并生成可复用术语表。</p>
           </div>
           <div class="feature-card">
             <div class="feature-icon-wrap">
-              <div class="feature-icon">🌍</div>
+              <div class="feature-icon">📐</div>
             </div>
-            <h3 class="feature-title">全球化不是梦</h3>
-            <p class="feature-desc">99种语言识别，37种语言翻译。你的内容可以触达全世界</p>
+            <h3 class="feature-title">自适应字幕后处理</h3>
+            <p class="feature-desc">处理闪轴、单句时长、阅读速度、标点、重叠和尾部补偿，支持 QA 报告与可验证的局部语义修复。</p>
           </div>
           <div class="feature-card">
             <div class="feature-icon-wrap">
-              <div class="feature-icon">💝</div>
+              <div class="feature-icon">🎞️</div>
             </div>
-            <h3 class="feature-title">完全免费，永久开源</h3>
-            <p class="feature-desc">MIT 协议，代码透明。你的数据在本地，隐私完全掌控在自己手里</p>
+            <h3 class="feature-title">可控 FFmpeg 合成</h3>
+            <p class="feature-desc">软件与硬件编码、CQ/ABR、画面与音频参数、命令预览、自定义参数、实时 Console 和任务控制集中管理。</p>
           </div>
           <div class="feature-card">
             <div class="feature-icon-wrap">
-              <div class="feature-icon">🏠</div>
+              <div class="feature-icon">📋</div>
             </div>
-            <h3 class="feature-title">老电脑也能用</h3>
-            <p class="feature-desc">不需要昂贵的显卡。有 CPU 就能跑，有 GPU 更快。云端和本地随你选</p>
+            <h3 class="feature-title">阶段摘要与运行日志</h3>
+            <p class="feature-desc">GUI 与 CLI 展示阶段产物、降级状态和实时日志，长任务中的失败与回退都有据可查。</p>
           </div>
           <div class="feature-card">
             <div class="feature-icon-wrap">
               <div class="feature-icon">🎨</div>
             </div>
-            <h3 class="feature-title">样式随心调</h3>
-            <p class="feature-desc">科普风、新闻风、番剧风...各种模板任你挑。支持 SRT、ASS、VTT 格式</p>
+            <h3 class="feature-title">双语样式与阶段交付</h3>
+            <p class="feature-desc">保持单双语布局，提供扩展 ASS 样式与字体预设，并为转录、初版和后处理阶段保存规范 SRT 或自动导出 ASS/VTT。</p>
           </div>
         </div>
       </div>
@@ -129,19 +129,19 @@
     <section class="cta-section">
       <div class="container">
         <div class="cta-content">
-          <div class="cta-emoji">✨</div>
-          <h2 class="cta-title">试试看？不用担心，完全免费</h2>
+          <div class="cta-emoji">🚀</div>
+          <h2 class="cta-title">从源码开始使用</h2>
           <p class="cta-description">
-            下载或者直接从源码运行都可以<br>
-            有问题随时在 GitHub 提 Issue，社区会帮你
+            当前 fork 尚未发布公开桌面 Release<br>
+            使用 uv 安装主程序，再按需启用本地模型或云端服务
           </p>
           <div class="cta-buttons">
-            <a href="/guide/getting-started" class="btn-cta-primary">
+            <a :href="withBase('/guide/getting-started')" class="btn-cta-primary">
               <span>开始使用</span>
               <span class="btn-arrow">→</span>
             </a>
-            <a href="/guide/faq" class="btn-cta-secondary">
-              <span>看看常见问题</span>
+            <a :href="withBase('/guide/faq')" class="btn-cta-secondary">
+              <span>查看常见问题</span>
             </a>
           </div>
         </div>
@@ -151,6 +151,7 @@
 </template>
 
 <script setup>
+import { withBase } from 'vitepress'
 </script>
 
 <style scoped>

@@ -522,11 +522,11 @@ def _build_synthesize_parser(subparsers) -> None:
     opt.add_argument(
         "--quality",
         choices=["ultra", "high", "medium", "low"],
-        help="Video quality (default: medium)\n"
-        "  ultra:  CRF 18, slow preset — best quality, largest file\n"
-        "  high:   CRF 23, medium preset\n"
-        "  medium: CRF 28, medium preset — balanced\n"
-        "  low:    CRF 32, fast preset — smallest file",
+        help="Fallback CQ tier when --cq is omitted (default: medium)\n"
+        "  ultra:  native quality value 18\n"
+        "  high:   native quality value 23\n"
+        "  medium: native quality value 28\n"
+        "  low:    native quality value 32",
     )
     opt.add_argument(
         "--layout",

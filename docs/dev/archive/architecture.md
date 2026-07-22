@@ -38,5 +38,5 @@ PyQt5 用户界面模块。
 ---
 
 相关文档：
-- [API 文档](/dev/api)
+- [API 文档](./api)
 - [贡献指南](/dev/contributing)

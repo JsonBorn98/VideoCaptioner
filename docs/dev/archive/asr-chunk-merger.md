@@ -247,5 +247,5 @@ uv run pytest tests/test_asr/test_chunk_merger.py::TestChunkMergerBasic -v
 
 ## 相关文档
 
-- [ASRData 数据结构](../asr_data.py)
+- ASRData 数据结构：`videocaptioner/core/asr/asr_data.py`
 - [Groq Audio Chunking Tutorial](https://github.com/groq/groq-api-cookbook/blob/main/tutorials/audio-chunking/audio_chunking_tutorial.ipynb)
