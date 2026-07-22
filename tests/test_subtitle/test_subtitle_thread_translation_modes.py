@@ -17,8 +17,10 @@ from videocaptioner.core.translate.enhanced.models import (
     AuthoritativeGlossary,
     EnhancedTranslationError,
     EnhancedTranslationResult,
+    TranslationAuditMode,
     TranslationAuditReport,
     TranslationContextBrief,
+    TranslationExecutionMode,
 )
 from videocaptioner.core.translate.enhanced.runner import (
     EnhancedTranslationArtifacts,
@@ -154,6 +156,31 @@ def test_enhanced_mode_uses_runner_sets_artifacts_and_saves_initial_subtitle(
     assert captured["config"].main_role.user_prompt == "main prompt"
     assert captured["config"].review_role.user_prompt == "review prompt"
     assert captured["kwargs"]["cancellation"] is thread.cancellation
+    assert captured["kwargs"]["confirm_audit"] is None
+
+
+def test_standalone_manual_audit_passes_blocking_confirmation_callback(
+    tmp_path, monkeypatch, qapp
+):
+    config = _config(TranslationMode.ENHANCED_LLM)
+    config.main_llm_profile = _profile("main")
+    config.review_llm_profile = _profile("review")
+    config.translation_audit_mode = TranslationAuditMode.REVIEW_AND_CONFIRM
+    config.translation_execution_mode = TranslationExecutionMode.GUI_STANDALONE
+    task = _task(tmp_path, config)
+    captured = {}
+
+    def fake_run(source, enhanced_config, **kwargs):
+        captured.update(kwargs)
+        return _enhanced_run(tmp_path, source, "人工确认后的译文")
+
+    monkeypatch.setattr(thread_module, "run_enhanced_translation", fake_run)
+    thread = SubtitleThread(task)
+
+    result = thread._run_enhanced_translation(task.input_data, config)
+
+    assert result.segments[0].translated_text == "人工确认后的译文"
+    assert callable(captured["confirm_audit"])
 
 
 class _NullCache:

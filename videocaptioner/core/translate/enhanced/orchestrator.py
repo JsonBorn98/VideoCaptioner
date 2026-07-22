@@ -15,7 +15,7 @@ from videocaptioner.core.llm import LLMGateway, LLMMessage, LLMRequest, LLMUsage
 from videocaptioner.core.llm.models import LLMCallError, LLMErrorCategory
 from videocaptioner.core.utils.logger import setup_logger
 
-from .audit import apply_objective_fixes, local_audit_issues
+from .audit import apply_review_fixes, local_audit_issues
 from .glossary import (
     classify_glossary_import,
     normalize_term,
@@ -23,7 +23,6 @@ from .glossary import (
     subtitle_fingerprint,
 )
 from .models import (
-    AuditIssueDisposition,
     AuthoritativeGlossary,
     CancellationToken,
     EnhancedTranslationConfig,
@@ -86,7 +85,25 @@ _TERM_REVIEW_FINAL_INSTRUCTION = """Make the final decision with the expanded co
 
 _TRANSLATE_INSTRUCTION = """Translate every item in translation_subjects into the target language. Use the task brief and authoritative terms. Do not translate or output boundary_context_read_only. Return each allowed output ID exactly once."""
 
-_AUDIT_INSTRUCTION = """Audit source and translated subtitles for semantic fidelity, omissions, additions, source copying, facts, negation, references, terminology, continuity, target-language quality and format integrity. Return only real issues and include a suggested translation when useful. Do not assess timing, CPS, line breaking, merging, layout, gaps or generic punctuation cleanup."""
+_AUDIT_INSTRUCTION = """Audit source and translated subtitles for semantic fidelity, omissions, additions, source copying, facts, negation, references, terminology, continuity, target-language quality and format integrity. Return at most one issue object per subtitle ID. Consolidate every finding for that subtitle into categories and one message, and provide exactly one complete corrected subtitle in suggested_translation. Use an empty suggestion only when reporting an issue that cannot be safely corrected. Do not assess timing, CPS, line breaking, merging, layout, gaps or generic punctuation cleanup."""
+
+_AUDIT_CATEGORIES = (
+    "semantic_accuracy",
+    "omission",
+    "addition",
+    "untranslated_content",
+    "source_copied",
+    "fact_number_unit",
+    "negation_modality",
+    "reference",
+    "terminology",
+    "name_or_title",
+    "continuity",
+    "target_language_quality",
+    "format_integrity",
+    "protected_token_missing",
+    "empty_translation",
+)
 
 
 def _structured_output_instruction(schema: Mapping[str, Any]) -> str:
@@ -216,17 +233,18 @@ _AUDIT_SCHEMA: Mapping[str, Any] = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer"},
-                    "category": {"type": "string"},
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_AUDIT_CATEGORIES)},
+                    },
                     "message": {"type": "string"},
                     "suggested_translation": {"type": "string"},
-                    "objective": {"type": "boolean"},
                 },
                 "required": [
                     "id",
-                    "category",
+                    "categories",
                     "message",
                     "suggested_translation",
-                    "objective",
                 ],
                 "additionalProperties": False,
             },
@@ -235,22 +253,6 @@ _AUDIT_SCHEMA: Mapping[str, Any] = {
     "required": ["issues"],
     "additionalProperties": False,
 }
-
-_OBJECTIVE_AUDIT_CATEGORIES = {
-    "terminology",
-    "omission",
-    "addition",
-    "source_copied",
-    "number",
-    "unit",
-    "negation",
-    "modality",
-    "name_or_title",
-    "placeholder",
-    "protected_token_missing",
-    "empty_translation",
-}
-
 
 class _UsageCollector:
     def __init__(self) -> None:
@@ -308,6 +310,7 @@ class EnhancedTranslationOrchestrator:
         confirm_terms: Optional[
             Callable[[tuple[TermCandidate, ...]], Sequence[TermCandidate]]
         ] = None,
+        confirm_audit: Optional[Callable[[TranslationAuditReport], Sequence[int]]] = None,
         on_glossary: Optional[Callable[[AuthoritativeGlossary], None]] = None,
     ) -> EnhancedTranslationResult:
         ordered = tuple(cues)
@@ -329,7 +332,7 @@ class EnhancedTranslationOrchestrator:
             imported_mode = classified.mode
             imported = classified.glossary
             if classified.reason:
-                self._warnings.append(f"Glossary import: {classified.reason}")
+                self._warnings.append(f"导入术语表：{classified.reason}")
 
         if imported_mode is GlossaryImportMode.EXACT and imported is not None:
             glossary = imported
@@ -358,7 +361,7 @@ class EnhancedTranslationOrchestrator:
                 reviewed = tuple(confirm_terms(reviewed))
             for candidate in reviewed:
                 if candidate.ignored or not candidate.is_term:
-                    warning = f"Term candidate excluded from glossary: {candidate.source_term}"
+                    warning = f"候选未纳入权威术语表：{candidate.source_term}"
                     if warning not in self._warnings:
                         self._warnings.append(warning)
             glossary = AuthoritativeGlossary(
@@ -385,12 +388,43 @@ class EnhancedTranslationOrchestrator:
         translations, issues = self._with_context_fallback(
             self._audit, ordered, translations, brief, glossary
         )
-        report = TranslationAuditReport(
+        preliminary_report = TranslationAuditReport(
             issues=issues,
             authoritative_terms=glossary.entries,
             usages=self._usage.snapshot(),
             warnings=tuple(self._warnings),
         )
+        if self.config.audit_mode is TranslationAuditMode.AUTO_APPLY_REVIEW:
+            translations, issues = apply_review_fixes(
+                translations,
+                issues,
+                authoritative_terms=glossary.entries,
+            )
+        elif issues:
+            if confirm_audit is None:
+                raise EnhancedTranslationError(
+                    "manual audit review requires a confirmation callback",
+                    stage="audit_confirmation",
+                    category="configuration",
+                    retryable=False,
+                )
+            self.cancellation.raise_if_cancelled()
+            accepted_ids = set(confirm_audit(preliminary_report))
+            known_ids = {issue.cue_id for issue in issues}
+            if not accepted_ids <= known_ids:
+                raise EnhancedTranslationError(
+                    "audit confirmation returned unknown subtitle IDs",
+                    stage="audit_confirmation",
+                    category="validation",
+                    retryable=False,
+                )
+            translations, issues = apply_review_fixes(
+                translations,
+                issues,
+                authoritative_terms=glossary.entries,
+                accepted_ids=accepted_ids,
+            )
+        report = replace(preliminary_report, issues=issues)
         self._emit(100, "Enhanced translation completed")
         return EnhancedTranslationResult(
             translations=dict(translations),
@@ -434,10 +468,10 @@ class EnhancedTranslationOrchestrator:
                         attempts=signal.error.attempts,
                     ) from signal.error
                 self._runtime_context_tokens[profile_id] = lowered
+                role_name = "主翻译" if signal.role.role == "main" else "高级校对"
                 warning = (
-                    f"Provider rejected the {current}-token runtime budget for "
-                    f"{signal.role.role}; retrying at {lowered} tokens. "
-                    "The saved model profile was not changed."
+                    f"接口拒绝 {role_name} 使用 {current} token 的工作上下文，"
+                    f"已回退到 {lowered} token；保存的模型方案未被修改。"
                 )
                 logger.warning(warning)
                 self._warnings.append(warning)
@@ -760,7 +794,7 @@ class EnhancedTranslationOrchestrator:
             )
             if not review_value["is_term"]:
                 self._warnings.append(
-                    f"Term candidate excluded by reviewer: {candidate.source_term}"
+                    f"高级校对判定不是术语：{candidate.source_term}"
                 )
                 resolved.append(
                     replace(
@@ -799,7 +833,7 @@ class EnhancedTranslationOrchestrator:
                     if exc.category != "invalid_response":
                         raise
                     self._warnings.append(
-                        f"Term review fallback kept source text: {candidate.source_term}"
+                        f"术语校对响应无效，已保留原文：{candidate.source_term}"
                     )
                     resolved.append(
                         replace(
@@ -1123,17 +1157,44 @@ class EnhancedTranslationOrchestrator:
                     ),
                 )
             )
-        issues_by_key: dict[tuple[int, str], TranslationAuditIssue] = {
-            (issue.cue_id, issue.category): issue for issue in local
-        }
-        for issue in model_issues:
-            issues_by_key[(issue.cue_id, issue.category)] = issue
-        issues = tuple(issues_by_key.values())
-        if self.config.audit_mode is TranslationAuditMode.AUTO_FIX_OBJECTIVE:
-            return apply_objective_fixes(translations, issues)
-        return dict(translations), tuple(
-            replace(issue, disposition=AuditIssueDisposition.REPORTED) for issue in issues
-        )
+        local_by_id: dict[int, list[TranslationAuditIssue]] = {}
+        for issue in local:
+            local_by_id.setdefault(issue.cue_id, []).append(issue)
+        model_by_id = {issue.cue_id: issue for issue in model_issues}
+        issues: list[TranslationAuditIssue] = []
+        for cue in cues:
+            model_issue = model_by_id.get(cue.cue_id)
+            local_for_cue = local_by_id.get(cue.cue_id, [])
+            if model_issue is None and not local_for_cue:
+                continue
+            categories = tuple(
+                dict.fromkeys(
+                    category
+                    for issue in ([model_issue] if model_issue is not None else [])
+                    + local_for_cue
+                    for category in issue.categories
+                )
+            )
+            messages: list[str] = []
+            if model_issue is not None:
+                messages.append(model_issue.message)
+            for issue in local_for_cue:
+                if issue.message not in messages:
+                    messages.append(issue.message)
+            issues.append(
+                TranslationAuditIssue(
+                    cue_id=cue.cue_id,
+                    category=categories[0],
+                    categories=categories,
+                    message=" ".join(messages),
+                    original_text=cue.text,
+                    translated_text=translations.get(cue.cue_id, ""),
+                    suggested_translation=(
+                        model_issue.suggested_translation if model_issue is not None else ""
+                    ),
+                )
+            )
+        return dict(translations), tuple(issues)
 
     @staticmethod
     def _parse_audit_issues(
@@ -1146,26 +1207,37 @@ class EnhancedTranslationOrchestrator:
             raise ValueError("audit response requires issues array")
         source_by_id = {cue.cue_id: cue.text for cue in cues}
         result: list[TranslationAuditIssue] = []
+        seen_ids: set[int] = set()
         for item in value["issues"]:
             if not isinstance(item, Mapping) or not isinstance(item.get("id"), int):
                 raise ValueError("audit issue requires integer id")
             cue_id = item["id"]
             if cue_id not in allowed:
                 raise ValueError(f"audit issue ID {cue_id} is outside the subject batch")
-            category = str(item.get("category", "")).strip()
+            if cue_id in seen_ids:
+                raise ValueError(f"audit issue ID {cue_id} is duplicated")
+            seen_ids.add(cue_id)
+            raw_categories = item.get("categories")
+            if not isinstance(raw_categories, list) or not raw_categories:
+                raise ValueError("audit issue categories must be a non-empty array")
+            categories = tuple(str(value).strip() for value in raw_categories)
+            if (
+                any(not category or category not in _AUDIT_CATEGORIES for category in categories)
+                or len(categories) != len(set(categories))
+            ):
+                raise ValueError("audit issue categories contain unsupported values")
             message = str(item.get("message", "")).strip()
-            if not category or not message:
-                raise ValueError("audit issue category and message are required")
-            model_objective = bool(item.get("objective", False))
+            if not message:
+                raise ValueError("audit issue message is required")
             result.append(
                 TranslationAuditIssue(
                     cue_id=cue_id,
-                    category=category,
+                    category=categories[0],
+                    categories=categories,
                     message=message,
                     original_text=source_by_id[cue_id],
                     translated_text=translations.get(cue_id, ""),
-                    suggested_translation=str(item.get("suggested_translation", "")),
-                    objective=model_objective and category in _OBJECTIVE_AUDIT_CATEGORIES,
+                    suggested_translation=str(item.get("suggested_translation", "")).strip(),
                 )
             )
         return tuple(result)

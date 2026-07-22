@@ -173,7 +173,9 @@ class StageUsage:
 
 class AuditIssueDisposition(str, Enum):
     REPORTED = "reported"
-    AUTO_FIXED = "auto_fixed"
+    AUTO_APPLIED = "auto_fixed"
+    USER_APPLIED = "user_applied"
+    USER_REJECTED = "user_rejected"
     FIX_VALIDATION_FAILED = "fix_validation_failed"
 
 
@@ -185,8 +187,15 @@ class TranslationAuditIssue:
     original_text: str
     translated_text: str
     suggested_translation: str = ""
-    objective: bool = False
+    categories: tuple[str, ...] = ()
     disposition: AuditIssueDisposition = AuditIssueDisposition.REPORTED
+
+    def __post_init__(self) -> None:
+        categories = self.categories or ((self.category,) if self.category else ())
+        categories = tuple(dict.fromkeys(value for value in categories if value))
+        object.__setattr__(self, "categories", categories)
+        if not self.category and categories:
+            object.__setattr__(self, "category", categories[0])
 
 
 @dataclass(frozen=True)
@@ -251,8 +260,9 @@ class TermConfirmationMode(str, Enum):
 
 
 class TranslationAuditMode(str, Enum):
-    REPORT_ONLY = "report_only"
-    AUTO_FIX_OBJECTIVE = "auto_fix_objective"
+    # Keep the stored values stable so existing user configuration migrates safely.
+    REVIEW_AND_CONFIRM = "report_only"
+    AUTO_APPLY_REVIEW = "auto_fix_objective"
 
 
 class TranslationExecutionMode(str, Enum):
@@ -279,7 +289,7 @@ class EnhancedTranslationConfig:
     term_context_radius: int = 10
     boundary_context_radius: int = 3
     term_confirmation: TermConfirmationMode = TermConfirmationMode.AUTOMATIC
-    audit_mode: TranslationAuditMode = TranslationAuditMode.REPORT_ONLY
+    audit_mode: TranslationAuditMode = TranslationAuditMode.AUTO_APPLY_REVIEW
     execution_mode: TranslationExecutionMode = TranslationExecutionMode.GUI_STANDALONE
 
     def __post_init__(self) -> None:
@@ -296,6 +306,11 @@ class EnhancedTranslationConfig:
             and self.term_confirmation is TermConfirmationMode.MANUAL
         ):
             raise ValueError("CLI and batch translation cannot use manual term confirmation")
+        if (
+            self.execution_mode is not TranslationExecutionMode.GUI_STANDALONE
+            and self.audit_mode is TranslationAuditMode.REVIEW_AND_CONFIRM
+        ):
+            raise ValueError("only standalone GUI translation can confirm audit suggestions")
 
 
 @dataclass(frozen=True)

@@ -66,7 +66,7 @@ class BatchTask:
                 subtitle_config,
                 translation_execution_mode=TranslationExecutionMode.BATCH,
                 term_confirmation_mode=TermConfirmationMode.AUTOMATIC,
-                translation_audit_mode=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+                translation_audit_mode=TranslationAuditMode.AUTO_APPLY_REVIEW,
             )
         enabled = cfg.get(cfg.postprocess_enabled) if postprocess_enabled is None else postprocess_enabled
         profile_id = cfg.get(cfg.postprocess_profile)

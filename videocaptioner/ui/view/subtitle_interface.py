@@ -423,6 +423,7 @@ class SubtitleInterface(QWidget):
         self.glossary_review_page = GlossaryReviewPage(self.workspace_stack)
         self.glossary_review_page.confirmed.connect(self._submit_term_confirmation)
         self.translation_audit_page = TranslationAuditPage(self.workspace_stack)
+        self.translation_audit_page.confirmed.connect(self._submit_audit_confirmation)
         self.translation_audit_page.closed.connect(self._show_translation_workspace)
         self.workspace_stack.addWidget(self.translation_workspace)
         self.workspace_stack.addWidget(self.glossary_review_page)
@@ -556,6 +557,10 @@ class SubtitleInterface(QWidget):
             )
         if hasattr(self.subtitle_optimization_thread, "audit_ready"):
             self.subtitle_optimization_thread.audit_ready.connect(self._show_translation_audit)
+        if hasattr(self.subtitle_optimization_thread, "audit_confirmation_required"):
+            self.subtitle_optimization_thread.audit_confirmation_required.connect(
+                self._show_audit_confirmation
+            )
         self.subtitle_optimization_thread.set_custom_prompt_text(self.custom_prompt_text)
         self.subtitle_optimization_thread.start()
         InfoBar.info(
@@ -670,8 +675,19 @@ class SubtitleInterface(QWidget):
         self.status_label.setText(self.tr("继续翻译"))
 
     def _show_translation_audit(self, report) -> None:
-        self.translation_audit_page.set_report(report)
+        self.translation_audit_page.set_report(report, interactive=False)
         self.workspace_stack.setCurrentWidget(self.translation_audit_page)
+
+    def _show_audit_confirmation(self, report) -> None:
+        self.translation_audit_page.set_report(report, interactive=True)
+        self.workspace_stack.setCurrentWidget(self.translation_audit_page)
+        self.status_label.setText(self.tr("等待确认校对建议"))
+
+    def _submit_audit_confirmation(self, accepted_ids) -> None:
+        thread = getattr(self, "subtitle_optimization_thread", None)
+        if thread is not None:
+            thread.submit_audit_confirmation(accepted_ids)
+        self.status_label.setText(self.tr("正在写回校对结果"))
 
     def _show_translation_workspace(self) -> None:
         self.workspace_stack.setCurrentWidget(self.translation_workspace)

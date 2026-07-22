@@ -90,6 +90,6 @@ def test_provider_context_overflow_replans_at_32k_then_16k_without_mutating_prof
     ]
     assert main.work_context_tokens == 65_536
     assert len(result.audit_report.warnings) == 2
-    assert "65536-token runtime budget" in result.audit_report.warnings[0]
-    assert "32768-token runtime budget" in result.audit_report.warnings[1]
-    assert all("saved model profile was not changed" in item for item in result.audit_report.warnings)
+    assert "65536 token 的工作上下文" in result.audit_report.warnings[0]
+    assert "32768 token 的工作上下文" in result.audit_report.warnings[1]
+    assert all("保存的模型方案未被修改" in item for item in result.audit_report.warnings)

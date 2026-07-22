@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import QApplication
 from qfluentwidgets import CardWidget, ComboBox, SimpleCardWidget, SpinBox, SwitchButton
 from videocaptioner.core.llm.models import LLMModelProfile, LLMTransport, ProviderDialect
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
+from videocaptioner.core.translate.enhanced.models import TranslationAuditMode
 from videocaptioner.core.translate.types import TranslationMode
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.TranslationModeSelector import TranslationModeSelector
@@ -47,6 +48,9 @@ try:
     assert isinstance(widget.main_profile_combo, ComboBox)
     assert isinstance(widget.enhanced_batch_spin, SpinBox)
     assert isinstance(widget.reflect_checkbox, SwitchButton)
+    assert widget.audit_mode_combo.itemText(0) == '审计并人工确认'
+    assert widget.audit_mode_combo.itemText(1) == '自动采纳校对修正'
+    assert cfg.translation_audit_mode.defaultValue is TranslationAuditMode.AUTO_APPLY_REVIEW
 
     widget.cards[TranslationMode.ENHANCED_LLM].click()
     app.processEvents()
@@ -67,6 +71,7 @@ try:
     app.processEvents()
     assert cfg.review_llm_profile_id.value == 'main'
     assert widget.is_selected_mode_available
+    assert '已就绪' not in widget.cards[TranslationMode.ENHANCED_LLM].text()
 
     widget.cards[TranslationMode.SINGLE_LLM].click()
     assert widget.options_stack.currentWidget() is widget.single_llm_panel
@@ -114,12 +119,17 @@ def test_glossary_review_accepts_empty_custom_value_and_merges_contexts():
     _run_qt_script(
         """
 from PyQt5.QtWidgets import QApplication
+from qfluentwidgets import ListWidget, PlainTextEdit, PrimaryPushButton, RadioButton
 from videocaptioner.core.translate.enhanced.models import (
     GlossarySelectionSource, TermCandidate, TermReviewDecision)
 from videocaptioner.ui.components.GlossaryReviewPage import GlossaryReviewPage
 
 app = QApplication([])
 page = GlossaryReviewPage()
+assert isinstance(page.term_list, ListWidget)
+assert isinstance(page.context_view, PlainTextEdit)
+assert isinstance(page.review_radio, RadioButton)
+assert isinstance(page.continue_button, PrimaryPushButton)
 candidates = (
     TermCandidate(candidate_id='one', source_term='Agent', sense='software',
         aliases=('agent',), occurrence_ids=(1,), representative_context_ids=(1,),
@@ -157,7 +167,7 @@ page.close()
     )
 
 
-def test_subtitle_page_connects_manual_confirmation_and_read_only_audit(tmp_path):
+def test_subtitle_page_connects_term_and_audit_confirmation(tmp_path):
     subtitle = tmp_path / "source.srt"
     subtitle.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\nAgent context\n", encoding="utf-8"
@@ -167,8 +177,9 @@ def test_subtitle_page_connects_manual_confirmation_and_read_only_audit(tmp_path
         f"""
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QAbstractItemView, QPushButton
+from qfluentwidgets import PlainTextEdit, PushButton, TableWidget
 from videocaptioner.core.translate.enhanced.models import (
-    TermCandidate, TranslationAuditIssue, TranslationAuditReport)
+    AuditIssueDisposition, TermCandidate, TranslationAuditIssue, TranslationAuditReport)
 from videocaptioner.ui.common.config import cfg
 import videocaptioner.ui.view.subtitle_interface as subtitle_view
 
@@ -179,17 +190,20 @@ class FakeThread(QObject):
     update_all = pyqtSignal(dict)
     error = pyqtSignal(str)
     term_confirmation_required = pyqtSignal(object)
+    audit_confirmation_required = pyqtSignal(object)
     audit_ready = pyqtSignal(object)
     def __init__(self, task):
         super().__init__()
         self.task = task
         self.submitted = None
+        self.submitted_audit = None
     def set_custom_prompt_text(self, text): self.prompt = text
     def start(self):
         self.term_confirmation_required.emit((TermCandidate(
             candidate_id='one', source_term='Agent', sense='software', occurrence_ids=(1,),
             main_translation='代理', review_translation='智能体', final_translation='智能体'),))
     def submit_term_confirmation(self, candidates): self.submitted = candidates
+    def submit_audit_confirmation(self, accepted_ids): self.submitted_audit = accepted_ids
     def stop(self): pass
     def isRunning(self): return False
 
@@ -210,13 +224,30 @@ try:
     assert widget.workspace_stack.currentWidget() is widget.translation_workspace
 
     report = TranslationAuditReport(issues=(TranslationAuditIssue(
-        cue_id=1, category='meaning', message='check', original_text='Agent context',
+        cue_id=1, category='semantic_accuracy', message='check', original_text='Agent context',
         translated_text='代理语境', suggested_translation='智能体语境'),))
-    widget.subtitle_optimization_thread.audit_ready.emit(report)
+    widget.subtitle_optimization_thread.audit_confirmation_required.emit(report)
     assert widget.workspace_stack.currentWidget() is widget.translation_audit_page
     assert widget.translation_audit_page.issue_table.editTriggers() == QAbstractItemView.NoEditTriggers
-    texts = [button.text() for button in widget.translation_audit_page.findChildren(QPushButton)]
-    assert not any('应用' in text or '修改' in text for text in texts)
+    assert isinstance(widget.translation_audit_page.issue_table, TableWidget)
+    assert isinstance(widget.translation_audit_page.details_view, PlainTextEdit)
+    assert isinstance(widget.translation_audit_page.close_button, PushButton)
+    assert widget.translation_audit_page.issue_table.item(0, 1).text() == '语义准确性'
+    assert widget.translation_audit_page.details_card.isHidden()
+    assert 'Agent context' in widget.translation_audit_page.comparison_view.toPlainText()
+    assert '智能体语境' in widget.translation_audit_page.comparison_view.toPlainText()
+    assert not widget.translation_audit_page.apply_button.isHidden()
+    widget.translation_audit_page.apply_button.click()
+    assert widget.translation_audit_page.issue_table.item(0, 5).text() == '将采纳'
+    widget.translation_audit_page.finish_button.click()
+    assert widget.subtitle_optimization_thread.submitted_audit == (1,)
+
+    final_report = TranslationAuditReport(issues=(TranslationAuditIssue(
+        cue_id=1, category='semantic_accuracy', message='check', original_text='Agent context',
+        translated_text='代理语境', suggested_translation='智能体语境',
+        disposition=AuditIssueDisposition.USER_APPLIED),))
+    widget.subtitle_optimization_thread.audit_ready.emit(final_report)
+    assert widget.translation_audit_page.issue_table.item(0, 5).text() == '已由用户采纳'
     widget.translation_audit_page.close_button.click()
     assert widget.workspace_stack.currentWidget() is widget.translation_workspace
     widget.close()
