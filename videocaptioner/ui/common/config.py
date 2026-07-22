@@ -203,7 +203,7 @@ class Config(QConfig):
     translation_audit_mode = OptionsConfigItem(
         "Translate",
         "TranslationAuditMode",
-        TranslationAuditMode.REPORT_ONLY,
+        TranslationAuditMode.AUTO_APPLY_REVIEW,
         OptionsValidator(TranslationAuditMode),
         EnumSerializer(TranslationAuditMode),
     )

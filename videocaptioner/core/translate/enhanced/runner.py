@@ -17,6 +17,7 @@ from .models import (
     EnhancedTranslationResult,
     SubtitleCue,
     TermCandidate,
+    TranslationAuditReport,
 )
 from .orchestrator import EnhancedTranslationOrchestrator
 from .report import save_audit_markdown
@@ -48,6 +49,7 @@ def run_enhanced_translation(
     confirm_terms: Optional[
         Callable[[tuple[TermCandidate, ...]], Sequence[TermCandidate]]
     ] = None,
+    confirm_audit: Optional[Callable[[TranslationAuditReport], Sequence[int]]] = None,
 ) -> EnhancedTranslationRun:
     """Run enhanced translation and persist glossary/report at their safe boundaries."""
 
@@ -76,6 +78,7 @@ def run_enhanced_translation(
         cues,
         imported_glossary=imported,
         confirm_terms=confirm_terms,
+        confirm_audit=confirm_audit,
         on_glossary=persist_glossary,
     )
     translated = ASRData.from_json(subtitle_data.to_json())

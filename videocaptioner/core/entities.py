@@ -752,7 +752,7 @@ class SubtitleConfig:
     term_context_radius: int = 10
     boundary_context_radius: int = 3
     term_confirmation_mode: TermConfirmationMode | str = "automatic"
-    translation_audit_mode: TranslationAuditMode | str = "report_only"
+    translation_audit_mode: TranslationAuditMode | str = "auto_fix_objective"
     translation_execution_mode: TranslationExecutionMode | str = "gui_standalone"
     imported_glossary_path: Optional[str] = None
     # 字幕布局和分割

@@ -10,16 +10,24 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QHBoxLayout,
-    QLabel,
-    QListWidget,
     QListWidgetItem,
-    QPushButton,
-    QRadioButton,
     QSplitter,
-    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    LineEdit,
+    ListWidget,
+    PlainTextEdit,
+    PrimaryPushButton,
+    PushButton,
+    RadioButton,
+    SimpleCardWidget,
+    StrongBodyLabel,
+)
+from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.core.translate.enhanced.models import (
     GlossarySelectionSource,
@@ -47,24 +55,56 @@ class GlossaryReviewPage(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        title = QLabel(self.tr("人工术语确认"), self)
+        root.setContentsMargins(0, 6, 0, 4)
+        root.setSpacing(12)
+
+        heading = QHBoxLayout()
+        heading.setContentsMargins(8, 0, 8, 0)
+        title_block = QVBoxLayout()
+        title_block.setSpacing(2)
+        title = StrongBodyLabel(self.tr("人工术语确认"), self)
         title.setObjectName("glossaryReviewTitle")
-        root.addWidget(title)
+        subtitle = CaptionLabel(
+            self.tr("核对主翻译建议与高级校对结论；当前默认采用校对结果"), self
+        )
+        title_block.addWidget(title)
+        title_block.addWidget(subtitle)
+        heading.addLayout(title_block)
+        heading.addStretch(1)
+        self.count_label = CaptionLabel(self)
+        heading.addWidget(self.count_label, 0, Qt.AlignVCenter)  # type: ignore[arg-type]
+        root.addLayout(heading)
 
         splitter = QSplitter(Qt.Horizontal, self)  # type: ignore
-        self.term_list = QListWidget(splitter)
-        self.term_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.term_list.currentRowChanged.connect(self._show_candidate)
-        splitter.addWidget(self.term_list)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
 
-        detail = QWidget(splitter)
+        list_card = SimpleCardWidget(splitter)
+        list_card.setBorderRadius(10)
+        list_layout = QVBoxLayout(list_card)
+        list_layout.setContentsMargins(12, 12, 12, 12)
+        list_layout.setSpacing(8)
+        list_layout.addWidget(BodyLabel(self.tr("疑难术语"), list_card))
+        self.term_list = ListWidget(list_card)
+        self.term_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.term_list.setMinimumWidth(220)
+        self.term_list.currentRowChanged.connect(self._show_candidate)
+        list_layout.addWidget(self.term_list, 1)
+        splitter.addWidget(list_card)
+
+        detail = SimpleCardWidget(splitter)
+        detail.setBorderRadius(10)
         detail_layout = QVBoxLayout(detail)
-        self.source_label = QLabel(detail)
-        self.sense_label = QLabel(detail)
-        self.main_radio = QRadioButton(detail)
-        self.review_radio = QRadioButton(detail)
-        self.custom_radio = QRadioButton(self.tr("自定义译法"), detail)
-        self.ignore_radio = QRadioButton(self.tr("不是术语／忽略"), detail)
+        detail_layout.setContentsMargins(18, 14, 18, 16)
+        detail_layout.setSpacing(9)
+        self.source_label = StrongBodyLabel(detail)
+        self.source_label.setWordWrap(True)
+        self.sense_label = CaptionLabel(detail)
+        self.sense_label.setWordWrap(True)
+        self.main_radio = RadioButton(detail)
+        self.review_radio = RadioButton(detail)
+        self.custom_radio = RadioButton(self.tr("自定义译法"), detail)
+        self.ignore_radio = RadioButton(self.tr("不是术语／忽略"), detail)
         self.choice_group = QButtonGroup(self)
         for radio in (
             self.main_radio,
@@ -74,26 +114,28 @@ class GlossaryReviewPage(QWidget):
         ):
             self.choice_group.addButton(radio)
             radio.toggled.connect(self._store_current_choice)
-        from qfluentwidgets import LineEdit
-
         self.custom_edit = LineEdit(detail)
-        self.custom_edit.setPlaceholderText(self.tr("允许留空；系统将原样采用"))
+        self.custom_edit.setPlaceholderText(self.tr("输入最终译法（可留空）"))
         self.custom_edit.textEdited.connect(self._on_custom_edited)
-        self.final_label = QLabel(detail)
-        self.occurrence_label = QLabel(detail)
-        self.context_view = QTextBrowser(detail)
-        self.context_view.setOpenExternalLinks(False)
+        self.final_label = BodyLabel(detail)
+        self.final_label.setWordWrap(True)
+        self.occurrence_label = CaptionLabel(detail)
+        self.context_view = PlainTextEdit(detail)
+        self.context_view.setReadOnly(True)
+        self.context_view.setPlaceholderText(self.tr("代表语境不可用"))
 
         detail_layout.addWidget(self.source_label)
         detail_layout.addWidget(self.sense_label)
+        detail_layout.addSpacing(2)
         detail_layout.addWidget(self.main_radio)
         detail_layout.addWidget(self.review_radio)
         detail_layout.addWidget(self.custom_radio)
         detail_layout.addWidget(self.custom_edit)
         detail_layout.addWidget(self.ignore_radio)
+        detail_layout.addSpacing(4)
         detail_layout.addWidget(self.final_label)
         detail_layout.addWidget(self.occurrence_label)
-        detail_layout.addWidget(QLabel(self.tr("代表语境"), detail))
+        detail_layout.addWidget(BodyLabel(self.tr("代表语境"), detail))
         detail_layout.addWidget(self.context_view, 1)
         splitter.addWidget(detail)
         splitter.setStretchFactor(0, 1)
@@ -101,10 +143,20 @@ class GlossaryReviewPage(QWidget):
         root.addWidget(splitter, 1)
 
         actions = QHBoxLayout()
-        self.previous_button = QPushButton(self.tr("上一项"), self)
-        self.next_button = QPushButton(self.tr("下一项"), self)
-        self.merge_button = QPushButton(self.tr("合并所选候选"), self)
-        self.continue_button = QPushButton(self.tr("继续翻译"), self)
+        actions.setContentsMargins(8, 0, 8, 0)
+        actions.setSpacing(8)
+        self.previous_button = PushButton(self)
+        self.previous_button.setIcon(FIF.LEFT_ARROW)
+        self.previous_button.setText(self.tr("上一项"))
+        self.next_button = PushButton(self)
+        self.next_button.setIcon(FIF.RIGHT_ARROW)
+        self.next_button.setText(self.tr("下一项"))
+        self.merge_button = PushButton(self)
+        self.merge_button.setIcon(FIF.LINK)
+        self.merge_button.setText(self.tr("合并所选候选"))
+        self.continue_button = PrimaryPushButton(self)
+        self.continue_button.setIcon(FIF.ACCEPT)
+        self.continue_button.setText(self.tr("继续翻译"))
         self.previous_button.clicked.connect(lambda: self._move(-1))
         self.next_button.clicked.connect(lambda: self._move(1))
         self.merge_button.clicked.connect(self.merge_selected)
@@ -123,6 +175,7 @@ class GlossaryReviewPage(QWidget):
     ) -> None:
         self._candidates = list(candidates)
         self._contexts = contexts or {}
+        self.count_label.setText(self.tr("{0} 个候选").format(len(self._candidates)))
         self.term_list.clear()
         for candidate in self._candidates:
             item = QListWidgetItem(candidate.source_term)
@@ -161,7 +214,7 @@ class GlossaryReviewPage(QWidget):
                 candidate.representative_context_ids or candidate.occurrence_ids[:5]
             )
             blocks = [
-                f"#{cue_id}  {self._contexts.get(cue_id, self.tr('语境不可用'))}"
+                self._contexts.get(cue_id, self.tr("语境不可用"))
                 for cue_id in representative_ids
             ]
             self.context_view.setPlainText("\n\n".join(blocks))

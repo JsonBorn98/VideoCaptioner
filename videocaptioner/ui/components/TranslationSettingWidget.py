@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    CaptionLabel,
     ComboBox,
     ComboBoxSettingCard,
     InfoBar,
@@ -29,7 +30,7 @@ from qfluentwidgets import (
     SettingCard,
     SettingCardGroup,
     SpinBox,
-    SubtitleLabel,
+    StrongBodyLabel,
     SwitchSettingCard,
     TextEdit,
 )
@@ -50,7 +51,7 @@ from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
 class _PromptDialog(MessageBoxBase):
     def __init__(self, title: str, text: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.titleLabel = BodyLabel(title, self)
+        self.titleLabel = StrongBodyLabel(title, self)
         self.promptEdit = TextEdit(self)
         self.promptEdit.setPlainText(text)
         self.promptEdit.setPlaceholderText(self.tr("输入该角色在翻译任务中使用的自定义 Prompt"))
@@ -74,7 +75,11 @@ class PromptSettingCard(SettingCard):
         self._refreshSummary(cfg.get(config_item))
 
     def _refreshSummary(self, value: str) -> None:
-        summary = self.tr("已配置") if value.strip() else self.tr("使用系统默认 Prompt")
+        summary = (
+            self.tr("使用自定义 Prompt")
+            if value.strip()
+            else self.tr("使用系统默认 Prompt")
+        )
         self.contentLabel.setText(summary)
 
     def _edit(self) -> None:
@@ -93,7 +98,7 @@ class _ProfileDialog(MessageBoxBase):
     ):
         super().__init__(parent)
         self.profileId = profile.profile_id if profile else ""
-        self.titleLabel = BodyLabel(
+        self.titleLabel = StrongBodyLabel(
             self.tr("编辑模型方案") if profile else self.tr("新增模型方案"), self
         )
         self.nameEdit = LineEdit(self)
@@ -140,14 +145,14 @@ class _ProfileDialog(MessageBoxBase):
         form = QFormLayout(formWidget)
         form.setContentsMargins(0, 0, 0, 0)
         form.setVerticalSpacing(12)
-        form.addRow(self.tr("方案名称"), self.nameEdit)
-        form.addRow(self.tr("接口格式"), self.transportCombo)
-        form.addRow(self.tr("供应商方言"), self.dialectCombo)
-        form.addRow(self.tr("Base URL"), self.baseUrlEdit)
-        form.addRow(self.tr("API Key"), self.apiKeyEdit)
-        form.addRow(self.tr("模型"), self.modelEdit)
-        form.addRow(self.tr("工作上下文上限"), contextRow)
-        form.addRow(self.tr("最大并发"), self.concurrencySpin)
+        form.addRow(BodyLabel(self.tr("方案名称"), formWidget), self.nameEdit)
+        form.addRow(BodyLabel(self.tr("接口格式"), formWidget), self.transportCombo)
+        form.addRow(BodyLabel(self.tr("供应商方言"), formWidget), self.dialectCombo)
+        form.addRow(BodyLabel(self.tr("Base URL"), formWidget), self.baseUrlEdit)
+        form.addRow(BodyLabel(self.tr("API Key"), formWidget), self.apiKeyEdit)
+        form.addRow(BodyLabel(self.tr("模型"), formWidget), self.modelEdit)
+        form.addRow(BodyLabel(self.tr("工作上下文"), formWidget), contextRow)
+        form.addRow(BodyLabel(self.tr("最大并发"), formWidget), self.concurrencySpin)
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(formWidget)
         self.widget.setMinimumWidth(620)
@@ -223,6 +228,7 @@ class ProfileSelectionCard(SettingCard):
     def __init__(self, config_item, title: str, content: str, parent=None):
         super().__init__(FIF.ROBOT, title, content, parent)
         self.configItem = config_item
+        self.configuredContent = content
         self.comboBox = ComboBox(self)
         self.comboBox.setMinimumWidth(170)
         self.createButton = PushButton(self.tr("新增"), self)
@@ -272,7 +278,9 @@ class ProfileSelectionCard(SettingCard):
         self.editButton.setEnabled(configured)
         self.deleteButton.setEnabled(configured)
         self.contentLabel.setText(
-            self.tr("已配置") if configured else self.tr("未配置，相关 LLM 翻译模式不可用")
+            self.configuredContent
+            if configured
+            else self.tr("未配置，相关 LLM 翻译模式不可用")
         )
 
     def selectedProfileId(self) -> str:
@@ -287,7 +295,7 @@ class _NonLLMServiceCard(SettingCard):
         super().__init__(
             FIF.LANGUAGE,
             "翻译服务",
-            "选择不使用 LLM 的翻译服务",
+            "使用传统翻译服务快速处理字幕",
             parent,
         )
         self.comboBox = ComboBox(self)
@@ -324,7 +332,7 @@ class _NonLLMServiceCard(SettingCard):
 
     def _updateContent(self) -> None:
         self.contentLabel.setText(
-            self.tr("已配置")
+            self.tr("使用传统翻译服务快速处理字幕")
             if self.comboBox.currentData() is not None
             else self.tr("未配置，非 LLM 翻译模式不可用")
         )
@@ -343,10 +351,11 @@ class TranslationSettingWidget(QWidget):
     ):
         super().__init__(parent)
         self.profileStore = profile_store or LLMModelProfileStore()
-        self.titleLabel = BodyLabel(self.tr("翻译设置"), self)
-        self.subtitleLabel = SubtitleLabel(
+        self.titleLabel = StrongBodyLabel(self.tr("翻译设置"), self)
+        self.subtitleLabel = CaptionLabel(
             self.tr("三种翻译方式独立配置；切换页签不会改变任务使用的翻译方式。"), self
         )
+        self.subtitleLabel.setWordWrap(True)
         self.pivot = SegmentedWidget(self)
         self.pivot.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.stackedWidget = QStackedWidget(self)
@@ -388,7 +397,7 @@ class TranslationSettingWidget(QWidget):
 
     def _buildPages(self) -> None:
         non_llm, non_llm_layout = self._addPage("non-llm", self.tr("非 LLM 翻译"))
-        group = SettingCardGroup(self.tr("非 LLM 翻译"), non_llm)
+        group = SettingCardGroup(self.tr("翻译服务"), non_llm)
         self.nonLLMServiceCard = _NonLLMServiceCard(group)
         self.deeplxEndpointCard = LineEditSettingCard(
             cfg.deeplx_endpoint,
@@ -403,10 +412,11 @@ class TranslationSettingWidget(QWidget):
         non_llm_layout.addWidget(group)
 
         single, single_layout = self._addPage("single-llm", self.tr("LLM 翻译"))
-        group = SettingCardGroup(self.tr("单模型 LLM 翻译"), single)
+        group = SettingCardGroup(self.tr("模型与翻译"), single)
         self.singleMainProfileCard = self._profileCard(
             cfg.main_llm_profile_id,
             self.tr("主翻译模型"),
+            self.tr("负责正式翻译"),
             group,
         )
         self.singlePromptCard = PromptSettingCard(
@@ -441,34 +451,36 @@ class TranslationSettingWidget(QWidget):
         enhanced, enhanced_layout = self._addPage(
             "enhanced-llm", self.tr("增强型 LLM 翻译")
         )
-        group = SettingCardGroup(self.tr("增强型 LLM 翻译"), enhanced)
+        group = SettingCardGroup(self.tr("模型、术语与审计"), enhanced)
         self.enhancedMainProfileCard = self._profileCard(
             cfg.main_llm_profile_id,
             self.tr("主翻译模型"),
+            self.tr("负责全文分析、术语初译和正式翻译"),
             group,
         )
         self.reviewProfileCard = self._profileCard(
             cfg.review_llm_profile_id,
             self.tr("高级校对模型"),
+            self.tr("负责术语裁决和翻译质量审计"),
             group,
         )
         self.enhancedMainPromptCard = PromptSettingCard(
             cfg.main_translation_prompt,
             self.tr("主翻译 Prompt"),
-            self.tr("在系统硬约束之后注入"),
+            self.tr("约束主翻译的语气、用词和格式"),
             group,
         )
         self.reviewPromptCard = PromptSettingCard(
             cfg.review_translation_prompt,
             self.tr("高级校对 Prompt"),
-            self.tr("独立于主翻译角色配置"),
+            self.tr("约束术语裁决和质量审计标准"),
             group,
         )
         self.enhancedBatchCard = RangeSettingCard(
             cfg.enhanced_batch_size,
             FIF.ALIGNMENT,
             self.tr("正式翻译批处理上限"),
-            self.tr("仅限制翻译主体数量，token 规划器可以自动缩小"),
+            self.tr("每批最多翻译的字幕数量；超出上下文时自动减少"),
             group,
         )
         self.termContextCard = RangeSettingCard(
@@ -482,7 +494,7 @@ class TranslationSettingWidget(QWidget):
             cfg.term_confirmation_mode,
             FIF.ACCEPT,
             self.tr("术语确认"),
-            self.tr("GUI 可人工确认；批量与 CLI 始终自动确认"),
+            self.tr("独立任务可暂停确认；批量任务自动采用校对结果"),
             texts=[self.tr("自动确认"), self.tr("人工确认")],
             parent=group,
         )
@@ -490,8 +502,8 @@ class TranslationSettingWidget(QWidget):
             cfg.translation_audit_mode,
             FIF.VIEW,
             self.tr("审计处理"),
-            self.tr("仅报告保持只读；自动修复只处理客观高置信问题"),
-            texts=[self.tr("审计仅报告"), self.tr("自动修复客观问题")],
+            self.tr("独立任务可人工选择建议；自动模式会写回通过硬校验的校对修正"),
+            texts=[self.tr("审计并人工确认"), self.tr("自动采纳校对修正")],
             parent=group,
         )
         for card in (
@@ -507,11 +519,13 @@ class TranslationSettingWidget(QWidget):
             group.addSettingCard(card)
         enhanced_layout.addWidget(group)
 
-    def _profileCard(self, config_item, title: str, parent) -> ProfileSelectionCard:
+    def _profileCard(
+        self, config_item, title: str, content: str, parent
+    ) -> ProfileSelectionCard:
         card = ProfileSelectionCard(
             config_item,
             title,
-            self.tr("选择器只显示用户定义的方案名称"),
+            content,
             parent,
         )
         card.createRequested.connect(self._createProfile)

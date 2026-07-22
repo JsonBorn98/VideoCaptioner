@@ -363,7 +363,7 @@ def run(args: Namespace, config: dict) -> int:
                     boundary_context_radius=int(
                         get(config, "translate.boundary_context_radius", 3)
                     ),
-                    audit_mode=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+                    audit_mode=TranslationAuditMode.AUTO_APPLY_REVIEW,
                     execution_mode=TranslationExecutionMode.CLI,
                 )
                 enhanced_run = run_enhanced_translation(

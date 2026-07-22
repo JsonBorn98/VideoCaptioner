@@ -4,6 +4,7 @@ from importlib import import_module
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtWidgets import QApplication, QWidget
+from qfluentwidgets import CaptionLabel, StrongBodyLabel
 
 from videocaptioner.core.llm.models import (
     LLMModelProfile,
@@ -192,4 +193,8 @@ def test_setting_interface_embeds_translation_widget_and_relabels_legacy_llm(tmp
     assert widget.llmGroup.titleLabel.text() == "通用 LLM 工具配置"
     assert widget.translationSettingsWidget.stackedWidget.count() == 3
     assert widget.translationSettingsWidget.height() > 200
+    assert isinstance(widget.translationSettingsWidget.titleLabel, StrongBodyLabel)
+    assert isinstance(widget.translationSettingsWidget.subtitleLabel, CaptionLabel)
+    enhanced_group = widget.translationSettingsWidget.enhancedMainProfileCard.parentWidget()
+    assert enhanced_group.titleLabel.text() == "模型、术语与审计"
     widget.close()

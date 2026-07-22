@@ -105,6 +105,7 @@ class SubtitleThread(QThread):
     error = pyqtSignal(str)
     cancelled = pyqtSignal()
     term_confirmation_required = pyqtSignal(object)
+    audit_confirmation_required = pyqtSignal(object)
     audit_ready = pyqtSignal(object)
 
     def __init__(self, task: SubtitleTask):
@@ -118,6 +119,8 @@ class SubtitleThread(QThread):
         self.cancellation = CancellationToken()
         self._term_condition = threading.Condition()
         self._confirmed_terms: Sequence[TermCandidate] | None = None
+        self._audit_condition = threading.Condition()
+        self._accepted_audit_ids: tuple[int, ...] | None = None
 
     def set_custom_prompt_text(self, text: str):
         self.custom_prompt_text = text
@@ -165,6 +168,24 @@ class SubtitleThread(QThread):
             assert self._confirmed_terms is not None
             return self._confirmed_terms
 
+    def submit_audit_confirmation(self, accepted_ids: Sequence[int]) -> None:
+        """Resume a standalone enhanced task with the user's audit choices."""
+
+        with self._audit_condition:
+            self._accepted_audit_ids = tuple(dict.fromkeys(int(value) for value in accepted_ids))
+            self._audit_condition.notify_all()
+
+    def _confirm_audit(self, report) -> Sequence[int]:
+        with self._audit_condition:
+            self._accepted_audit_ids = None
+            self.audit_confirmation_required.emit(report)
+            while self._accepted_audit_ids is None and not self.cancellation.cancelled:
+                self._audit_condition.wait(timeout=0.2)
+            if self.cancellation.cancelled:
+                raise InterruptedError("audit confirmation cancelled")
+            assert self._accepted_audit_ids is not None
+            return self._accepted_audit_ids
+
     def _run_enhanced_translation(
         self, asr_data: ASRData, subtitle_config: SubtitleConfig
     ) -> ASRData:
@@ -211,6 +232,12 @@ class SubtitleThread(QThread):
             confirm_terms=(
                 self._confirm_terms
                 if config.term_confirmation is TermConfirmationMode.MANUAL
+                else None
+            ),
+            confirm_audit=(
+                self._confirm_audit
+                if config.audit_mode is TranslationAuditMode.REVIEW_AND_CONFIRM
+                and config.execution_mode is TranslationExecutionMode.GUI_STANDALONE
                 else None
             ),
         )
@@ -429,6 +456,8 @@ class SubtitleThread(QThread):
             self.requestInterruption()
             with self._term_condition:
                 self._term_condition.notify_all()
+            with self._audit_condition:
+                self._audit_condition.notify_all()
             # 先停止优化器
             if hasattr(self, "splitter") and self.splitter:
                 try:

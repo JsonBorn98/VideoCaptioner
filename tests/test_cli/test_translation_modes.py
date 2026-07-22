@@ -102,7 +102,7 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
     enhanced_config = captured["config"]
     assert result == EXIT.SUCCESS
     assert enhanced_config.term_confirmation is TermConfirmationMode.AUTOMATIC
-    assert enhanced_config.audit_mode is TranslationAuditMode.AUTO_FIX_OBJECTIVE
+    assert enhanced_config.audit_mode is TranslationAuditMode.AUTO_APPLY_REVIEW
     assert enhanced_config.execution_mode is TranslationExecutionMode.CLI
     assert enhanced_config.main_role.profile == enhanced_config.review_role.profile
     assert enhanced_config.main_role.profile.transport is LLMTransport.OPENAI_COMPATIBLE

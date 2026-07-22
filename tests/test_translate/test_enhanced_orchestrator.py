@@ -46,7 +46,7 @@ def _profile(profile_id: str, *, concurrency: int = 1) -> LLMModelProfile:
 
 def _config(
     *,
-    audit_mode: TranslationAuditMode = TranslationAuditMode.REPORT_ONLY,
+    audit_mode: TranslationAuditMode = TranslationAuditMode.AUTO_APPLY_REVIEW,
     batch_size: int = 10,
     term_confirmation: TermConfirmationMode = TermConfirmationMode.AUTOMATIC,
 ) -> EnhancedTranslationConfig:
@@ -221,7 +221,7 @@ def test_final_term_review_three_invalid_responses_falls_back_to_source_text():
     assert entry.high_risk is True
     assert entry.selection_source is GlossarySelectionSource.SOURCE_FALLBACK
     assert result.audit_report.warnings == (
-        "Term review fallback kept source text: Mercury",
+        "术语校对响应无效，已保留原文：Mercury",
     )
 
 
@@ -261,18 +261,18 @@ def test_translation_rejects_boundary_id_then_retries_with_same_stable_prefix():
     ("mode", "expected_text", "expected_disposition"),
     [
         (
-            TranslationAuditMode.REPORT_ONLY,
+            TranslationAuditMode.REVIEW_AND_CONFIRM,
             "错误的版本 2",
-            AuditIssueDisposition.REPORTED,
+            AuditIssueDisposition.USER_REJECTED,
         ),
         (
-            TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+            TranslationAuditMode.AUTO_APPLY_REVIEW,
             "正确的版本 2",
-            AuditIssueDisposition.AUTO_FIXED,
+            AuditIssueDisposition.AUTO_APPLIED,
         ),
     ],
 )
-def test_audit_report_only_and_objective_auto_fix(
+def test_audit_manual_review_and_automatic_review_application(
     mode, expected_text, expected_disposition
 ):
     cues = (SubtitleCue(1, "Version 2"),)
@@ -284,22 +284,111 @@ def test_audit_report_only_and_objective_auto_fix(
                 "issues": [
                     {
                         "id": 1,
-                        "category": "number",
+                        "categories": ["semantic_accuracy"],
                         "message": "The version meaning is wrong.",
                         "suggested_translation": "正确的版本 2",
-                        "objective": True,
                     }
                 ]
             }
         ],
     )
 
+    confirm_audit = (
+        (lambda report: ())
+        if mode is TranslationAuditMode.REVIEW_AND_CONFIRM
+        else None
+    )
     result = EnhancedTranslationOrchestrator(
         _config(audit_mode=mode), gateway=gateway
-    ).run(cues)
+    ).run(cues, confirm_audit=confirm_audit)
 
     assert result.translations[1] == expected_text
     assert result.audit_report.issues[0].disposition is expected_disposition
+
+
+def test_manual_audit_confirmation_applies_only_selected_consolidated_suggestions():
+    cues = (SubtitleCue(1, "First"), SubtitleCue(2, "Second"))
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "旧一"), (2, "旧二"))],
+        audit=[
+            {
+                "issues": [
+                    {
+                        "id": 1,
+                        "categories": ["semantic_accuracy", "target_language_quality"],
+                        "message": "第一条需要修改。",
+                        "suggested_translation": "新一",
+                    },
+                    {
+                        "id": 2,
+                        "categories": ["terminology"],
+                        "message": "第二条术语错误。",
+                        "suggested_translation": "新二",
+                    },
+                ]
+            }
+        ],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(audit_mode=TranslationAuditMode.REVIEW_AND_CONFIRM), gateway=gateway
+    ).run(cues, confirm_audit=lambda report: (2,))
+
+    assert result.translations == {1: "旧一", 2: "新二"}
+    assert result.audit_report.issues[0].categories == (
+        "semantic_accuracy",
+        "target_language_quality",
+    )
+    assert result.audit_report.issues[0].disposition is AuditIssueDisposition.USER_REJECTED
+    assert result.audit_report.issues[1].disposition is AuditIssueDisposition.USER_APPLIED
+
+
+def test_audit_retries_duplicate_suggestions_for_the_same_subtitle():
+    cues = (SubtitleCue(1, "Source"),)
+    duplicate = {
+        "id": 1,
+        "categories": ["semantic_accuracy"],
+        "message": "需要修正。",
+        "suggested_translation": "新译文",
+    }
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "旧译文"))],
+        audit=[
+            {"issues": [duplicate, duplicate]},
+            {"issues": [duplicate]},
+        ],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(audit_mode=TranslationAuditMode.AUTO_APPLY_REVIEW), gateway=gateway
+    ).run(cues)
+
+    assert result.translations[1] == "新译文"
+    assert len(gateway.stage_calls["audit"]) == 2
+    assert len(result.audit_report.issues) == 1
+
+
+def test_manual_audit_does_not_pause_when_there_are_no_findings():
+    cues = (SubtitleCue(1, "Source"),)
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[{"issues": []}],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(audit_mode=TranslationAuditMode.REVIEW_AND_CONFIRM), gateway=gateway
+    ).run(
+        cues,
+        confirm_audit=lambda report: (_ for _ in ()).throw(
+            AssertionError("empty audit must not request confirmation")
+        ),
+    )
+
+    assert result.translations == {1: "译文"}
+    assert result.audit_report.issues == ()
 
 
 def test_exact_glossary_still_analyzes_but_skips_all_term_calls():

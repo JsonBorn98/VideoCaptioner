@@ -53,7 +53,7 @@ class SubtitlePipelineThread(QThread):
                 task.subtitle_config,
                 translation_execution_mode=TranslationExecutionMode.BATCH,
                 term_confirmation_mode=TermConfirmationMode.AUTOMATIC,
-                translation_audit_mode=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+                translation_audit_mode=TranslationAuditMode.AUTO_APPLY_REVIEW,
             )
 
     def run(self):

@@ -142,7 +142,7 @@ def test_task_factory_freezes_role_profiles_and_role_settings(tmp_path):
             profile_store=store,
             translation_execution_mode=TranslationExecutionMode.GUI_WORKFLOW,
             term_confirmation_mode=TermConfirmationMode.MANUAL,
-            translation_audit_mode=TranslationAuditMode.REPORT_ONLY,
+            translation_audit_mode=TranslationAuditMode.REVIEW_AND_CONFIRM,
             imported_glossary_path=str(tmp_path / "terms.vcglossary.json"),
         )
         config = task.subtitle_config
@@ -164,7 +164,7 @@ def test_task_factory_freezes_role_profiles_and_role_settings(tmp_path):
         assert config.enhanced_batch_size == 17
         assert config.term_context_radius == 8
         assert config.term_confirmation_mode is TermConfirmationMode.MANUAL
-        assert config.translation_audit_mode is TranslationAuditMode.REPORT_ONLY
+        assert config.translation_audit_mode is TranslationAuditMode.REVIEW_AND_CONFIRM
         assert config.translation_execution_mode is TranslationExecutionMode.GUI_WORKFLOW
         assert config.imported_glossary_path == str(tmp_path / "terms.vcglossary.json")
     finally:
@@ -176,7 +176,7 @@ def test_task_factory_freezes_role_profiles_and_role_settings(tmp_path):
     "execution_mode",
     [TranslationExecutionMode.CLI, TranslationExecutionMode.BATCH],
 )
-def test_noninteractive_task_forces_automatic_terms_and_auto_fix_audit(
+def test_noninteractive_task_forces_automatic_terms_and_review_application(
     tmp_path,
     execution_mode,
 ):
@@ -184,7 +184,7 @@ def test_noninteractive_task_forces_automatic_terms_and_auto_fix_audit(
     old_audit = cfg.translation_audit_mode.value
     try:
         cfg.set(cfg.term_confirmation_mode, TermConfirmationMode.MANUAL)
-        cfg.set(cfg.translation_audit_mode, TranslationAuditMode.REPORT_ONLY)
+        cfg.set(cfg.translation_audit_mode, TranslationAuditMode.REVIEW_AND_CONFIRM)
 
         task = TaskFactory.create_subtitle_task(
             str(tmp_path / "source.srt"),
@@ -194,7 +194,7 @@ def test_noninteractive_task_forces_automatic_terms_and_auto_fix_audit(
         config = task.subtitle_config
         assert config is not None
         assert config.term_confirmation_mode is TermConfirmationMode.AUTOMATIC
-        assert config.translation_audit_mode is TranslationAuditMode.AUTO_FIX_OBJECTIVE
+        assert config.translation_audit_mode is TranslationAuditMode.AUTO_APPLY_REVIEW
     finally:
         cfg.set(cfg.term_confirmation_mode, old_term)
         cfg.set(cfg.translation_audit_mode, old_audit)

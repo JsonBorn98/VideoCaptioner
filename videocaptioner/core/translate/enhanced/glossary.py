@@ -193,7 +193,7 @@ def classify_glossary_import(
         return GlossaryImportResult(
             GlossaryImportMode.INCOMPATIBLE,
             None,
-            "unsupported glossary schema or version",
+            "术语表格式或版本不受支持",
         )
     if (
         normalize_term(glossary.source_language) != normalize_term(source_language)
@@ -202,7 +202,7 @@ def classify_glossary_import(
         return GlossaryImportResult(
             GlossaryImportMode.INCOMPATIBLE,
             None,
-            "language pair does not match",
+            "术语表语言与当前任务不匹配",
         )
     if glossary.subtitle_fingerprint == subtitle_fingerprint(cues):
         return GlossaryImportResult(GlossaryImportMode.EXACT, glossary)
@@ -218,7 +218,7 @@ def classify_glossary_import(
     return GlossaryImportResult(
         GlossaryImportMode.SEED,
         seed,
-        "subtitle fingerprint differs; occurrences must be rescanned",
+        "字幕内容已变化，需要重新扫描术语位置",
     )
 
 

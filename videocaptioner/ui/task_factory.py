@@ -425,7 +425,7 @@ class TaskFactory:
         }:
             effective_term_confirmation = TermConfirmationMode.AUTOMATIC
             effective_audit_mode = (
-                translation_audit_mode or TranslationAuditMode.AUTO_FIX_OBJECTIVE
+                translation_audit_mode or TranslationAuditMode.AUTO_APPLY_REVIEW
             )
         else:
             effective_term_confirmation = (
@@ -694,7 +694,7 @@ class TaskFactory:
                 subtitle_config,
                 translation_execution_mode=TranslationExecutionMode.BATCH,
                 term_confirmation_mode=TermConfirmationMode.AUTOMATIC,
-                translation_audit_mode=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+                translation_audit_mode=TranslationAuditMode.AUTO_APPLY_REVIEW,
             )
         postprocess_task = TaskFactory.create_postprocess_task(
             file_path,

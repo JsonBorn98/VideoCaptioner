@@ -24,7 +24,7 @@ def _manual_config() -> SubtitleConfig:
         translation_mode=TranslationMode.NON_LLM,
         main_translation_prompt="frozen prompt",
         term_confirmation_mode=TermConfirmationMode.MANUAL,
-        translation_audit_mode=TranslationAuditMode.REPORT_ONLY,
+        translation_audit_mode=TranslationAuditMode.REVIEW_AND_CONFIRM,
         translation_execution_mode=TranslationExecutionMode.GUI_STANDALONE,
     )
 
@@ -43,7 +43,7 @@ def test_batch_task_forces_unattended_translation_policy(tmp_path, qapp):
     assert batch_task.subtitle_config.term_confirmation_mode is TermConfirmationMode.AUTOMATIC
     assert (
         batch_task.subtitle_config.translation_audit_mode
-        is TranslationAuditMode.AUTO_FIX_OBJECTIVE
+        is TranslationAuditMode.AUTO_APPLY_REVIEW
     )
     assert (
         batch_task.subtitle_config.translation_execution_mode
@@ -117,7 +117,7 @@ def test_unattended_pipeline_forces_automatic_terms(tmp_path, qapp):
     assert full_task.subtitle_config.term_confirmation_mode is TermConfirmationMode.AUTOMATIC
     assert (
         full_task.subtitle_config.translation_audit_mode
-        is TranslationAuditMode.AUTO_FIX_OBJECTIVE
+        is TranslationAuditMode.AUTO_APPLY_REVIEW
     )
     assert (
         full_task.subtitle_config.translation_execution_mode

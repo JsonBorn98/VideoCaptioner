@@ -103,6 +103,7 @@ class _ModeCard(CardWidget):
     def set_status(self, status: str) -> None:
         self.status = status
         self.status_label.setText(status)
+        self.status_label.setVisible(bool(status))
 
     def _normalBackgroundColor(self) -> QColor:
         if not self._checked:
@@ -257,58 +258,32 @@ class TranslationModeSelector(QWidget):
         layout.setColumnStretch(3, 1)
         return panel, layout
 
-    def _add_panel_heading(
-        self,
-        panel: QWidget,
-        layout: QGridLayout,
-        title: str,
-        description: str,
-    ) -> None:
-        title_label = StrongBodyLabel(title, panel)
-        description_label = CaptionLabel(description, panel)
-        description_label.setWordWrap(True)
-        layout.addWidget(title_label, 0, 0, 1, 4)
-        layout.addWidget(description_label, 1, 0, 1, 4)
-
     @staticmethod
     def _prepare_combo(combo: ComboBox) -> None:
-        combo.setMinimumWidth(190)
+        combo.setMinimumWidth(160)
         combo.setMaxVisibleItems(8)
 
     def _build_non_llm_panel(self) -> QWidget:
         panel, grid = self._panel()
-        self._add_panel_heading(
-            panel,
-            grid,
-            self.tr("传统翻译服务"),
-            self.tr("沿用“翻译设置”中已选择的 Bing、Google 或 DeepLX 服务。"),
-        )
         self.non_llm_service_label = BodyLabel(panel)
-        grid.addWidget(self.non_llm_service_label, 2, 0, 1, 4)
+        grid.addWidget(self.non_llm_service_label, 0, 0, 1, 4)
         return panel
 
     def _build_single_llm_panel(self) -> QWidget:
         panel, grid = self._panel()
-        self._add_panel_heading(
-            panel,
-            grid,
-            self.tr("普通 LLM 翻译配置"),
-            self.tr("选择主翻译模型，并按需启用反思翻译。"),
-        )
-
-        grid.addWidget(BodyLabel(self.tr("主翻译模型"), panel), 2, 0)
+        grid.addWidget(BodyLabel(self.tr("主翻译模型"), panel), 0, 0)
         self.main_profile_combo = ComboBox(panel)
         self._prepare_combo(self.main_profile_combo)
         self.main_profile_combo.currentIndexChanged.connect(self._on_main_profile_changed)
-        grid.addWidget(self.main_profile_combo, 2, 1)
+        grid.addWidget(self.main_profile_combo, 0, 1)
 
         self.main_prompt_button = PushButton(panel)
         self.main_prompt_button.setIcon(FIF.EDIT)
         self.main_prompt_button.setText(self.tr("编辑主翻译 Prompt"))
         self.main_prompt_button.clicked.connect(self.edit_main_prompt)
-        grid.addWidget(self.main_prompt_button, 2, 2, 1, 2)
+        grid.addWidget(self.main_prompt_button, 0, 2, 1, 2)
 
-        grid.addWidget(BodyLabel(self.tr("反思翻译"), panel), 3, 0)
+        grid.addWidget(BodyLabel(self.tr("反思翻译"), panel), 1, 0)
         self.reflect_checkbox = SwitchButton(panel)
         self.reflect_checkbox.setOnText(self.tr("开启"))
         self.reflect_checkbox.setOffText(self.tr("关闭"))
@@ -316,40 +291,33 @@ class TranslationModeSelector(QWidget):
         self.reflect_checkbox.checkedChanged.connect(
             lambda checked: cfg.set(cfg.need_reflect_translate, checked)
         )
-        grid.addWidget(self.reflect_checkbox, 3, 1, Qt.AlignLeft)  # type: ignore[arg-type]
+        grid.addWidget(self.reflect_checkbox, 1, 1, Qt.AlignLeft)  # type: ignore[arg-type]
 
-        grid.addWidget(BodyLabel(self.tr("每批字幕"), panel), 3, 2)
+        grid.addWidget(BodyLabel(self.tr("每批字幕"), panel), 1, 2)
         self.single_batch_spin = SpinBox(panel)
         self.single_batch_spin.setRange(5, 50)
         self.single_batch_spin.setValue(int(cfg.batch_size.value))
         self.single_batch_spin.valueChanged.connect(lambda value: cfg.set(cfg.batch_size, value))
         self.single_batch_spin.setMinimumWidth(120)
-        grid.addWidget(self.single_batch_spin, 3, 3)
+        grid.addWidget(self.single_batch_spin, 1, 3)
         return panel
 
     def _build_enhanced_llm_panel(self) -> QWidget:
         panel, grid = self._panel()
-        self._add_panel_heading(
-            panel,
-            grid,
-            self.tr("增强型双模型配置"),
-            self.tr("主模型负责翻译，高级校对模型负责术语裁决与全文质量审计。"),
-        )
-
         # A separate widget mirrors the main-role binding while keeping one cfg ID.
-        grid.addWidget(BodyLabel(self.tr("主翻译模型"), panel), 2, 0)
+        grid.addWidget(BodyLabel(self.tr("主翻译模型"), panel), 0, 0)
         self.enhanced_main_profile_combo = ComboBox(panel)
         self._prepare_combo(self.enhanced_main_profile_combo)
         self.enhanced_main_profile_combo.currentIndexChanged.connect(
             self._on_enhanced_main_profile_changed
         )
-        grid.addWidget(self.enhanced_main_profile_combo, 2, 1)
+        grid.addWidget(self.enhanced_main_profile_combo, 0, 1)
 
-        grid.addWidget(BodyLabel(self.tr("高级校对模型"), panel), 2, 2)
+        grid.addWidget(BodyLabel(self.tr("高级校对模型"), panel), 0, 2)
         self.review_profile_combo = ComboBox(panel)
         self._prepare_combo(self.review_profile_combo)
         self.review_profile_combo.currentIndexChanged.connect(self._on_review_profile_changed)
-        grid.addWidget(self.review_profile_combo, 2, 3)
+        grid.addWidget(self.review_profile_combo, 0, 3)
 
         prompt_row = QWidget(panel)
         prompt_layout = QHBoxLayout(prompt_row)
@@ -365,10 +333,10 @@ class TranslationModeSelector(QWidget):
         review_prompt.clicked.connect(self.edit_review_prompt)
         prompt_layout.addWidget(enhanced_main_prompt)
         prompt_layout.addWidget(review_prompt)
-        grid.addWidget(BodyLabel(self.tr("角色 Prompt"), panel), 3, 0)
-        grid.addWidget(prompt_row, 3, 1)
+        grid.addWidget(BodyLabel(self.tr("角色 Prompt"), panel), 1, 0)
+        grid.addWidget(prompt_row, 1, 1)
 
-        grid.addWidget(BodyLabel(self.tr("术语确认"), panel), 3, 2)
+        grid.addWidget(BodyLabel(self.tr("术语确认"), panel), 1, 2)
         self.term_confirmation_combo = ComboBox(panel)
         self._prepare_combo(self.term_confirmation_combo)
         self.term_confirmation_combo.addItem(
@@ -381,23 +349,23 @@ class TranslationModeSelector(QWidget):
         self.term_confirmation_combo.currentIndexChanged.connect(
             lambda: cfg.set(cfg.term_confirmation_mode, self.term_confirmation_combo.currentData())
         )
-        grid.addWidget(self.term_confirmation_combo, 3, 3)
+        grid.addWidget(self.term_confirmation_combo, 1, 3)
 
-        grid.addWidget(BodyLabel(self.tr("审计策略"), panel), 4, 0)
+        grid.addWidget(BodyLabel(self.tr("审计策略"), panel), 2, 0)
         self.audit_mode_combo = ComboBox(panel)
         self._prepare_combo(self.audit_mode_combo)
         self.audit_mode_combo.addItem(
-            self.tr("审计仅报告"), userData=TranslationAuditMode.REPORT_ONLY
+            self.tr("审计并人工确认"), userData=TranslationAuditMode.REVIEW_AND_CONFIRM
         )
         self.audit_mode_combo.addItem(
-            self.tr("自动修复客观问题"),
-            userData=TranslationAuditMode.AUTO_FIX_OBJECTIVE,
+            self.tr("自动采纳校对修正"),
+            userData=TranslationAuditMode.AUTO_APPLY_REVIEW,
         )
         self._select_data(self.audit_mode_combo, cfg.translation_audit_mode.value)
         self.audit_mode_combo.currentIndexChanged.connect(
             lambda: cfg.set(cfg.translation_audit_mode, self.audit_mode_combo.currentData())
         )
-        grid.addWidget(self.audit_mode_combo, 4, 1)
+        grid.addWidget(self.audit_mode_combo, 2, 1)
 
         glossary_row = QWidget(panel)
         glossary_layout = QHBoxLayout(glossary_row)
@@ -412,10 +380,10 @@ class TranslationModeSelector(QWidget):
         glossary_button.clicked.connect(self.choose_glossary)
         glossary_layout.addWidget(self.glossary_path_edit, 1)
         glossary_layout.addWidget(glossary_button)
-        grid.addWidget(BodyLabel(self.tr("项目术语表"), panel), 4, 2)
-        grid.addWidget(glossary_row, 4, 3)
+        grid.addWidget(BodyLabel(self.tr("项目术语表"), panel), 2, 2)
+        grid.addWidget(glossary_row, 2, 3)
 
-        grid.addWidget(BodyLabel(self.tr("每批字幕"), panel), 5, 0)
+        grid.addWidget(BodyLabel(self.tr("每批字幕"), panel), 3, 0)
         self.enhanced_batch_spin = SpinBox(panel)
         self.enhanced_batch_spin.setRange(1, 50)
         self.enhanced_batch_spin.setValue(int(cfg.enhanced_batch_size.value))
@@ -423,7 +391,7 @@ class TranslationModeSelector(QWidget):
             lambda value: cfg.set(cfg.enhanced_batch_size, value)
         )
         self.enhanced_batch_spin.setMinimumWidth(120)
-        grid.addWidget(self.enhanced_batch_spin, 5, 1)
+        grid.addWidget(self.enhanced_batch_spin, 3, 1)
         return panel
 
     @staticmethod
@@ -500,7 +468,7 @@ class TranslationModeSelector(QWidget):
             elif missing:
                 status = self.tr("缺少：") + "、".join(missing)
             else:
-                status = self.tr("已就绪")
+                status = ""
             card.set_status(status)
             card.status_label.setStyleSheet(
                 f"color: {themeColor().name()};" if not missing else "color: #d89614;"
