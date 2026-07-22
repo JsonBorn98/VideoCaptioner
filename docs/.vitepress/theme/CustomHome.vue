@@ -7,14 +7,14 @@
         <div class="hero-content">
           <div class="hero-badge">
             <span class="badge-emoji">🎬</span>
-            Fork 独立维护 · GPL-3.0
+            个人使用向 fork · 按需更新
           </div>
           <h1 class="hero-title">
             从转录到成片<br>
             <span class="gradient-text">每一步都可控</span>
           </h1>
           <p class="hero-description">
-            精确时间轴、双角色翻译校对、字幕后处理与专业编码<br>
+            时间轴对齐、双角色翻译校对、字幕后处理与 FFmpeg 合成<br>
             GUI 与 CLI 共享核心流程，并分别服务交互精修与批量自动化
           </p>
           <div class="hero-stats-inline">
@@ -26,14 +26,14 @@
           </div>
           <div class="hero-actions">
             <a :href="withBase('/guide/getting-started')" class="btn-primary">
-              <span>立即开始</span>
+              <span>查看用法</span>
               <span class="btn-arrow">→</span>
             </a>
             <a href="https://github.com/JsonBorn98/VideoCaptioner" class="btn-secondary">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
               </svg>
-              <span>看看源码</span>
+              <span>源码</span>
             </a>
           </div>
         </div>
@@ -76,14 +76,14 @@
       <div class="container">
         <div class="section-header">
           <h2 class="section-title">Fork 核心增强</h2>
-          <p class="section-subtitle">围绕字幕生产链路补齐可控性、质量保障和交付能力</p>
+          <p class="section-subtitle">主要补了转录、翻译、字幕后处理和 FFmpeg 这几块</p>
         </div>
         <div class="features-grid">
           <div class="feature-card">
             <div class="feature-icon-wrap">
               <div class="feature-icon">🎙️</div>
             </div>
-            <h3 class="feature-title">专业转录与时间轴</h3>
+            <h3 class="feature-title">转录与时间轴</h3>
             <p class="feature-desc">MiMo API、Qwen3 本地 ASR 和 Qwen3-ForcedAligner，配合 VAD 分块、常驻 Worker、异常重试和降级时间轴。</p>
           </div>
           <div class="feature-card">
@@ -118,7 +118,7 @@
             <div class="feature-icon-wrap">
               <div class="feature-icon">🎨</div>
             </div>
-            <h3 class="feature-title">双语样式与阶段交付</h3>
+            <h3 class="feature-title">双语样式与阶段文件</h3>
             <p class="feature-desc">保持单双语布局，提供扩展 ASS 样式与字体预设，并为转录、初版和后处理阶段保存规范 SRT 或自动导出 ASS/VTT。</p>
           </div>
         </div>
@@ -130,14 +130,14 @@
       <div class="container">
         <div class="cta-content">
           <div class="cta-emoji">🚀</div>
-          <h2 class="cta-title">从源码开始使用</h2>
+          <h2 class="cta-title">源码运行</h2>
           <p class="cta-description">
-            当前 fork 尚未发布公开桌面 Release<br>
+            这个 fork 主要按个人需求更新<br>
             使用 uv 安装主程序，再按需启用本地模型或云端服务
           </p>
           <div class="cta-buttons">
             <a :href="withBase('/guide/getting-started')" class="btn-cta-primary">
-              <span>开始使用</span>
+              <span>查看用法</span>
               <span class="btn-arrow">→</span>
             </a>
             <a :href="withBase('/guide/faq')" class="btn-cta-secondary">

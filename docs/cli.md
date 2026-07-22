@@ -2,8 +2,8 @@
 
 ## 安装
 
-当前 fork 尚未发布公开桌面 Release，也不发布 PyPI 包。现阶段请从源码运行；
-`pip install videocaptioner` 不是受支持的安装方式。
+本仓库目前按源码方式运行，也不提供 PyPI 包。请使用下面的 `uv` 命令；
+`pip install videocaptioner` 不是这个 fork 的安装方式。
 
 源码开发环境：
 
@@ -211,7 +211,7 @@ videocaptioner synthesize <视频> -s <字幕> [选项]
 
 #### 字幕样式
 
-VideoCaptioner 支持两种渲染模式，让字幕更美观：
+VideoCaptioner 提供两种字幕渲染模式：
 
 **ASS 模式**（默认）— 传统描边/阴影样式，支持自定义字体、颜色、描边宽度：
 ```bash

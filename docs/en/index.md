@@ -40,9 +40,9 @@ features:
     details: A dedicated GUI run log and structured GUI/CLI stage summaries expose actual artifacts, alignment fallbacks, rule fallbacks, and failures.
 ---
 
-## Current distribution status
+## Run from source
 
-This fork does not yet publish a public desktop Release. Run it from source for now:
+This is a personal-use fork updated as needed. Run it from source:
 
 ```bash
 git clone https://github.com/JsonBorn98/VideoCaptioner.git
@@ -69,7 +69,7 @@ media
 ```
 
 See the [Chinese user guide](/guide/getting-started) and
-[CLI reference](/cli) for the currently maintained documentation.
+[CLI reference](/cli) for usage details.
 
 ## License and attribution
 

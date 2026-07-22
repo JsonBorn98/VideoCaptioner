@@ -26,93 +26,8 @@ export default defineConfig({
     ['link', { rel: 'icon', type: 'image/png', sizes: '32x32', href: `${siteUrl}logo.png` }],
     ['link', { rel: 'apple-touch-icon', sizes: '180x180', href: `${siteUrl}logo.png` }],
     ['meta', { name: 'theme-color', content: '#10b981' }],
-    ['meta', { name: 'viewport', content: 'width=device-width, initial-scale=1.0, viewport-fit=cover' }],
-    ['meta', {
-      name: 'keywords',
-      content: 'VideoCaptioner,视频字幕,MiMo ASR,Qwen3 ASR,ForcedAligner,LLM 翻译,字幕校对,字幕后处理,FFmpeg,硬件编码'
-    }],
-    ['meta', { name: 'author', content: 'JsonBorn98 and VideoCaptioner contributors' }],
-    ['meta', {
-      name: 'robots',
-      content: 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1'
-    }],
-
-    ['meta', { property: 'og:type', content: 'website' }],
-    ['meta', { property: 'og:locale', content: 'zh_CN' }],
-    ['meta', { property: 'og:title', content: 'VideoCaptioner - 视频字幕工作台' }],
-    ['meta', {
-      property: 'og:description',
-      content: '集成转录与精确时间轴、双角色 LLM 翻译校对、字幕后处理和可控 FFmpeg 合成导出。'
-    }],
-    ['meta', { property: 'og:site_name', content: 'VideoCaptioner' }],
-    ['meta', { property: 'og:url', content: siteUrl }],
-    ['meta', { property: 'og:image', content: `${siteUrl}main.png` }],
-    ['meta', { property: 'og:image:alt', content: 'VideoCaptioner 界面预览' }],
-
-    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
-    ['meta', { name: 'twitter:title', content: 'VideoCaptioner - Video Subtitle Workbench' }],
-    ['meta', {
-      name: 'twitter:description',
-      content: 'Transcription and forced alignment, dual-role LLM translation review, subtitle postprocessing, and controllable FFmpeg export.'
-    }],
-    ['meta', { name: 'twitter:image', content: `${siteUrl}main.png` }],
-
-    ['script', { type: 'application/ld+json' }, JSON.stringify({
-      '@context': 'https://schema.org',
-      '@graph': [
-        {
-          '@type': 'SoftwareApplication',
-          '@id': `${siteUrl}#software`,
-          name: 'VideoCaptioner',
-          alternateName: ['Video Captioner', 'Video Subtitle Workbench'],
-          description: '视频字幕工作台，支持转录与时间轴对齐、翻译校对、字幕后处理和视频合成。',
-          applicationCategory: 'MultimediaApplication',
-          operatingSystem: ['Windows', 'macOS', 'Linux'],
-          author: {
-            '@type': 'Organization',
-            name: 'VideoCaptioner contributors',
-            url: 'https://github.com/JsonBorn98/VideoCaptioner'
-          },
-          screenshot: `${siteUrl}main.png`,
-          url: siteUrl,
-          image: `${siteUrl}logo.png`,
-          inLanguage: ['zh-CN', 'en-US'],
-          featureList: [
-            'MiMo and Qwen3 ASR',
-            'Qwen3 ForcedAligner timeline alignment',
-            'Dual-role LLM translation and review',
-            'Adaptive subtitle postprocessing',
-            'FFmpeg hardware-accelerated synthesis'
-          ]
-        },
-        {
-          '@type': 'WebSite',
-          '@id': `${siteUrl}#website`,
-          url: siteUrl,
-          name: 'VideoCaptioner Documentation',
-          description: 'VideoCaptioner fork 用户文档',
-          publisher: {
-            '@id': `${siteUrl}#project`
-          },
-          inLanguage: ['zh-CN', 'en-US']
-        },
-        {
-          '@type': 'Organization',
-          '@id': `${siteUrl}#project`,
-          name: 'VideoCaptioner contributors',
-          url: 'https://github.com/JsonBorn98/VideoCaptioner',
-          logo: {
-            '@type': 'ImageObject',
-            url: `${siteUrl}logo.png`
-          }
-        }
-      ]
-    })]
+    ['meta', { name: 'viewport', content: 'width=device-width, initial-scale=1.0, viewport-fit=cover' }]
   ],
-
-  sitemap: {
-    hostname: siteUrl
-  },
 
   themeConfig: {
     logo: '/logo.png',
@@ -155,7 +70,7 @@ export default defineConfig({
         {
           text: '开发文档',
           items: [
-            { text: '贡献指南', link: '/dev/contributing' }
+            { text: '开发说明', link: '/dev/contributing' }
           ]
         }
       ]
@@ -189,14 +104,8 @@ export default defineConfig({
       { icon: 'github', link: 'https://github.com/JsonBorn98/VideoCaptioner' }
     ],
 
-    editLink: {
-      pattern: 'https://github.com/JsonBorn98/VideoCaptioner/edit/master/docs/:path',
-      text: '在 GitHub 上编辑此页'
-    },
-
     footer: {
-      message: '基于 GPL-3.0 许可发布',
-      copyright: 'Copyright © 2026 JsonBorn98 and VideoCaptioner contributors'
+      message: '个人使用向 fork · GPL-3.0'
     },
 
     docFooter: {

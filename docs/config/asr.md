@@ -66,11 +66,11 @@
 
 依赖安装：
 
-- 桌面 Release：打开 **设置 → 转录配置 → Qwen 组件管理**，选择 **安装 CPU 运行时** 或 **安装 CUDA 运行时**，再下载 ASR / ForcedAligner 模型。
+- 打包版：打开 **设置 → 转录配置 → Qwen 组件管理**，选择 **安装 CPU 运行时** 或 **安装 CUDA 运行时**，再下载 ASR / ForcedAligner 模型。
 - 源码运行 GUI：同样推荐在 **Qwen 组件管理** 中安装独立运行时，然后用 `uv run videocaptioner doctor --profile qwen` 检查状态。
 - 仅使用源码 CLI，或需要调试 `qwen-asr` 集成：可执行 `uv sync --python 3.12 --extra qwen`，把依赖装进当前 `.venv`；该路径不会创建独立 Runtime，`doctor --profile qwen` 也不会把它识别为 GUI managed-runtime。
 
-Qwen runtime 会安装到用户数据目录下的独立 `runtimes/qwen` 环境，避免把 PyTorch / qwen-asr 混入主程序包。源码运行时路径通常是项目目录下的 `AppData/runtimes/qwen`；桌面 Release 会使用系统用户数据目录。
+Qwen runtime 会安装到用户数据目录下的独立 `runtimes/qwen` 环境，避免把 PyTorch / qwen-asr 混入主程序包。源码运行时路径通常是项目目录下的 `AppData/runtimes/qwen`；打包版会使用系统用户数据目录。
 
 转录任务会启动一个独立的常驻 Qwen worker 子进程。这个 worker 会在任务期间复用已加载的 ASR / ForcedAligner 模型，避免每个音频块都重新创建 CUDA context 和从磁盘加载模型；Qwen 首轮分块会在缓存检查后作为一个 batch 请求进入 worker，异常块再独立进入重试流程。任务结束或程序退出后会关闭 worker。仍然保留子进程隔离，以免 PyTorch/CUDA 原生库污染 PyQt 主进程。
 

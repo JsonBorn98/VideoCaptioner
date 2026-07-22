@@ -1,5 +1,5 @@
-name: 问题咨询 Question
-description: 向作者咨询软件使用或配置相关的问题 | Consult about software usage or configuration
+name: 使用问题 | Question
+description: 记录软件使用或配置问题 | Record a usage or configuration question
 
 labels: ["question"]
 
@@ -8,5 +8,9 @@ body:
     id: problem
     attributes:
       label: 🤔 问题描述 Problem Description
+      description: |
+        这是一个以个人使用为主、按需维护的 fork。Issues 主要用于记录，我会在有需要和有时间时查看，不保证回复或提供解决方案。
+
+        This is a personal-use fork maintained as needed. Issues are mainly for keeping a record and may be reviewed when relevant; replies and solutions are not guaranteed. English and Chinese are both fine.
     validations:
       required: true

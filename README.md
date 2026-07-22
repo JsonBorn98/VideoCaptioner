@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./docs/images/logo.png" alt="VideoCaptioner Logo" width="100">
   <h1>VideoCaptioner</h1>
-  <p>面向桌面与 CLI 的视频字幕工作台：转录、翻译、后处理与专业视频合成</p>
+  <p>面向桌面与 CLI 的视频字幕工具：转录、翻译、后处理与 FFmpeg 合成</p>
 
   [在线文档](https://jsonborn98.github.io/VideoCaptioner/) ·
   [快速开始](#快速开始) ·
@@ -9,21 +9,17 @@
   [CLI](#cli-命令行)
 </div>
 
-VideoCaptioner fork 围绕完整字幕生产链路持续增强，重点解决本地 ASR 管理、
-精确时间轴、双角色 LLM 翻译校对、字幕可读性治理，以及 FFmpeg 编码可控性。
-GUI 与 CLI 共享核心处理引擎，但功能面并不完全相同：GUI 适合交互式精修与配置，
-CLI 适合批量处理和自动化工作流。
-
-> [!NOTE]
-> 当前 fork 尚未发布公开的桌面 Release。现阶段请按下方源码方式运行；
-> 首个 fork Release 发布后，桌面包会继续作为普通用户的首选入口。
+这是一个偏个人使用、按需更新的 VideoCaptioner fork，主要补了本地 ASR 管理、
+时间轴对齐、双角色 LLM 翻译校对、字幕后处理和 FFmpeg 合成。GUI 与 CLI 共享
+核心处理引擎，但功能面并不完全相同：GUI 适合交互式精修与配置，CLI 适合批量处理
+和自动化工作流。
 
 ![VideoCaptioner 字幕工作台](./docs/public/preview1.png)
 ![VideoCaptioner 字幕编辑与预览](./docs/public/preview2.png)
 
 ## Fork 核心增强
 
-### 1. 专业转录与精确时间轴
+### 1. 转录与时间轴
 
 - **MiMo ASR + Qwen3 本地 ASR**：支持 MiMo API 转录，以及
   Qwen3-ASR 0.6B / 1.7B 本地推理。
@@ -78,7 +74,7 @@ CLI 适合批量处理和自动化工作流。
 
 详见 [字幕后处理](docs/guide/subtitle-postprocessing.md)。
 
-### 4. 完整可控的 FFmpeg 合成导出
+### 4. FFmpeg 合成与导出
 
 - 软字幕使用视频/音频流复制快速封装；ASS 硬烧和圆角背景接入集中编码引擎。
 - 提供 14 个目录编码器：x264 / x265、SVT-AV1、AOM-AV1、VP9，以及
@@ -189,8 +185,6 @@ bun run docs:build
 ```bash
 uv run --with pyinstaller --with static-ffmpeg python scripts/build_desktop.py --clean
 ```
-
-贡献说明见 [docs/dev/contributing.md](docs/dev/contributing.md)。
 
 ## 许可证与归属
 

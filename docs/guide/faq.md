@@ -50,5 +50,3 @@ A:
 - 检查网络连接
 - 查看日志文件获取详细错误信息
 
-更多问题，请访问 [GitHub Issues](https://github.com/JsonBorn98/VideoCaptioner/issues)。
-

@@ -1,8 +1,8 @@
-# Desktop release build
+# Desktop build
 
-VideoCaptioner publishes desktop bundles for Windows and macOS from GitHub Actions.
-Users can download the zip files from a GitHub Release, extract them, and run the
-bundled `VideoCaptioner` executable without installing Python or FFmpeg.
+This repository can build desktop bundles for Windows and macOS. The packaged
+`VideoCaptioner` executable includes FFmpeg and does not require a separate Python
+installation.
 
 ## Local build
 
@@ -18,7 +18,7 @@ Runtime user data is kept in the system user-data directory, so app upgrades do
 not overwrite settings, logs, cache, models, optional runtimes, or custom
 subtitle styles.
 
-## CI and releases
+## CI builds
 
 `.github/workflows/build-desktop.yml` builds desktop bundles on:
 
@@ -37,7 +37,10 @@ Each job runs a real packaged-app smoke test:
 Pull requests and branch pushes are artifact-only checks. They upload short-lived
 workflow artifacts, but they do not publish a GitHub Release.
 
-Release publishing is tag based. Use one of these paths:
+## Optional tag publishing
+
+The workflow retains an optional tag-based publishing path for maintainer use. This
+is a build capability, not a release schedule or an availability commitment. To use it:
 
 ```bash
 git tag v1.4.3
@@ -53,5 +56,5 @@ For a manual re-upload, run the **Build Desktop Apps** workflow from GitHub
 Actions and set `release_tag` to an existing `v*` tag. Leave `release_tag` empty
 for an artifact-only manual build.
 
-This fork does not publish to PyPI; source package artifacts are produced by CI
-only for verification and short-lived workflow downloads.
+This fork does not publish to PyPI; source package artifacts are produced by CI only
+for verification and short-lived workflow downloads.

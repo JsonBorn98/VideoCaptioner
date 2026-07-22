@@ -29,4 +29,4 @@ result = transcribe(
 
 相关文档：
 - [架构设计](./architecture)
-- [贡献指南](/dev/contributing)
+- [开发说明](/dev/contributing)

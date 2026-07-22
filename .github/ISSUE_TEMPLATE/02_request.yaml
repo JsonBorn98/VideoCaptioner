@@ -1,13 +1,13 @@
 name: 功能请求 | Feature Request
-description: 提出增加新功能的请求 | Create the request for a new feature
+description: 记录功能想法 | Record a feature idea
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        ✨ 感谢您提出功能建议！请描述您希望的新功能，对于有用可行的建议我会努力实现的。
+        这是一个以个人使用为主、按需维护的 fork。Issues 主要用于记录想法，我会结合自己的需求和时间按需查看，不保证回复或实现。
         
-        🌟 Thank you for your feature suggestion! Please describe the new feature you expect. Using English or Chinese.
+        This is a personal-use fork maintained as needed. Issues are mainly for recording ideas and may be reviewed based on personal needs and available time; replies and implementation are not guaranteed. English and Chinese are both fine.
   - type: textarea
     id: feature
     attributes:

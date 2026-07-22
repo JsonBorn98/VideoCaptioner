@@ -2,6 +2,3 @@
 User-agent: *
 Allow: /
 
-# Sitemaps
-Sitemap: https://jsonborn98.github.io/VideoCaptioner/sitemap.xml
-

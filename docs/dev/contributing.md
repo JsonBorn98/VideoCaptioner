@@ -1,6 +1,7 @@
-# 贡献指南
+# 开发说明
 
-感谢你对 VideoCaptioner 的贡献！
+这是一个偏个人使用、按需更新的 fork。Issues 和 Pull Requests 可用于记录或参考，
+但不保证回复、合并或排期。
 
 ## 开发环境设置
 
@@ -44,12 +45,11 @@ uv run pyright
 uv run ruff check --select I --fix .
 ```
 
-## 提交 Pull Request
+## 提交前检查
 
 1. 创建新分支
-2. 提交你的修改
-3. 推送到你的 Fork
-4. 创建 Pull Request
+2. 运行与改动相关的检查
+3. 提交修改；需要时推送到自己的 Fork
 
 ## 注释要求
 
@@ -60,5 +60,3 @@ uv run ruff check --select I --fix .
 相关文档：
 - [MiMo and Qwen ASR Backend Lessons](/dev/asr-mimo-qwen-lessons)
 - [ASR 配置指南](/config/asr)
-
-更多信息请参考 [GitHub Issues](https://github.com/JsonBorn98/VideoCaptioner/issues)。

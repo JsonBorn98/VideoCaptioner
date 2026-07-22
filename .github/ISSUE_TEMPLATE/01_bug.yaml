@@ -1,20 +1,20 @@
 name: 错误 | Bug
-description: 反馈程序出现的错误 | Report bugs
+description: 记录程序运行中遇到的问题 | Record bugs
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        感谢您报告问题！请提供以下信息帮助我更好地解决问题。
+        这是一个以个人使用为主、按需维护的 fork。Issues 主要用于记录问题，我会在有需要和有时间时查看，不保证逐条回复、排查或修复。
         
-        Thank you for reporting the issue! Using English or Chinese.
+        This is a personal-use fork maintained as needed. Issues are mainly for keeping a record and may be reviewed when relevant; replies, investigation, and fixes are not guaranteed. English and Chinese are both fine.
 
   - type: textarea
     id: description
     attributes:
       label: 问题描述 | Problem Description
       description: |
-        描述您遇到的问题，如果能提供一个复现步骤将帮我更好定位修复问题。(例如:错误字幕内容、或者视频链接、或者具体报错)
+        请描述遇到的问题，并尽量提供复现步骤和必要材料（例如错误字幕内容、视频链接或具体报错）。
         
         Please describe in detail the problem you encountered.
     validations:
@@ -25,7 +25,7 @@ body:
     attributes:
       label: 日志信息（可选）| Logs (Optional)
       description: |
-        （可选）如果你在生成字幕视频过程遇到了错误，请打开根目录下的 AppData/logs/app.log 文件，根据日志的时间复制最近一次运行错误的日志信息并填写。这样可以更好帮助我排查。
+        （可选）如果在生成字幕视频过程中遇到错误，请打开根目录下的 AppData/logs/app.log 文件，按时间复制最近一次运行错误的日志信息，便于后续按需排查。
         
         (Optional) Please open the AppData/logs/app.log file in the root directory and copy the log information from the most recent run error.
       render: shell
