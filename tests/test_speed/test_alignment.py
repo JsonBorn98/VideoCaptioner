@@ -75,6 +75,103 @@ def test_window_planning_targets_45_seconds_and_never_crosses_hard_reset() -> No
     assert cues[5].cue_id not in plans[-1].cue_ids
 
 
+def test_tail_cue_crossing_media_end_is_clipped_and_still_aligned(tmp_path) -> None:
+    media = tmp_path / "movie.mp4"
+    media.write_bytes(b"media")
+    cues = [_cue(0, 0, 7500, "first"), _cue(1, 7500, 12_000, "tail")]
+    calls = []
+
+    def aligner(**kwargs):
+        calls.append(kwargs)
+        return [
+            {"text": "first", "start_time": 0.0, "end_time": 7.0},
+            {"text": "tail", "start_time": 7.5, "end_time": 9.5},
+        ]
+
+    result = align_timing_windows(
+        str(media),
+        cues,
+        "en",
+        aligner=aligner,
+        media_probe=_probe(duration_seconds=10.0),
+    )
+
+    assert result.preflight.eligible
+    assert result.preflight.warnings
+    assert calls[0]["clip_start_ms"] == 0
+    assert calls[0]["clip_duration_ms"] == 10_000
+    assert result.plans[0].cue_end_ms == 10_000
+    assert result.plans[0].media_end_clipped
+    assert result.windows[0].provenance is TimingProvenance.FORCED_ALIGNER
+    assert result.windows[0].quality_metrics["media_end_clipped"] is True
+    assert result.windows[0].end_ms == 10_000
+
+
+def test_cues_starting_after_media_end_are_skipped_while_other_windows_align(tmp_path) -> None:
+    media = tmp_path / "movie.mp4"
+    media.write_bytes(b"media")
+    cues = [_cue(0, 0, 1000, "inside"), _cue(1, 11_000, 12_000, "outside")]
+    calls = []
+
+    def aligner(**kwargs):
+        calls.append(kwargs)
+        return [{"text": "inside", "start_time": 0.0, "end_time": 1.0}]
+
+    result = align_timing_windows(
+        str(media),
+        cues,
+        "en",
+        aligner=aligner,
+        media_probe=_probe(duration_seconds=10.0),
+    )
+
+    assert result.preflight.eligible
+    assert len(calls) == 1
+    assert calls[0]["transcript"] == "inside"
+    assert len(result.windows) == 1
+    assert cues[1].cue_id not in result.windows[0].cue_ids
+    assert any("start beyond media duration" in issue for issue in result.issues)
+
+
+def test_preflight_rejects_subtitles_with_no_media_overlap(tmp_path) -> None:
+    media = tmp_path / "movie.mp4"
+    media.write_bytes(b"media")
+    cues = [_cue(0, 11_000, 12_000, "outside")]
+    calls = []
+
+    result = align_timing_windows(
+        str(media),
+        cues,
+        "en",
+        aligner=lambda **kwargs: calls.append(kwargs) or [],
+        media_probe=_probe(duration_seconds=10.0),
+    )
+
+    assert not result.preflight.eligible
+    assert "subtitle does not overlap media duration" in result.preflight.issues
+    assert calls == []
+
+
+def test_clipped_tail_window_can_fall_back_without_out_of_bounds_evidence(tmp_path) -> None:
+    media = tmp_path / "movie.mp4"
+    media.write_bytes(b"media")
+    cue = _cue(0, 8000, 12_000, "tail")
+
+    result = align_timing_windows(
+        str(media),
+        [cue],
+        "en",
+        aligner=lambda **_kwargs: [],
+        media_probe=_probe(duration_seconds=10.0),
+    )
+
+    fallback = result.windows[0]
+    assert fallback.provenance is TimingProvenance.SUBTITLE_INPUT
+    assert fallback.end_ms == 10_000
+    assert fallback.anchors[0].end_ms == 10_000
+    assert fallback.quality_metrics["media_end_clipped"] is True
+
+
 def test_successful_alignment_produces_absolute_high_quality_word_evidence(tmp_path) -> None:
     media = tmp_path / "movie.mp4"
     media.write_bytes(b"media")
@@ -202,6 +299,42 @@ def test_timing_resolution_reuses_input_sidecar_before_aligner(tmp_path) -> None
     assert cache_hit
     assert issues == ()
     assert reused == bundle
+
+
+def test_timing_sidecar_is_not_reused_after_cue_times_change(tmp_path) -> None:
+    subtitle = tmp_path / "captions.srt"
+    subtitle.write_text("source", encoding="utf-8")
+    media = tmp_path / "unique-time-change.mp4"
+    media.write_bytes(b"unique-media-time-change")
+    original = [_cue(0, 0, 1000, "same text")]
+
+    bundle, _, _ = load_or_align_timing(
+        str(subtitle),
+        str(media),
+        original,
+        "en",
+        aligner=lambda **_kwargs: [
+            {"text": "same text", "start_time": 0.0, "end_time": 1.0}
+        ],
+        media_probe=_probe(),
+    )
+    assert bundle is not None
+    write_timing_archive(timing_sidecar_path(subtitle), bundle)
+    calls = []
+
+    reused, _, cache_hit = load_or_align_timing(
+        str(subtitle),
+        str(media),
+        [_cue(0, 500, 1500, "same text")],
+        "en",
+        aligner=lambda **kwargs: calls.append(kwargs)
+        or [{"text": "same text", "start_time": 1.5, "end_time": 2.5}],
+        media_probe=_probe(),
+    )
+
+    assert reused is not None
+    assert not cache_hit
+    assert len(calls) == 1
 
 
 def test_failed_alignment_windows_are_not_cached(tmp_path, monkeypatch) -> None:

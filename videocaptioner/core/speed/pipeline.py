@@ -124,12 +124,19 @@ def _to_timing_cues(
             and TimingOperation.MOVE_SHARED_BOUNDARY in evidence.allowed_operations
             else TimingQualityGrade.LOW
         )
+        end_ms = segment.end_time
+        if (
+            evidence is not None
+            and evidence.quality_metrics.get("media_end_clipped") is True
+            and segment.start_time < evidence.end_ms < end_ms
+        ):
+            end_ms = evidence.end_ms
         cues.append(
             TimingCue(
                 cue_id=snapshot.cue_id,
                 order=index,
                 start_ms=segment.start_time,
-                end_ms=segment.end_time,
+                end_ms=end_ms,
                 text=resolve_primary_text(segment, layout, primary_side),
                 rhythm_id=rhythms[index],
                 protected=index in protected_indices,

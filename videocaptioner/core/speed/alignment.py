@@ -28,7 +28,7 @@ from .timing_evidence import (
 logger = setup_logger("speed.alignment")
 
 DEFAULT_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
-ALIGNMENT_ADAPTER_VERSION = 1
+ALIGNMENT_ADAPTER_VERSION = 2
 _SUPPORTED_LANGUAGES = frozenset(
     {"zh", "en", "yue", "fr", "de", "it", "ja", "ko", "pt", "ru", "es"}
 )
@@ -85,6 +85,7 @@ class AlignmentPreflight:
     issues: tuple[str, ...]
     media_duration_ms: int | None
     audio_track_index: int
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class AlignmentWindowPlan:
     clip_start_ms: int
     clip_end_ms: int
     transcript: str
+    media_end_clipped: bool = False
 
     @property
     def clip_duration_ms(self) -> int:
@@ -155,6 +157,7 @@ def preflight_alignment(
     """Check all inputs required before a model or worker is started."""
 
     issues: list[str] = []
+    warnings: list[str] = []
     path = Path(media_path).expanduser() if media_path else None
     if path is None or not path.is_file():
         issues.append("media file does not exist")
@@ -187,8 +190,36 @@ def preflight_alignment(
                 duration_seconds = getattr(info, "duration_seconds", 0.0) or 0.0
                 if duration_seconds > 0:
                     duration_ms = round(float(duration_seconds) * 1000)
-                    if any(cue.end_ms > duration_ms for cue in cues):
-                        issues.append("subtitle extends beyond media duration")
+                    source_cues = [
+                        cue
+                        for cue in cues
+                        if cue.text.strip() and cue.end_ms > cue.start_ms
+                    ]
+                    overlapping_cues = [
+                        cue
+                        for cue in source_cues
+                        if cue.end_ms > 0 and cue.start_ms < duration_ms
+                    ]
+                    if source_cues and not overlapping_cues:
+                        issues.append("subtitle does not overlap media duration")
+                    else:
+                        clipped_count = sum(
+                            cue.start_ms < duration_ms < cue.end_ms
+                            for cue in overlapping_cues
+                        )
+                        skipped_count = sum(
+                            cue.start_ms >= duration_ms for cue in source_cues
+                        )
+                        if clipped_count:
+                            warnings.append(
+                                f"{clipped_count} subtitle cue(s) extend beyond media duration "
+                                "and will be clipped locally"
+                            )
+                        if skipped_count:
+                            warnings.append(
+                                f"{skipped_count} subtitle cue(s) start beyond media duration "
+                                "and will use subtitle timing"
+                            )
 
     if issues:
         logger.warning(
@@ -197,7 +228,20 @@ def preflight_alignment(
             audio_track_index,
             "；".join(issues),
         )
-    return AlignmentPreflight(not issues, tuple(issues), duration_ms, audio_track_index)
+    elif warnings:
+        logger.warning(
+            "对齐预检发现可恢复时间范围问题（局部处理）：lang=%s track=%d 原因=%s",
+            _normalize_language(source_language),
+            audio_track_index,
+            "；".join(warnings),
+        )
+    return AlignmentPreflight(
+        eligible=not issues,
+        issues=tuple(issues),
+        media_duration_ms=duration_ms,
+        audio_track_index=audio_track_index,
+        warnings=tuple(warnings),
+    )
 
 
 def _split_reset_groups(cues: Sequence[CueSnapshot], hard_reset_ms: int) -> list[list[CueSnapshot]]:
@@ -259,15 +303,25 @@ def plan_alignment_windows(
     selected = config or AlignmentConfig()
     plans: list[AlignmentWindowPlan] = []
     nonempty = [cue for cue in cues if cue.text.strip() and cue.end_ms > cue.start_ms]
+    if media_duration_ms is not None:
+        nonempty = [
+            cue for cue in nonempty if cue.end_ms > 0 and cue.start_ms < media_duration_ms
+        ]
     for reset_group in _split_reset_groups(nonempty, selected.hard_reset_ms):
         for chunk in _split_group_at_gaps(reset_group, selected):
-            cue_start = chunk[0].start_ms
-            cue_end = chunk[-1].end_ms
+            cue_start = max(0, chunk[0].start_ms)
+            original_cue_end = chunk[-1].end_ms
+            cue_end = original_cue_end
+            media_end_clipped = False
+            if media_duration_ms is not None and cue_end > media_duration_ms:
+                cue_end = media_duration_ms
+                media_end_clipped = True
             clip_start = max(0, cue_start - selected.padding_ms)
             clip_end = cue_end + selected.padding_ms
             if media_duration_ms is not None:
                 clip_end = min(media_duration_ms, clip_end)
-            clip_end = max(clip_start + 1, clip_end)
+            if clip_end <= clip_start:
+                continue
             plans.append(
                 AlignmentWindowPlan(
                     cue_ids=tuple(cue.cue_id for cue in chunk),
@@ -276,6 +330,7 @@ def plan_alignment_windows(
                     clip_start_ms=clip_start,
                     clip_end_ms=clip_end,
                     transcript="\n".join(cue.text.strip() for cue in chunk),
+                    media_end_clipped=media_end_clipped,
                 )
             )
     return tuple(plans)
@@ -311,17 +366,23 @@ def _allowed_operations(grade: TimingQualityGrade) -> frozenset[TimingOperation]
 def _subtitle_fallback(
     plan: AlignmentWindowPlan, cue_by_id: Mapping[str, CueSnapshot], reason: str
 ) -> TimingEvidenceWindow:
-    anchors = tuple(
-        TimingAnchor.create(
-            cue_id=cue_id,
-            text=cue_by_id[cue_id].text,
-            start_ms=cue_by_id[cue_id].start_ms,
-            end_ms=cue_by_id[cue_id].end_ms,
-            quality_grade=TimingQualityGrade.LOW,
-            ordinal=index,
+    anchors: list[TimingAnchor] = []
+    for cue_id in plan.cue_ids:
+        cue = cue_by_id[cue_id]
+        start_ms = max(plan.clip_start_ms, cue.start_ms)
+        end_ms = min(plan.clip_end_ms, cue.end_ms)
+        if end_ms <= start_ms:
+            continue
+        anchors.append(
+            TimingAnchor.create(
+                cue_id=cue_id,
+                text=cue.text,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                quality_grade=TimingQualityGrade.LOW,
+                ordinal=len(anchors),
+            )
         )
-        for index, cue_id in enumerate(plan.cue_ids)
-    )
     return TimingEvidenceWindow.create(
         cue_ids=plan.cue_ids,
         start_ms=plan.clip_start_ms,
@@ -331,8 +392,12 @@ def _subtitle_fallback(
         coverage=1.0,
         quality_grade=TimingQualityGrade.LOW,
         allowed_operations=_allowed_operations(TimingQualityGrade.LOW),
-        anchors=anchors,
-        quality_metrics={"fallback": True, "failure_reason": reason},
+        anchors=tuple(anchors),
+        quality_metrics={
+            "fallback": True,
+            "failure_reason": reason,
+            "media_end_clipped": plan.media_end_clipped,
+        },
     )
 
 
@@ -450,6 +515,7 @@ def _evidence_from_items(
             "out_of_bounds_ratio": out_of_bounds_ratio,
             "span_ratio": span_ratio,
             "matched_anchor_count": len(anchors),
+            "media_end_clipped": plan.media_end_clipped,
         },
     )
 
@@ -488,11 +554,12 @@ def align_timing_windows(
     config: AlignmentConfig | None = None,
     aligner_model: str = DEFAULT_ALIGNER_MODEL,
     aligner_options: Mapping[str, Any] | None = None,
+    preflight_result: AlignmentPreflight | None = None,
 ) -> AlignmentRunResult:
     """Align each independent window, degrading failures locally to cue timing."""
 
     selected = config or AlignmentConfig()
-    preflight = preflight_alignment(
+    preflight = preflight_result or preflight_alignment(
         media_path,
         cues,
         source_language,
@@ -520,7 +587,7 @@ def align_timing_windows(
     options = dict(aligner_options or {})
     windows: list[TimingEvidenceWindow] = []
     failures: list[str] = []
-    issues: list[str] = []
+    issues: list[str] = list(preflight.warnings)
     try:
         audio_source_context = (
             _selected_audio_source(media_path, audio_track_index)
@@ -614,8 +681,26 @@ def load_or_align_timing(
     )
     from .timing_evidence import TimingEvidenceBundle
 
+    preflight = preflight_alignment(
+        media_path,
+        cues,
+        source_language,
+        audio_track_index=audio_track_index,
+        media_probe=media_probe,
+    )
+    if not preflight.eligible:
+        return None, preflight.issues, False
+
     subtitle_fingerprint = canonical_sha256(
-        [{"cue_id": cue.cue_id, "text": cue.text} for cue in cues]
+        [
+            {
+                "cue_id": cue.cue_id,
+                "start_ms": cue.start_ms,
+                "end_ms": cue.end_ms,
+                "text": cue.text,
+            }
+            for cue in cues
+        ]
     )
     media_fingerprint = file_content_sha256(media_path)
     config_fingerprint = alignment_config_fingerprint(
@@ -638,7 +723,7 @@ def load_or_align_timing(
             logger.info(
                 "对齐时间轴缓存命中（sidecar）：windows=%d", len(archived.windows)
             )
-            return archived, (), True
+            return archived, preflight.warnings, True
 
     cached = read_cached_timing_bundle(
         subtitle_fingerprint,
@@ -647,7 +732,7 @@ def load_or_align_timing(
     )
     if cached is not None:
         logger.info("对齐时间轴缓存命中（app cache）：windows=%d", len(cached.windows))
-        return cached, (), True
+        return cached, preflight.warnings, True
 
     logger.info("对齐时间轴缓存未命中，开始重新对齐")
     alignment = align_timing_windows(
@@ -660,6 +745,7 @@ def load_or_align_timing(
         config=config,
         aligner_model=aligner_model,
         aligner_options=aligner_options,
+        preflight_result=preflight,
     )
     if not alignment.windows:
         return None, alignment.issues, False

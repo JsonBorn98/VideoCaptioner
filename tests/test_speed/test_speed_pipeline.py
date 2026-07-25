@@ -174,6 +174,41 @@ def test_high_quality_boundary_does_not_cross_aligned_speech():
     assert optimized.segments[0].end_time <= 1950
 
 
+def test_media_end_clipped_evidence_clamps_the_tail_cue():
+    data = ASRData([ASRDataSeg("tail", 8000, 12_000)])
+    snapshot = CueSnapshot.from_input(
+        index=0,
+        start_ms=8000,
+        end_ms=12_000,
+        text="tail",
+    )
+    evidence = TimingEvidenceWindow.create(
+        cue_ids=(snapshot.cue_id,),
+        start_ms=6500,
+        end_ms=10_000,
+        provenance=TimingProvenance.FORCED_ALIGNER,
+        granularity=TimingGranularity.WORD,
+        coverage=1.0,
+        quality_grade=TimingQualityGrade.HIGH,
+        allowed_operations=frozenset(TimingOperation),
+        anchors=(
+            TimingAnchor.create(
+                cue_id=snapshot.cue_id,
+                text="tail",
+                start_ms=8500,
+                end_ms=9500,
+                quality_grade=TimingQualityGrade.HIGH,
+                ordinal=0,
+            ),
+        ),
+        quality_metrics={"media_end_clipped": True},
+    )
+
+    optimized, _ = optimize_speed(data, mode="apply", timing_windows=(evidence,))
+
+    assert optimized.segments[0].end_time == 10_000
+
+
 def test_reference_side_can_be_audited_without_being_rewritten():
     data = _data()
     optimized, result = optimize_speed(

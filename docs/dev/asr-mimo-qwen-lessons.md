@@ -144,6 +144,14 @@ For Qwen3-ForcedAligner, normalize runtime outputs defensively:
 
 Tests should cover all of these shapes.
 
+Standalone subtitle postprocessing must treat the probed media duration as an
+alignment-window boundary, not as an all-or-nothing subtitle validity check. A
+tail cue that still overlaps the media should be clipped locally and aligned;
+cues starting after EOF should stay on subtitle timing while other windows
+continue. Only a subtitle with no usable media overlap should fail preflight.
+Because cue times affect window planning, timing-cache fingerprints must include
+cue start/end values and the adapter version must change with these semantics.
+
 ## Chunking Lessons
 
 Long media should be chunked automatically. The user should not have to
