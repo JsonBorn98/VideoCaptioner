@@ -88,9 +88,9 @@ uv sync --python 3.12 --extra qwen
 | 单 LLM | 一个模型完成翻译，可选反思 |
 | 增强型双角色 LLM | 主翻译 + 高级校对，含术语表和完整审计 |
 
-增强模式需要先创建 LLM 模型方案。GUI 可为两个角色绑定不同方案；CLI 当前使用同一个
-legacy profile 承担两个角色。GUI 命名方案支持 OpenAI-compatible、Anthropic Messages
-与 Gemini transport；CLI legacy profile 当前按 OpenAI-compatible 配置。完整说明见
+增强模式需要先创建 LLM 模型方案。GUI 可为两个角色绑定不同方案；CLI 可通过
+`[translate.llm.main]` / `[translate.llm.review]` 配置独立角色，未配置时兼容旧 `[llm]`。
+方案支持 OpenAI Chat Completions、标准 Responses、Anthropic Messages 与 Gemini。完整说明见
 [LLM 模型方案](/config/llm)与[翻译模式](/config/translator)。
 
 ## 运行完整工作流
@@ -154,13 +154,14 @@ uv run videocaptioner synthesize video.mp4 -s subtitle.srt \
 ## 日志与产物
 
 - **运行日志**：查看 GUI/CLI 各阶段进度、回退和产物。
-- **LLM 请求日志**：按 stage、role、attempt 记录请求与响应。
+- **LLM 请求日志**：默认按 stage、role、attempt 记录调用元数据；可选择记录 Prompt 与最终文本。
 - **翻译产物**：初版字幕、`.vcglossary.json`、Markdown 审计报告。
 - **后处理产物**：规范 SRT、可选 `.qa.md`、速度阶段 `.speed-changes.json`，以及可选
   `.vctiming.json`。
 - **合成日志**：FFmpeg 命令、Console 输出和编码器能力探测结果。
 
-LLM 请求日志可能包含字幕与 Prompt 全文，分享日志前请检查敏感内容。
+显式开启内容日志或保留升级前旧日志时可能包含字幕与 Prompt，分享前请检查并清理；原始
+响应、高级参数和推理内容不会由新版记录器写入。
 
 ## 下一步
 

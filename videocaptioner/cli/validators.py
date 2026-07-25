@@ -112,6 +112,42 @@ def validate_llm(config: dict) -> bool:
     return True
 
 
+def validate_translation_llm(config: dict, mode: str) -> bool:
+    """Validate the resolved profiles used by an LLM translation workflow."""
+    try:
+        from videocaptioner.cli.config import (
+            build_translation_llm_profile,
+            translation_llm_role_allows_empty_api_key,
+        )
+
+        main_profile = build_translation_llm_profile(config, "main")
+        review_profile = (
+            build_translation_llm_profile(config, "review")
+            if mode == "enhanced_llm"
+            else None
+        )
+    except (TypeError, ValueError) as exc:
+        output.error(f"Invalid translation LLM profile configuration: {exc}")
+        output.hint("Check [translate.llm.main] and [translate.llm.review]")
+        return False
+
+    profiles = [("main", main_profile)]
+    if mode == "enhanced_llm":
+        assert review_profile is not None
+        profiles.append(("review", review_profile))
+    for role, profile in profiles:
+        if profile.api_key or translation_llm_role_allows_empty_api_key(config, role):
+            continue
+        output.error(f"Translation {role} LLM API key is not configured")
+        output.hint(
+            f"Set translate.llm.{role}.api_key in TOML or "
+            f"VIDEOCAPTIONER_TRANSLATE_LLM_{role.upper()}_API_KEY"
+        )
+        output.hint('For a keyless local service, explicitly configure api_key = ""')
+        return False
+    return True
+
+
 def validate_whisper_api(config: dict) -> bool:
     """Validate Whisper API configuration."""
     api_key = get(config, "whisper_api.api_key")
@@ -197,21 +233,20 @@ def validate_transcribe(config: dict) -> bool:
 
 def validate_subtitle(config: dict) -> bool:
     """Validate config for subtitle command."""
-    needs_llm = False
-
     optimize = get(config, "subtitle.optimize", True)
     translate = get(config, "subtitle.translate", False)
     translation_mode = str(get(config, "translate.mode", "enhanced_llm"))
-
-    if optimize:
-        needs_llm = True
-    if translate and translation_mode in {"single_llm", "enhanced_llm"}:
-        needs_llm = True
-    if get(config, "subtitle.compress_fast_subtitles", False):
-        needs_llm = True
-
-    if needs_llm:
-        return validate_llm(config)
+    legacy_llm_needed = (
+        optimize or get(config, "subtitle.compress_fast_subtitles", False)
+    )
+    if legacy_llm_needed and not validate_llm(config):
+        return False
+    if (
+        translate
+        and translation_mode in {"single_llm", "enhanced_llm"}
+        and not validate_translation_llm(config, translation_mode)
+    ):
+        return False
     return True
 
 

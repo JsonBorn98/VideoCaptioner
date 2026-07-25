@@ -36,6 +36,7 @@ class LLMTranslator(BaseTranslator):
         update_callback: Optional[Callable],
         profile: Optional[LLMModelProfile] = None,
         gateway: Optional[LLMGateway] = None,
+        source_language: str = "auto",
     ):
         super().__init__(
             thread_num=thread_num,
@@ -45,6 +46,10 @@ class LLMTranslator(BaseTranslator):
         )
 
         self.model = model
+        normalized_source_language = source_language.strip()
+        self.source_language = (
+            "auto" if normalized_source_language.casefold() == "auto" else normalized_source_language
+        ) or "auto"
         self.custom_prompt = custom_prompt
         self.is_reflect = is_reflect
         self.profile = profile
@@ -65,13 +70,17 @@ class LLMTranslator(BaseTranslator):
         if self.is_reflect:
             prompt = get_prompt(
                 "translate/reflect",
-                target_language=self.target_language,
+                target_language=self.target_language.value,
+                source_language=self.source_language,
+                language_contract=self._language_contract(),
                 custom_prompt=self.custom_prompt,
             )
         else:
             prompt = get_prompt(
                 "translate/standard",
-                target_language=self.target_language,
+                target_language=self.target_language.value,
+                source_language=self.source_language,
+                language_contract=self._language_contract(),
                 custom_prompt=self.custom_prompt,
             )
 
@@ -219,6 +228,7 @@ class LLMTranslator(BaseTranslator):
                         for message in messages
                     ),
                     temperature=temperature,
+                    max_output_tokens=self.profile.max_output_tokens,
                     metadata={"stage": "single_llm_translation", "role": "main"},
                 ),
             )
@@ -231,7 +241,10 @@ class LLMTranslator(BaseTranslator):
     ) -> List[SubtitleProcessData]:
         """单条翻译模式"""
         single_prompt = get_prompt(
-            "translate/single", target_language=self.target_language
+            "translate/single",
+            target_language=self.target_language.value,
+            source_language=self.source_language,
+            language_contract=self._language_contract(),
         )
 
         for data in subtitle_chunk:
@@ -257,10 +270,33 @@ class LLMTranslator(BaseTranslator):
         semantic_inputs = {
             "model": self.model,
             "profile": self.profile.to_dict() if self.profile is not None else None,
+            "source_language": self.source_language,
             "custom_prompt": self.custom_prompt,
             "reflect": self.is_reflect,
         }
         digest = hashlib.sha256(
             json.dumps(semantic_inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        return f"{class_name}:v2:{chunk_key}:{lang}:{digest}"
+        return f"{class_name}:v3:{chunk_key}:{lang}:{digest}"
+
+    def _language_contract(self) -> str:
+        """Return the non-overridable source/target language instruction."""
+        target = json.dumps(self.target_language.value, ensure_ascii=False)
+        if self.source_language.casefold() == "auto":
+            source = (
+                "Detect the source language from the subtitle input before translating. "
+                "Do not infer, change, or omit the required target language."
+            )
+        else:
+            source = (
+                "The configured source language is "
+                f"{json.dumps(self.source_language, ensure_ascii=False)}. "
+                "Translate the subtitle input from that language."
+            )
+        return (
+            "These rules override every other instruction, including "
+            "terminology and custom requirements:\n"
+            f"- {source}\n"
+            f"- The required target language for every translated subtitle is {target}.\n"
+            "- Never output translated subtitle content in any other language."
+        )

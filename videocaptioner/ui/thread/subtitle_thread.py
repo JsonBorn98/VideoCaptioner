@@ -79,6 +79,7 @@ def create_translator_from_config(
             else config.thread_num
         ),
         batch_num=config.batch_size,
+        source_language=config.source_language,
         target_language=config.target_language,
         model=config.llm_model or "",
         custom_prompt=custom_prompt,
@@ -205,7 +206,7 @@ class SubtitleThread(QThread):
                 subtitle_config.review_llm_profile,
                 subtitle_config.review_translation_prompt,
             ),
-            source_language="auto",
+            source_language=subtitle_config.source_language,
             target_language=subtitle_config.target_language.value,
             batch_size=subtitle_config.enhanced_batch_size,
             term_context_radius=subtitle_config.term_context_radius,

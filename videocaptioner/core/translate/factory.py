@@ -29,6 +29,7 @@ class TranslatorFactory:
         update_callback: Optional[Callable] = None,
         profile: Optional[LLMModelProfile] = None,
         gateway: Optional[LLMGateway] = None,
+        source_language: str = "auto",
     ) -> BaseTranslator:
         """创建翻译器实例"""
         try:
@@ -41,6 +42,7 @@ class TranslatorFactory:
                     thread_num=thread_num,
                     batch_num=batch_num,
                     target_language=target_language,
+                    source_language=source_language,
                     model=model,
                     custom_prompt=custom_prompt,
                     is_reflect=is_reflect,

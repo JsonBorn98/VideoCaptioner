@@ -9,6 +9,7 @@ from .check_whisper import check_whisper_connection
 from .client import call_llm, get_llm_client
 from .gateway import LLMGateway
 from .models import (
+    JSONValue,
     LLMCallError,
     LLMMessage,
     LLMModelProfile,
@@ -16,7 +17,9 @@ from .models import (
     LLMResult,
     LLMTransport,
     LLMUsage,
+    OpenAIEndpoint,
     ProviderDialect,
+    thaw_json_object,
 )
 from .profiles import LLMModelProfileStore
 
@@ -27,6 +30,7 @@ __all__ = [
     "check_model_profile_connection",
     "get_available_models",
     "check_whisper_connection",
+    "JSONValue",
     "LLMCallError",
     "LLMGateway",
     "LLMMessage",
@@ -36,5 +40,7 @@ __all__ = [
     "LLMResult",
     "LLMTransport",
     "LLMUsage",
+    "OpenAIEndpoint",
     "ProviderDialect",
+    "thaw_json_object",
 ]

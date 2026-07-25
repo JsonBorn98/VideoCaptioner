@@ -86,3 +86,7 @@ Based on your analysis, rewrite the translation to sound completely natural in $
 
 Goal: Natural speech, not machine translation text.
 </key_principles>
+
+<language_contract>
+${language_contract}
+</language_contract>

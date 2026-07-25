@@ -62,6 +62,28 @@ def _add_hidden_llm_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", metavar="NAME", help=argparse.SUPPRESS)
 
 
+def _add_translation_llm_profile_options(group) -> None:
+    """Add the non-secret CLI overrides for main/review translation profiles."""
+    for role, label in (("main", "main translation"), ("review", "review")):
+        group.add_argument(
+            f"--{role}-llm-endpoint",
+            choices=["chat_completions", "responses"],
+            help=f"OpenAI endpoint for the {label} profile",
+        )
+        group.add_argument(
+            f"--{role}-llm-max-output-tokens",
+            metavar="AUTO|N",
+            help=f"Maximum output tokens for the {label} profile (default: auto)",
+        )
+        group.add_argument(
+            f"--{role}-llm-request-options-json",
+            f"--{role}-llm-options",
+            dest=f"{role}_llm_request_options_json",
+            metavar="JSON",
+            help=f"Provider-native request body options for the {label} profile",
+        )
+
+
 def _add_output_options(parser: argparse.ArgumentParser) -> None:
     """Add output-related options."""
     group = parser.add_argument_group("Output options")
@@ -425,6 +447,14 @@ def _build_subtitle_parser(subparsers) -> None:
         help="Translation workflow (non_llm, single_llm, or enhanced_llm)",
     )
     trans.add_argument(
+        "--source-language",
+        metavar="AUTO|LANG",
+        help=(
+            "Source language for LLM translation, as a code or language name "
+            "(default: auto)"
+        ),
+    )
+    trans.add_argument(
         "--target-language",
         metavar="CODE",
         help="Target language as BCP 47 code, e.g. zh-Hans, en, ja (default: zh-Hans)",
@@ -444,6 +474,7 @@ def _build_subtitle_parser(subparsers) -> None:
         metavar="TEXT",
         help="Custom senior-reviewer prompt (enhanced_llm only)",
     )
+    _add_translation_llm_profile_options(trans)
 
     sub = p.add_argument_group("Subtitle options")
     sub.add_argument(
@@ -751,6 +782,14 @@ def _build_process_parser(subparsers) -> None:
         help="Translation workflow",
     )
     pipe.add_argument(
+        "--source-language",
+        metavar="AUTO|LANG",
+        help=(
+            "Source language for LLM translation, as a code or language name "
+            "(default: auto)"
+        ),
+    )
+    pipe.add_argument(
         "--to", dest="target_language", metavar="CODE", help="Target language BCP 47 code"
     )
     p.add_argument(
@@ -765,6 +804,7 @@ def _build_process_parser(subparsers) -> None:
     pipe.add_argument(
         "--review-prompt", metavar="TEXT", help="Custom reviewer prompt (enhanced_llm only)"
     )
+    _add_translation_llm_profile_options(pipe)
     pipe.add_argument(
         "--quality",
         choices=["ultra", "high", "medium", "low"],
@@ -936,6 +976,11 @@ def _build_config_parser(subparsers) -> None:
         help="Default translation workflow",
     )
     init_p.add_argument(
+        "--source-language",
+        metavar="AUTO|LANG",
+        help="Default source language for LLM translation (default: auto)",
+    )
+    init_p.add_argument(
         "--target-language", "--to", dest="target_language", metavar="CODE", help=argparse.SUPPRESS
     )
     init_p.add_argument(
@@ -1044,6 +1089,19 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
     _set("llm.api_key", getattr(args, "api_key", None))
     _set("llm.api_base", getattr(args, "api_base", None))
     _set("llm.model", getattr(args, "model", None))
+    for role in ("main", "review"):
+        _set(
+            f"translate.llm.{role}.openai_endpoint",
+            getattr(args, f"{role}_llm_endpoint", None),
+        )
+        _set(
+            f"translate.llm.{role}.max_output_tokens",
+            getattr(args, f"{role}_llm_max_output_tokens", None),
+        )
+        _set(
+            f"translate.llm.{role}.request_options_json",
+            getattr(args, f"{role}_llm_request_options_json", None),
+        )
 
     # Whisper API
     _set("whisper_api.api_key", getattr(args, "whisper_api_key", None))
@@ -1141,6 +1199,7 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
         )
     # An explicit mode is authoritative when both compatibility flags are used.
     _set("translate.mode", getattr(args, "translation_mode", None))
+    _set("translate.source_language", getattr(args, "source_language", None))
     _set("translate.target_language", getattr(args, "target_language", None))
     _set("translate.main_prompt", getattr(args, "prompt", None))
     _set("translate.review_prompt", getattr(args, "review_prompt", None))

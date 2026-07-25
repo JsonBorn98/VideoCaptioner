@@ -3,6 +3,7 @@ from collections import defaultdict
 
 import pytest
 
+import videocaptioner.core.translate.enhanced.orchestrator as orchestrator_module
 from videocaptioner.core.llm.models import (
     LLMCallError,
     LLMErrorCategory,
@@ -30,7 +31,13 @@ from videocaptioner.core.translate.enhanced.orchestrator import (
 )
 
 
-def _profile(profile_id: str, *, concurrency: int = 1) -> LLMModelProfile:
+def _profile(
+    profile_id: str,
+    *,
+    concurrency: int = 1,
+    work_context_tokens: int = 16_384,
+    max_output_tokens: int | None = None,
+) -> LLMModelProfile:
     return LLMModelProfile(
         profile_id=profile_id,
         name=profile_id.title(),
@@ -39,8 +46,9 @@ def _profile(profile_id: str, *, concurrency: int = 1) -> LLMModelProfile:
         base_url=f"https://{profile_id}.test/v1",
         api_key="secret",
         model=f"{profile_id}-model",
-        work_context_tokens=16_384,
+        work_context_tokens=work_context_tokens,
         max_concurrency=concurrency,
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -49,16 +57,20 @@ def _config(
     audit_mode: TranslationAuditMode = TranslationAuditMode.AUTO_APPLY_REVIEW,
     batch_size: int = 10,
     term_confirmation: TermConfirmationMode = TermConfirmationMode.AUTOMATIC,
+    main_profile: LLMModelProfile | None = None,
+    review_profile: LLMModelProfile | None = None,
+    source_language: str = "English",
+    target_language: str = "简体中文",
 ) -> EnhancedTranslationConfig:
     return EnhancedTranslationConfig(
         main_role=TranslationRoleSnapshot(
-            "main", _profile("main"), "MAIN USER PROMPT"
+            "main", main_profile or _profile("main"), "MAIN USER PROMPT"
         ),
         review_role=TranslationRoleSnapshot(
-            "review", _profile("review"), "REVIEW USER PROMPT"
+            "review", review_profile or _profile("review"), "REVIEW USER PROMPT"
         ),
-        source_language="English",
-        target_language="简体中文",
+        source_language=source_language,
+        target_language=target_language,
         batch_size=batch_size,
         audit_mode=audit_mode,
         term_confirmation=term_confirmation,
@@ -128,6 +140,119 @@ class ScriptedGateway:
         return [request.metadata["role"] for _, request in self.calls]
 
 
+def test_enhanced_planners_and_requests_use_each_role_output_cap(monkeypatch):
+    main_profile = _profile(
+        "main", work_context_tokens=65_536, max_output_tokens=4_000
+    )
+    review_profile = _profile(
+        "review", work_context_tokens=32_768, max_output_tokens=2_000
+    )
+    analysis_plans = []
+    translation_plans = []
+    real_analysis_planner = orchestrator_module.plan_analysis_windows
+    real_translation_planner = orchestrator_module.plan_translation_batches
+
+    def track_analysis_planner(*args, **kwargs):
+        analysis_plans.append(
+            (kwargs["working_context_tokens"], kwargs["output_reserve_tokens"])
+        )
+        return real_analysis_planner(*args, **kwargs)
+
+    def track_translation_planner(*args, **kwargs):
+        translation_plans.append(
+            (kwargs["working_context_tokens"], kwargs["output_reserve_tokens"])
+        )
+        return real_translation_planner(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_module, "plan_analysis_windows", track_analysis_planner)
+    monkeypatch.setattr(
+        orchestrator_module, "plan_translation_batches", track_translation_planner
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[{"issues": []}],
+    )
+
+    EnhancedTranslationOrchestrator(
+        _config(main_profile=main_profile, review_profile=review_profile), gateway=gateway
+    ).run((SubtitleCue(1, "Source"),))
+
+    assert analysis_plans == [(65_536, 4_000)]
+    assert translation_plans == [(65_536, 4_000), (32_768, 2_000)]
+    assert gateway.stage_calls["analysis_window"][0].max_output_tokens == 4_000
+    assert gateway.stage_calls["translation"][0].max_output_tokens == 4_000
+    assert gateway.stage_calls["audit"][0].max_output_tokens == 2_000
+
+
+def test_context_fallback_auto_recalculates_output_reserve_for_lower_context(monkeypatch):
+    main_profile = _profile("main", work_context_tokens=65_536)
+    observed_plans = []
+    real_analysis_planner = orchestrator_module.plan_analysis_windows
+
+    def track_analysis_planner(*args, **kwargs):
+        observed_plans.append(
+            (kwargs["working_context_tokens"], kwargs["output_reserve_tokens"])
+        )
+        return real_analysis_planner(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_module, "plan_analysis_windows", track_analysis_planner)
+    context_limit = LLMCallError(
+        "context window exceeded",
+        category=LLMErrorCategory.CONTEXT_LIMIT,
+        retryable=False,
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[context_limit, _analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[{"issues": []}],
+    )
+
+    EnhancedTranslationOrchestrator(
+        _config(main_profile=main_profile), gateway=gateway
+    ).run((SubtitleCue(1, "Source"),))
+
+    assert observed_plans == [(65_536, 8_192), (32_768, 4_096)]
+    assert [
+        request.max_output_tokens for request in gateway.stage_calls["analysis_window"]
+    ] == [8_192, 4_096]
+
+
+def test_context_fallback_never_reduces_below_explicit_output_cap(monkeypatch):
+    main_profile = _profile(
+        "main", work_context_tokens=65_536, max_output_tokens=20_000
+    )
+    observed_plans = []
+    real_analysis_planner = orchestrator_module.plan_analysis_windows
+
+    def track_analysis_planner(*args, **kwargs):
+        observed_plans.append(
+            (kwargs["working_context_tokens"], kwargs["output_reserve_tokens"])
+        )
+        return real_analysis_planner(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_module, "plan_analysis_windows", track_analysis_planner)
+    context_limit = LLMCallError(
+        "context window exceeded",
+        category=LLMErrorCategory.CONTEXT_LIMIT,
+        retryable=False,
+    )
+    gateway = ScriptedGateway(analysis_window=[context_limit, context_limit])
+
+    with pytest.raises(EnhancedTranslationError) as raised:
+        EnhancedTranslationOrchestrator(
+            _config(main_profile=main_profile), gateway=gateway
+        ).run((SubtitleCue(1, "Source"),))
+
+    assert raised.value.stage == "analysis_window"
+    assert raised.value.category == LLMErrorCategory.CONTEXT_LIMIT.value
+    assert "max_output_tokens=20000 leaves no safe runtime context fallback" in str(
+        raised.value
+    )
+    assert observed_plans == [(65_536, 20_000), (32_768, 20_000)]
+    assert len(gateway.stage_calls["analysis_window"]) == 2
+
+
 def test_automatic_full_chain_uses_directional_term_review_and_three_pass_roles():
     cues = (
         SubtitleCue(1, "Mercury is the closest planet to the Sun."),
@@ -187,6 +312,100 @@ def test_automatic_full_chain_uses_directional_term_review_and_three_pass_roles(
     audit_request = gateway.stage_calls["audit"][0]
     assert "REVIEW USER PROMPT" in audit_request.messages[0].content
     assert audit_request.metadata == {"stage": "audit", "role": "review"}
+    for _, request in gateway.calls:
+        system_prompt = request.messages[0].content
+        assert 'Source subtitle language: "English"' in system_prompt
+        assert 'Required target language for generated translation content: "简体中文"' in system_prompt
+        assert "cannot change the source language, target language" in system_prompt
+
+
+def test_translation_and_audit_normalize_decimal_string_ids() -> None:
+    cues = (SubtitleCue(1, "Source"),)
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations(("1", "旧译文"))],
+        audit=[
+            {
+                "issues": [
+                    {
+                        "id": "1",
+                        "categories": ["semantic_accuracy"],
+                        "message": "译文语义不准确。",
+                        "suggested_translation": "新译文",
+                    }
+                ]
+            }
+        ],
+    )
+
+    result = EnhancedTranslationOrchestrator(_config(), gateway=gateway).run(cues)
+
+    assert result.translations == {1: "新译文"}
+    assert result.audit_report.issues[0].cue_id == 1
+
+
+def test_auto_source_language_is_an_explicit_detection_constraint() -> None:
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[{"issues": []}],
+    )
+
+    EnhancedTranslationOrchestrator(
+        _config(source_language="auto"), gateway=gateway
+    ).run((SubtitleCue(1, "Source"),))
+
+    for _, request in gateway.calls:
+        assert (
+            "Source subtitle language: automatically detect it from the supplied source subtitles"
+            in request.messages[0].content
+        )
+
+
+@pytest.mark.parametrize(
+    ("invalid_id", "summary"),
+    [
+        (True, "bool"),
+        (1.0, "float(value=1.0)"),
+        ("1.0", "str(length=3, ascii_decimal=False)"),
+        (" 1", "str(length=2, ascii_decimal=False)"),
+        ("+1", "str(length=2, ascii_decimal=False)"),
+        ("0", "str(length=1, ascii_decimal=True)"),
+    ],
+)
+def test_translation_id_rejects_ambiguous_or_non_positive_values(invalid_id, summary) -> None:
+    with pytest.raises(ValueError) as raised:
+        EnhancedTranslationOrchestrator._parse_translations(
+            _translations((invalid_id, "译文")), {1}
+        )
+
+    assert "translations[0].id requires a positive integer ID" in str(raised.value)
+    assert summary in str(raised.value)
+
+
+def test_invalid_id_diagnostics_do_not_echo_model_controlled_text() -> None:
+    secret = "private subtitle text must not appear in the error"
+    with pytest.raises(ValueError) as raised:
+        EnhancedTranslationOrchestrator._parse_audit_issues(
+            {
+                "issues": [
+                    {
+                        "id": secret,
+                        "categories": ["semantic_accuracy"],
+                        "message": "需要修正。",
+                        "suggested_translation": "修正后译文",
+                    }
+                ]
+            },
+            {1},
+            (SubtitleCue(1, secret),),
+            {1: secret},
+        )
+
+    error = str(raised.value)
+    assert "issues[0].id requires a positive integer ID" in error
+    assert "str(length=" in error
+    assert secret not in error
 
 
 def test_final_term_review_three_invalid_responses_falls_back_to_source_text():

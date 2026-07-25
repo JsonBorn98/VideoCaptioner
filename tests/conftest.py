@@ -4,18 +4,52 @@ import ast
 import json
 import os
 import re
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
 
-from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
-from videocaptioner.core.translate import SubtitleProcessData, TargetLanguage
-from videocaptioner.core.utils import cache
-from videocaptioner.core.utils.text_utils import count_words, is_mainly_cjk
+# Set this before importing any project module.  Tests (and Qt subprocesses
+# inheriting this environment) must never write the developer's real AppData.
+_TEST_APPDATA = tempfile.TemporaryDirectory(
+    prefix="videocaptioner-tests-", ignore_cleanup_errors=True
+)
+os.environ["VIDEOCAPTIONER_APPDATA_PATH"] = _TEST_APPDATA.name
+
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg  # noqa: E402
+from videocaptioner.core.translate import SubtitleProcessData, TargetLanguage  # noqa: E402
+from videocaptioner.core.utils import cache  # noqa: E402
+from videocaptioner.core.utils.text_utils import count_words, is_mainly_cjk  # noqa: E402
 
 # Disable cache for testing
 cache.disable_cache()
+
+
+def pytest_unconfigure(config):
+    """Close Windows cache handles before removing the isolated AppData."""
+
+    del config
+    for getter in (
+        cache.get_llm_cache,
+        cache.get_asr_cache,
+        cache.get_translate_cache,
+        cache.get_tts_cache,
+        cache.get_timing_cache,
+    ):
+        getter().close()
+    _TEST_APPDATA.cleanup()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_isolated_appdata():
+    """Guard against tests regressing to the developer's real settings file."""
+
+    from videocaptioner.config import APPDATA_PATH, ROOT_PATH
+
+    assert APPDATA_PATH == Path(_TEST_APPDATA.name).resolve()
+    assert APPDATA_PATH != ROOT_PATH / "AppData"
 
 
 @pytest.fixture

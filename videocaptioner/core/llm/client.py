@@ -18,12 +18,63 @@ from tenacity import (
 from videocaptioner.core.utils.cache import get_llm_cache, memoize
 from videocaptioner.core.utils.logger import setup_logger
 
-from .request_logger import create_logging_http_client, log_llm_response
+from .models import LLMCallError, LLMErrorCategory
+from .request_logger import (
+    create_logging_http_client,
+    discard_pending_legacy_request,
+    log_llm_response,
+)
 
 _global_client: Optional[OpenAI] = None
 _client_lock = threading.Lock()
 
 logger = setup_logger("llm_client")
+
+
+def _sanitized_openai_error(exc: BaseException) -> LLMCallError:
+    """Convert legacy SDK errors without retaining provider bodies or URLs."""
+
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
+        return LLMCallError(
+            "LLM provider authentication or permission check failed",
+            category=LLMErrorCategory.AUTHENTICATION,
+            retryable=False,
+            status_code=status_code,
+        )
+    if isinstance(
+        exc,
+        (
+            openai.RateLimitError,
+            openai.APITimeoutError,
+            openai.APIConnectionError,
+            openai.InternalServerError,
+        ),
+    ):
+        return LLMCallError(
+            (
+                "LLM provider rate limit exceeded"
+                if isinstance(exc, openai.RateLimitError)
+                else "LLM provider request timed out"
+                if isinstance(exc, openai.APITimeoutError)
+                else "Could not connect to LLM provider"
+                if isinstance(exc, openai.APIConnectionError)
+                else f"LLM provider returned HTTP {status_code or 500}"
+            ),
+            category=LLMErrorCategory.TRANSIENT,
+            retryable=True,
+            status_code=status_code,
+        )
+    return LLMCallError(
+        (
+            f"LLM provider returned HTTP {status_code}"
+            if status_code is not None
+            else f"LLM provider call failed ({type(exc).__name__})"
+        ),
+        category=LLMErrorCategory.CONFIGURATION,
+        retryable=False,
+        status_code=status_code,
+    )
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -96,12 +147,16 @@ def _call_llm_api(
     """实际调用 LLM API（带重试）"""
     client = get_llm_client()
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,  # pyright: ignore[reportArgumentType]
-        temperature=temperature,
-        **kwargs,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,  # pyright: ignore[reportArgumentType]
+            temperature=temperature,
+            **kwargs,
+        )
+    except BaseException:
+        discard_pending_legacy_request()
+        raise
 
     # 记录响应内容
     log_llm_response(response)
@@ -117,7 +172,12 @@ def call_llm(
     **kwargs: Any,
 ) -> Any:
     """Call LLM API with automatic caching."""
-    response = _call_llm_api(messages, model, temperature, **kwargs)
+    try:
+        response = _call_llm_api(messages, model, temperature, **kwargs)
+    except LLMCallError:
+        raise
+    except Exception as exc:
+        raise _sanitized_openai_error(exc) from None
 
     if not (
         response

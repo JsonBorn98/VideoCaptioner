@@ -452,8 +452,15 @@ class SubtitleInterface(QWidget):
         signalBus.target_language_changed.connect(self.on_target_language_changed)
         signalBus.subtitle_optimization_changed.connect(self.on_subtitle_optimization_changed)
         signalBus.subtitle_translation_changed.connect(self.on_subtitle_translation_changed)
+        # The toolbar and translation workspace are two views of one task
+        # setting.  Keep the compact toolbar label current when the workspace
+        # selector changes it directly.
+        cfg.target_language.valueChanged.connect(self._on_config_target_language_changed)
         # self.subtitle_setting_button.clicked.connect(self.show_subtitle_settings)
         # self.video_player_button.clicked.connect(self.show_video_player)
+
+    def _on_config_target_language_changed(self, language: TargetLanguage) -> None:
+        self.target_language_button.setText(language.value)
 
     def show_prompt_dialog(self) -> None:
         dialog = PromptDialog(self)
@@ -663,7 +670,16 @@ class SubtitleInterface(QWidget):
                     f"{'→' if value == cue_id else ' '} #{value} {source_by_id[value]}"
                     for value in window
                 )
-        self.glossary_review_page.set_candidates(candidates, context)
+        target_language = (
+            self.task.subtitle_config.target_language
+            if self.task is not None and self.task.subtitle_config is not None
+            else cfg.target_language.value
+        )
+        self.glossary_review_page.set_candidates(
+            candidates,
+            context,
+            target_language=target_language,
+        )
         self.workspace_stack.setCurrentWidget(self.glossary_review_page)
         self.status_label.setText(self.tr("等待人工确认术语"))
 

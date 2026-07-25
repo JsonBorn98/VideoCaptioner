@@ -198,6 +198,16 @@ class SettingInterface(ScrollArea):
             cfg.cache_enabled,
             self.personalGroup,
         )
+        self.llmContentLoggingCard = SwitchSettingCard(
+            FIF.DOCUMENT,
+            self.tr("记录 LLM 内容"),
+            self.tr(
+                "默认只记录调用元数据；开启后额外保存提示词和最终文本，"
+                "仍不保存推理内容、原始响应或高级请求参数"
+            ),
+            cfg.llm_content_logging,
+            self.saveGroup,
+        )
         self.themeCard = OptionsSettingCard(
             cfg.themeMode,
             FIF.BRUSH,
@@ -269,6 +279,7 @@ class SettingInterface(ScrollArea):
 
         self.saveGroup.addSettingCard(self.savePathCard)
         self.saveGroup.addSettingCard(self.cacheEnabledCard)
+        self.saveGroup.addSettingCard(self.llmContentLoggingCard)
 
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)

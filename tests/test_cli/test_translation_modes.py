@@ -49,6 +49,13 @@ def test_explicit_translation_mode_wins_over_legacy_flag() -> None:
     assert overrides["translate"]["mode"] == "single_llm"
 
 
+def test_cli_source_language_override_is_scoped_to_translation() -> None:
+    overrides = _build_cli_overrides(Namespace(source_language="Japanese"))
+
+    assert overrides["translate"]["source_language"] == "Japanese"
+    assert "asr" not in overrides
+
+
 def test_old_non_llm_config_is_classified_without_changing_service(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text('[translate]\nservice = "deeplx"\n', encoding="utf-8")
@@ -90,6 +97,7 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
             "subtitle": {"optimize": False, "split": False, "translate": True},
             "translate": {
                 "mode": "enhanced_llm",
+                "source_language": "English",
                 "main_prompt": "main role",
                 "review_prompt": "review role",
             },
@@ -104,6 +112,7 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
     assert enhanced_config.term_confirmation is TermConfirmationMode.AUTOMATIC
     assert enhanced_config.audit_mode is TranslationAuditMode.AUTO_APPLY_REVIEW
     assert enhanced_config.execution_mode is TranslationExecutionMode.CLI
+    assert enhanced_config.source_language == "English"
     assert enhanced_config.main_role.profile == enhanced_config.review_role.profile
     assert enhanced_config.main_role.profile.transport is LLMTransport.OPENAI_COMPATIBLE
     assert enhanced_config.main_role.profile.dialect is ProviderDialect.GENERIC
@@ -111,6 +120,67 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
     assert enhanced_config.review_role.user_prompt == "review role"
     assert args.glossary_path.endswith(".vcglossary.json")
     assert args.translation_audit_report_path.endswith(".md")
+
+
+def test_enhanced_translation_uses_independent_profiles_and_warns_once_for_store(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "source.srt"
+    destination = tmp_path / "initial.srt"
+    captured = {}
+
+    def fake_run(data, config, **kwargs):
+        captured["config"] = config
+        translated = ASRData.from_json(data.to_json())
+        translated.segments[0].translated_text = "你好"
+        glossary = tmp_path / "glossary.vcglossary.json"
+        audit = tmp_path / "audit.md"
+        glossary.write_text("{}", encoding="utf-8")
+        audit.write_text("# audit", encoding="utf-8")
+        return SimpleNamespace(
+            subtitle_data=translated,
+            artifacts=SimpleNamespace(glossary_path=glossary, audit_report_path=audit),
+            result=SimpleNamespace(audit_report=SimpleNamespace(issues=())),
+        )
+
+    import videocaptioner.core.translate.enhanced as enhanced_package
+
+    monkeypatch.setattr(enhanced_package, "run_enhanced_translation", fake_run)
+    config = build_config(
+        {
+            "llm": {"api_key": "legacy-key", "model": "legacy-model"},
+            "subtitle": {"optimize": False, "split": False, "translate": True},
+            "translate": {
+                "mode": "enhanced_llm",
+                "llm": {
+                    "main": {
+                        "model": "main-model",
+                        "openai_endpoint": "responses",
+                        "max_output_tokens": 2048,
+                        "request_options_json": '{"store":true}',
+                    },
+                    "review": {
+                        "model": "review-model",
+                        "openai_endpoint": "chat_completions",
+                        "max_output_tokens": "auto",
+                        "request_options_json": '{"store":true}',
+                    },
+                },
+            },
+        }
+    )
+
+    result = subtitle_command.run(_args(source, destination), config)
+
+    enhanced_config = captured["config"]
+    assert result == EXIT.SUCCESS
+    assert enhanced_config.main_role.profile.model == "main-model"
+    assert enhanced_config.main_role.profile.openai_endpoint.value == "responses"
+    assert enhanced_config.main_role.profile.max_output_tokens == 2048
+    assert enhanced_config.review_role.profile.model == "review-model"
+    assert enhanced_config.review_role.profile.openai_endpoint.value == "chat_completions"
+    assert enhanced_config.review_role.profile.max_output_tokens is None
+    assert capsys.readouterr().err.count("store=true") == 1
 
 
 def test_non_llm_deeplx_is_mapped_explicitly(tmp_path: Path, monkeypatch) -> None:
@@ -135,7 +205,11 @@ def test_non_llm_deeplx_is_mapped_explicitly(tmp_path: Path, monkeypatch) -> Non
     config = build_config(
         {
             "subtitle": {"optimize": False, "split": False, "translate": True},
-            "translate": {"mode": "non_llm", "service": "deeplx"},
+            "translate": {
+                "mode": "non_llm",
+                "service": "deeplx",
+                "source_language": "Japanese",
+            },
         }
     )
 
@@ -146,6 +220,7 @@ def test_non_llm_deeplx_is_mapped_explicitly(tmp_path: Path, monkeypatch) -> Non
     assert result == EXIT.SUCCESS
     assert captured["translator_type"] is TranslatorType.DEEPLX
     assert captured["profile"] is None
+    assert captured["source_language"] == "auto"
 
 
 def test_single_llm_keeps_reflection_and_uses_profile(tmp_path: Path, monkeypatch) -> None:
@@ -171,7 +246,15 @@ def test_single_llm_keeps_reflection_and_uses_profile(tmp_path: Path, monkeypatc
         {
             "llm": {"api_key": "test-key", "model": "test-model"},
             "subtitle": {"optimize": False, "split": False, "translate": True},
-            "translate": {"mode": "single_llm", "reflect": True},
+            "translate": {
+                "mode": "single_llm",
+                "source_language": "Japanese",
+                "reflect": True,
+                "llm": {
+                    "main": {"model": "main-model"},
+                    "review": {"model": "unused-review-model"},
+                },
+            },
         }
     )
 
@@ -182,7 +265,9 @@ def test_single_llm_keeps_reflection_and_uses_profile(tmp_path: Path, monkeypatc
     assert result == EXIT.SUCCESS
     assert captured["translator_type"] is TranslatorType.OPENAI
     assert captured["is_reflect"] is True
+    assert captured["source_language"] == "Japanese"
     assert captured["profile"].dialect is ProviderDialect.GENERIC
+    assert captured["profile"].model == "main-model"
 
 
 def test_process_does_not_postprocess_after_translation_failure(

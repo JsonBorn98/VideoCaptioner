@@ -20,6 +20,9 @@ SiliconCloud、Ollama、LM Studio 等预设，或填写 OpenAI-compatible 地址
 - API Key
 - 模型名称
 - 工作上下文预算
+- OpenAI endpoint（Chat Completions 或 Responses）
+- 最大输出 token（自动或固定值）
+- Provider-native 高级请求参数 JSON
 - 最大并发
 
 GUI 可以为主翻译和高级校对分别绑定方案，也可以让两个角色复用同一方案。
@@ -28,7 +31,7 @@ GUI 可以为主翻译和高级校对分别绑定方案，也可以让两个角�
 
 | Transport | 说明 |
 |---|---|
-| OpenAI-compatible | OpenAI Chat Completions 及兼容服务 |
+| OpenAI-compatible | OpenAI Chat Completions、标准 Responses 及兼容服务 |
 | Anthropic Messages | Anthropic 原生 Messages API |
 | Gemini | Google Gemini 原生 API |
 
@@ -40,12 +43,25 @@ VideoCaptioner 会通过对应 adapter 统一请求和 usage 记录，但不会�
 1. 打开 **设置 → 翻译设置**。
 2. 在模型方案区域创建方案。
 3. 选择 Transport，填写 Base URL、API Key 和模型名称。
-4. 设置工作上下文预算与最大并发。
-5. 点击连接检查。
-6. 在翻译模式页把方案绑定给主翻译、单 LLM 或高级校对角色。
+4. OpenAI-compatible 方案选择 Chat Completions 或 Responses；原生 Transport 不显示该项。
+5. 设置工作上下文、最大输出 token 与最大并发。`自动` 会沿用工作流的既有预算策略。
+6. 需要思考控制时展开“高级请求参数”，手写 JSON 或应用一次性模板。
+7. 点击能力测试；程序会分别发送文本与结构化输出请求，可能产生费用。
+8. 在翻译模式页把方案绑定给主翻译、单 LLM 或高级校对角色。
 
-连接检查只验证当前凭据、端点和模型是否能完成最小请求。实际长字幕仍可能受配额、
+能力测试只验证当前凭据、端点、参数和模型能否完成两个最小请求。实际长字幕仍可能受配额、
 并发限制、上下文长度或服务端策略影响。
+
+## 高级请求参数
+
+高级 JSON 是最终请求体的附加补丁，不是完整请求体。未知且非保护字段会原样发送，因而可
+配置不同服务的 `reasoning`、`reasoning_effort`、`thinking`、`output_config`、
+`generationConfig.thinkingConfig`、`extra_body` 等参数。对象按顶层浅合并；嵌套对象整体
+替换。`$omit: ["temperature"]` 可删除应用默认温度，`$omit` 不会发送给服务端。
+
+应用始终保护模型、消息/input、工具、结构化输出和输出 token 字段。尝试覆盖这些字段会在
+保存时直接报错。模板只提供静态起点，不保证具体 provider/model 接受；请以能力测试和服务商
+文档为准。若显式配置 `store: true`，GUI 每次保存都会确认服务端可能保留字幕内容。
 
 ## 常见端点示例
 
@@ -61,9 +77,9 @@ VideoCaptioner 会通过对应 adapter 统一请求和 usage 记录，但不会�
 
 项目不保证任何第三方服务的价格、地区可用性、并发额度或模型列表。
 
-## CLI 兼容配置
+## CLI 配置
 
-CLI 当前使用 legacy `[llm]` 配置：
+旧 `[llm]` 继续用于字幕断句、优化，并作为翻译角色的兼容默认值：
 
 ```bash
 uv run videocaptioner config set llm.api_key <your-key>
@@ -80,14 +96,35 @@ uv run videocaptioner subtitle input.srt \
   --model <model-name>
 ```
 
-配置优先级为：
+翻译可按字段覆盖主译与校对角色；review 缺失字段继承 main，main 缺失字段继承 `[llm]`：
 
-```text
-命令行参数 > 环境变量 > 配置文件 > 默认值
+```toml
+[translate.llm.main]
+openai_endpoint = "responses"
+max_output_tokens = 8192
+request_options_json = '{"reasoning":{"effort":"high"},"$omit":["temperature"]}'
+
+[translate.llm.review]
+model = "review-model"
+max_output_tokens = "auto"
+request_options_json = '{}'
 ```
 
-增强型 CLI 翻译会把同一个 legacy profile 同时用于主翻译和高级校对。需要为两个角色
-选择不同模型时，请在 GUI 中使用命名模型方案。
+连接字段也可写入角色表，或使用
+`VIDEOCAPTIONER_TRANSLATE_LLM_MAIN_*` / `VIDEOCAPTIONER_TRANSLATE_LLM_REVIEW_*`
+环境变量。API Key 建议使用配置文件或环境变量，避免进入 shell history。命令行仅提供
+`--main-llm-endpoint`、`--main-llm-max-output-tokens`、
+`--main-llm-request-options-json` 及对应 review 参数。
+
+完整优先级从低到高为：
+
+```text
+默认值 → [llm] 配置/全局环境变量/全局 CLI
+→ main 配置/角色环境变量/角色 CLI
+→ review 配置/角色环境变量/角色 CLI
+```
+
+没有新角色配置时，single/enhanced 行为与旧版本一致；增强模式复用同一个 legacy profile。
 
 ## 并发与上下文预算
 
@@ -101,8 +138,10 @@ uv run videocaptioner subtitle input.srt \
 
 - API Key 保存在用户本地配置中，不会上传到项目服务器。
 - 不要把设置文件、终端历史或测试凭据提交到 Git。
-- `llm_requests.jsonl` 会记录完整请求和响应，可能包含字幕与 Prompt 全文。
-- 分享诊断日志前请先检查并清理敏感内容。
+- `llm_requests.jsonl` 默认只记录模型、阶段、状态、耗时和 token usage 等元数据。
+- 只有显式开启“记录 LLM 内容”后才额外保存提示词与规范化最终文本；原始响应、高级 JSON、
+  推理内容和完整 provider 错误正文始终不记录。
+- 升级前生成的旧日志可能仍含完整内容，可在“请求日志”页确认后清理当前及轮转文件。
 
 ## 排障
 

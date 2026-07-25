@@ -19,3 +19,7 @@ ${custom_prompt}
   ...
 }
 </output_format>
+
+<language_contract>
+${language_contract}
+</language_contract>

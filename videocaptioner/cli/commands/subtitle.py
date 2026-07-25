@@ -121,17 +121,40 @@ def run(args: Namespace, config: dict) -> int:
         return EXIT.USAGE_ERROR
     llm_translation = need_translate and translation_mode != "non_llm"
 
-    # Validate AFTER resolving the actual need_translate / need_optimize state
-    needs_llm = (
-        need_optimize
-        or need_split
-        or llm_translation
-    )
-    if needs_llm:
+    # Validate AFTER resolving the actual need_translate / need_optimize state.
+    # Legacy optimize/split calls intentionally keep using [llm], while LLM
+    # translation resolves its independent main/review profiles.
+    needs_llm = need_optimize or need_split or llm_translation
+    main_translation_profile = None
+    review_translation_profile = None
+    if need_optimize or need_split:
         from videocaptioner.cli.validators import validate_llm
 
         if not validate_llm(config):
             return EXIT.USAGE_ERROR
+    if llm_translation:
+        from videocaptioner.cli.config import (
+            build_translation_llm_profile,
+            build_translation_llm_profiles,
+        )
+        from videocaptioner.cli.validators import validate_translation_llm
+
+        if not validate_translation_llm(config, translation_mode):
+            return EXIT.USAGE_ERROR
+        if translation_mode == "enhanced_llm":
+            main_translation_profile, review_translation_profile = (
+                build_translation_llm_profiles(config)
+            )
+        else:
+            main_translation_profile = build_translation_llm_profile(config, "main")
+        relevant_profiles = [main_translation_profile]
+        if translation_mode == "enhanced_llm":
+            assert review_translation_profile is not None
+            relevant_profiles.append(review_translation_profile)
+        if any(profile.request_options.get("store") is True for profile in relevant_profiles):
+            output.warn(
+                "LLM translation has store=true; the provider may retain subtitle content"
+            )
     target_lang_code = get(config, "translate.target_language", "zh-Hans")
     need_reflect = get(config, "translate.reflect", False)
     if need_reflect and translation_mode != "single_llm":
@@ -325,8 +348,16 @@ def run(args: Namespace, config: dict) -> int:
                     progress.finish()  # Clean spinner without duplicate error
                 return EXIT.USAGE_ERROR
 
+            configured_source_language = str(
+                get(config, "translate.source_language", "auto") or "auto"
+            ).strip() or "auto"
+            source_language = (
+                configured_source_language
+                if translation_mode in {"single_llm", "enhanced_llm"}
+                else "auto"
+            )
+
             if translation_mode == "enhanced_llm":
-                from videocaptioner.cli.config import build_legacy_llm_profile
                 from videocaptioner.core.translate.enhanced import run_enhanced_translation
                 from videocaptioner.core.translate.enhanced.defaults import (
                     DEFAULT_MAIN_TRANSLATION_PROMPT,
@@ -345,18 +376,21 @@ def run(args: Namespace, config: dict) -> int:
                     if progress:
                         progress.finish()
                     return EXIT.FILE_NOT_FOUND
-                profile = build_legacy_llm_profile(config)
+                assert main_translation_profile is not None
+                assert review_translation_profile is not None
                 enhanced_config = EnhancedTranslationConfig(
                     main_role=TranslationRoleSnapshot(
-                        "main", profile, custom_prompt or DEFAULT_MAIN_TRANSLATION_PROMPT
+                        "main",
+                        main_translation_profile,
+                        custom_prompt or DEFAULT_MAIN_TRANSLATION_PROMPT,
                     ),
                     review_role=TranslationRoleSnapshot(
                         "review",
-                        profile,
+                        review_translation_profile,
                         str(get(config, "translate.review_prompt", ""))
                         or DEFAULT_REVIEW_TRANSLATION_PROMPT,
                     ),
-                    source_language="auto",
+                    source_language=source_language,
                     target_language=target_language.value,
                     batch_size=int(get(config, "translate.enhanced_batch_size", 10)),
                     term_context_radius=int(get(config, "translate.term_context_radius", 10)),
@@ -402,10 +436,9 @@ def run(args: Namespace, config: dict) -> int:
                     "deeplx": TranslatorType.DEEPLX,
                 }
                 if translation_mode == "single_llm":
-                    from videocaptioner.cli.config import build_legacy_llm_profile
-
                     translator_type = TranslatorType.OPENAI
-                    profile = build_legacy_llm_profile(config)
+                    assert main_translation_profile is not None
+                    profile = main_translation_profile
                 else:
                     translator_type = type_map.get(translator_service)
                     profile = None
@@ -420,6 +453,7 @@ def run(args: Namespace, config: dict) -> int:
                     translator_type=translator_type,
                     thread_num=thread_num,
                     batch_num=batch_size,
+                    source_language=source_language,
                     target_language=target_language,
                     model=llm_model,
                     custom_prompt=custom_prompt,

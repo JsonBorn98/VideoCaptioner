@@ -105,6 +105,7 @@ videocaptioner subtitle <字幕文件> [选项]
 |------|------|
 | `--translator` | 非 LLM 服务：`bing`、`google`、`deeplx`；旧值 `llm` 会选择增强模式 |
 | `--translation-mode` | `non_llm`、`single_llm` 或 `enhanced_llm` |
+| `--source-language AUTO\|LANG` | LLM 翻译原语言；默认 `auto`，也可传语言代码或名称 |
 | `--target-language CODE` | 目标语言 BCP 47 代码：`zh-Hans` `en` `ja` `ko` `fr` `de` 等 |
 | `--no-optimize` | 跳过优化 |
 | `--no-translate` | 跳过翻译 |
@@ -119,10 +120,14 @@ videocaptioner subtitle <字幕文件> [选项]
 | `--api-key` | LLM API 密钥（或设置 `OPENAI_API_KEY` 环境变量） |
 | `--api-base` | LLM API 地址（或设置 `OPENAI_BASE_URL` 环境变量） |
 | `--model` | LLM 模型名（如 gpt-4o-mini） |
+| `--main-llm-endpoint` / `--review-llm-endpoint` | 角色使用 `chat_completions` 或 `responses` |
+| `--main-llm-max-output-tokens` / review 对应项 | 角色输出上限：`auto` 或正整数 |
+| `--main-llm-request-options-json` / review 对应项 | Provider-native 附加请求 JSON |
 | `-o PATH` | 规范 SRT 输出文件或目录；其他扩展名会替换为 `.srt` |
 
 增强模式会保存项目术语表、Markdown 审计报告和分阶段 token usage。CLI 使用非交互
-术语确认与客观问题自动修复策略；两个角色当前共用一个 legacy 模型 profile。
+术语确认与客观问题自动修复策略；角色可由 `[translate.llm.main]` 和
+`[translate.llm.review]` 独立配置，缺失时逐层继承旧 `[llm]`。
 完整说明见[翻译模式与双角色校对](/config/translator)。
 
 ### `postprocess` — 独立字幕后处理
@@ -307,6 +312,7 @@ videocaptioner process <音视频文件> [选项]
 |------|------|
 | `--no-synthesize` | 跳过视频合成（只输出字幕） |
 | `--no-postprocess` | 跳过字幕后处理，直接使用初版字幕 |
+| `--source-language AUTO\|LANG` | LLM 翻译原语言；默认自动检测 |
 | `--to CODE` | 目标语言 BCP 47 代码；`--target-language CODE` 是兼容别名 |
 | `--dub` | 在转录/处理字幕后生成配音音轨或配音视频 |
 | `--dub-only` | 只输出配音结果，跳过字幕烧录/嵌入 |
@@ -395,6 +401,8 @@ FFmpeg/FFprobe、yt-dlp、配置文件、ASR、LLM、翻译和配音关键配置
 | `OPENAI_API_KEY` | LLM API 密钥 |
 | `OPENAI_BASE_URL` | LLM API 地址 |
 | `OPENAI_MODEL` | LLM 模型名 |
+| `VIDEOCAPTIONER_TRANSLATE_LLM_MAIN_*` | 主翻译角色连接、endpoint、token 与 JSON 参数 |
+| `VIDEOCAPTIONER_TRANSLATE_LLM_REVIEW_*` | 高级校对角色连接、endpoint、token 与 JSON 参数 |
 | `VIDEOCAPTIONER_DUB_PRESET` | 配音预设 |
 | `VIDEOCAPTIONER_TTS_API_KEY` | 配音 TTS API 密钥 |
 | `VIDEOCAPTIONER_TTS_API_BASE` | 配音 TTS API 地址 |
@@ -445,6 +453,20 @@ api_key = "sk-xxx"
 api_base = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 
+[translate]
+service = "bing"
+source_language = "auto"
+
+[translate.llm.main]
+openai_endpoint = "responses"
+max_output_tokens = 8192
+request_options_json = '{"reasoning":{"effort":"high"},"$omit":["temperature"]}'
+
+[translate.llm.review]
+model = "review-model"
+max_output_tokens = "auto"
+request_options_json = '{}'
+
 [transcribe]
 asr = "bijian"
 
@@ -452,9 +474,6 @@ asr = "bijian"
 optimize = true
 # split 仅供完整 ASR 流程对真实词级时间戳启用语义分组；直接字幕任务忽略该项
 split = false
-
-[translate]
-service = "bing"
 
 [dubbing]
 preset = "edge-cn-female"

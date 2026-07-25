@@ -16,10 +16,14 @@ from videocaptioner.core.llm.models import (
 )
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.translate.enhanced.defaults import (
+    DEFAULT_MAIN_TRANSLATION_PROMPT,
     DEFAULT_REVIEW_TRANSLATION_PROMPT,
 )
 
-MIGRATION_VERSION = 1
+# Migration v1 moved the legacy global settings into the profile-driven
+# configuration.  v2 is intentionally narrow: it repairs v1 configurations
+# whose empty legacy prompt was persisted over the enhanced default.
+MIGRATION_VERSION = 2
 
 _LEGACY_LLM_SERVICE = "LLM 大模型翻译"
 _LEGACY_PROVIDER_FIELDS = {
@@ -82,14 +86,38 @@ def migrate_legacy_translation_settings(
     if not isinstance(translate, dict) or not isinstance(subtitle, dict) or not isinstance(llm, dict):
         return False
     try:
-        if int(translate.get("TranslationMigrationVersion", 0)) >= MIGRATION_VERSION:
-            return False
+        migration_version = int(translate.get("TranslationMigrationVersion", 0))
     except (TypeError, ValueError):
-        pass
+        migration_version = 0
+    if migration_version >= MIGRATION_VERSION:
+        return False
+
+    if migration_version >= 1:
+        # Do not repeat the v1 mode/profile migration for settings which have
+        # already completed it.  Those settings may have been deliberately
+        # edited since migration, so v2 changes only an absent or blank main
+        # prompt before advancing the version marker.
+        main_prompt = translate.get("MainTranslationPrompt")
+        if not isinstance(main_prompt, str) or not main_prompt.strip():
+            translate["MainTranslationPrompt"] = DEFAULT_MAIN_TRANSLATION_PROMPT
+        translate["TranslationMigrationVersion"] = MIGRATION_VERSION
+        _atomic_write(path, document)
+        return True
 
     legacy_service = str(translate.get("TranslatorServiceEnum", ""))
     old_prompt = str(subtitle.get("CustomPromptText", ""))
-    translate["MainTranslationPrompt"] = old_prompt
+    # An empty legacy field meant "use the built-in prompt".  Do not persist
+    # that empty value into the new setting: it would otherwise replace the
+    # enhanced workflow's useful default after the one-time migration.
+    if old_prompt.strip():
+        translate["MainTranslationPrompt"] = old_prompt
+    else:
+        existing_main_prompt = translate.get("MainTranslationPrompt")
+        translate["MainTranslationPrompt"] = (
+            existing_main_prompt
+            if isinstance(existing_main_prompt, str) and existing_main_prompt.strip()
+            else DEFAULT_MAIN_TRANSLATION_PROMPT
+        )
     translate.setdefault("ReviewTranslationPrompt", DEFAULT_REVIEW_TRANSLATION_PROMPT)
     translate["EnhancedBatchSize"] = int(translate.get("BatchSize", 10) or 10)
     subtitle["CustomPromptText"] = ""

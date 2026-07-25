@@ -8,7 +8,7 @@ import pytest
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli.commands.process import _resolve_final_output_path
 from videocaptioner.cli.config import build_config
-from videocaptioner.cli.main import _build_cli_overrides, main
+from videocaptioner.cli.main import _build_cli_overrides, build_parser, main
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import TranscribeModelEnum
 
@@ -336,6 +336,43 @@ class TestSubtitleParser:
         out = capsys.readouterr().out
         assert "--speed-optimize" not in out
         assert "--normalize-quotes" not in out
+
+    def test_translation_role_options_build_partial_overrides(self):
+        args = build_parser().parse_args(
+            [
+                "subtitle",
+                "input.srt",
+                "--main-llm-endpoint",
+                "responses",
+                "--main-llm-max-output-tokens",
+                "2048",
+                "--main-llm-request-options-json",
+                '{"reasoning":{"effort":"high"}}',
+                "--review-llm-max-output-tokens",
+                "auto",
+                "--review-llm-options",
+                "{}",
+            ]
+        )
+
+        overrides = _build_cli_overrides(args)
+
+        assert overrides["translate"]["llm"]["main"] == {
+            "openai_endpoint": "responses",
+            "max_output_tokens": "2048",
+            "request_options_json": '{"reasoning":{"effort":"high"}}',
+        }
+        assert overrides["translate"]["llm"]["review"] == {
+            "max_output_tokens": "auto",
+            "request_options_json": "{}",
+        }
+
+    def test_translation_role_flags_reject_unknown_endpoint(self):
+        with pytest.raises(SystemExit) as exc:
+            build_parser().parse_args(
+                ["subtitle", "input.srt", "--main-llm-endpoint", "auto"]
+            )
+        assert exc.value.code == 2
 
 
 class TestPostprocessParser:

@@ -11,11 +11,24 @@ from typing import Any, Mapping
 
 from videocaptioner.config import APPDATA_PATH
 
-from .models import LLMModelProfile
+from .models import LLMModelProfile, OpenAIEndpoint
+from .request_options import validate_profile_request_options
 
 PROFILE_SCHEMA = "videocaptioner.llm-model-profile-collection"
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
 DEFAULT_LLM_PROFILES_PATH = APPDATA_PATH / "llm_model_profiles.json"
+
+_PROFILE_V1_FIELDS = {
+    "id",
+    "name",
+    "transport",
+    "dialect",
+    "base_url",
+    "api_key",
+    "model",
+    "work_context_tokens",
+    "max_concurrency",
+}
 
 
 class LLMProfileError(ValueError):
@@ -28,6 +41,20 @@ class LLMProfileNotFoundError(KeyError):
 
 class LLMProfileConflictError(LLMProfileError):
     pass
+
+
+def _profile_from_v1(value: Mapping[str, Any]) -> LLMModelProfile:
+    if set(value) != _PROFILE_V1_FIELDS:
+        raise ValueError("model profile fields do not match v1 schema")
+    migrated = dict(value)
+    migrated.update(
+        {
+            "openai_endpoint": OpenAIEndpoint.CHAT_COMPLETIONS.value,
+            "request_options": {},
+            "max_output_tokens": None,
+        }
+    )
+    return LLMModelProfile.from_dict(migrated)
 
 
 def _atomic_write(path: Path, document: Mapping[str, Any]) -> None:
@@ -60,9 +87,12 @@ class LLMModelProfileStore:
             raise LLMProfileError(f"Cannot read model profiles: {self.path}") from exc
         if not isinstance(value, Mapping) or set(value) != {"schema", "version", "profiles"}:
             raise LLMProfileError("model profile collection fields do not match schema")
-        if value["schema"] != PROFILE_SCHEMA or value["version"] != PROFILE_SCHEMA_VERSION:
+        if type(value["schema"]) is not str or value["schema"] != PROFILE_SCHEMA:
             raise LLMProfileError("unsupported model profile collection")
-        if not isinstance(value["profiles"], list):
+        version = value["version"]
+        if type(version) is not int or version not in {1, PROFILE_SCHEMA_VERSION}:
+            raise LLMProfileError("unsupported model profile collection")
+        if type(value["profiles"]) is not list:
             raise LLMProfileError("profiles must be an array")
         profiles: dict[str, LLMModelProfile] = {}
         names: set[str] = set()
@@ -70,7 +100,11 @@ class LLMModelProfileStore:
             for item in value["profiles"]:
                 if not isinstance(item, Mapping):
                     raise ValueError("profile must be an object")
-                profile = LLMModelProfile.from_dict(item)
+                profile = (
+                    _profile_from_v1(item)
+                    if version == 1
+                    else LLMModelProfile.from_dict(item)
+                )
                 if profile.profile_id in profiles or profile.name.casefold() in names:
                     raise LLMProfileConflictError("duplicate model profile id or name")
                 profiles[profile.profile_id] = profile
@@ -113,6 +147,10 @@ class LLMModelProfileStore:
 
     def save(self, profile: LLMModelProfile) -> LLMModelProfile:
         candidate = LLMModelProfile.from_dict(profile.to_dict())
+        try:
+            validate_profile_request_options(candidate)
+        except ValueError as exc:
+            raise LLMProfileError(f"Invalid model profile request options: {exc}") from exc
         for existing in self._profiles.values():
             if (
                 existing.profile_id != candidate.profile_id

@@ -40,7 +40,7 @@ from videocaptioner.core.translate.enhanced.models import (
     TermConfirmationMode,
     TranslationAuditMode,
 )
-from videocaptioner.core.translate.types import TranslationMode
+from videocaptioner.core.translate.types import TargetLanguage, TranslationMode
 from videocaptioner.ui.common.config import cfg
 
 
@@ -238,6 +238,9 @@ class TranslationModeSelector(QWidget):
             card_row.addWidget(card, 1)
         root.addLayout(card_row)
 
+        self.language_panel = self._build_language_panel()
+        root.addWidget(self.language_panel)
+
         self.options_stack = QStackedWidget(self)
         self.non_llm_panel = self._build_non_llm_panel()
         self.single_llm_panel = self._build_single_llm_panel()
@@ -267,6 +270,41 @@ class TranslationModeSelector(QWidget):
         panel, grid = self._panel()
         self.non_llm_service_label = BodyLabel(panel)
         grid.addWidget(self.non_llm_service_label, 0, 0, 1, 4)
+        return panel
+
+    def _build_language_panel(self) -> QWidget:
+        """Build the task-wide source/target language controls.
+
+        The target list intentionally has no automatic option: every
+        translation request carries an explicit output language.  Source
+        language can be delegated to the model, or pinned by the user when
+        the subtitle contains ambiguous or mixed-language content.
+        """
+
+        panel, grid = self._panel()
+        grid.addWidget(BodyLabel(self.tr("原语言"), panel), 0, 0)
+        self.source_language_combo = ComboBox(panel)
+        self._prepare_combo(self.source_language_combo)
+        self.source_language_combo.addItem(self.tr("自动检测"), userData="auto")
+        for language in TargetLanguage:
+            self.source_language_combo.addItem(language.value, userData=language.value)
+        self._select_data(self.source_language_combo, str(cfg.source_language.value))
+        self.source_language_combo.currentIndexChanged.connect(self._on_source_language_changed)
+        grid.addWidget(self.source_language_combo, 0, 1)
+
+        self.source_language_hint = CaptionLabel(panel)
+        self.source_language_hint.setWordWrap(True)
+        self.source_language_hint.setStyleSheet("color: #d89614;")
+        grid.addWidget(self.source_language_hint, 1, 0, 1, 4)
+
+        grid.addWidget(BodyLabel(self.tr("目标语言"), panel), 0, 2)
+        self.target_language_combo = ComboBox(panel)
+        self._prepare_combo(self.target_language_combo)
+        for language in TargetLanguage:
+            self.target_language_combo.addItem(language.value, userData=language)
+        self._select_data(self.target_language_combo, cfg.target_language.value)
+        self.target_language_combo.currentIndexChanged.connect(self._on_target_language_changed)
+        grid.addWidget(self.target_language_combo, 0, 3)
         return panel
 
     def _build_single_llm_panel(self) -> QWidget:
@@ -408,6 +446,8 @@ class TranslationModeSelector(QWidget):
         cfg.translator_service.valueChanged.connect(self._on_external_non_llm_service_changed)
         cfg.main_llm_profile_id.valueChanged.connect(self._on_external_main_profile_changed)
         cfg.review_llm_profile_id.valueChanged.connect(self._on_external_review_profile_changed)
+        cfg.source_language.valueChanged.connect(self._on_external_source_language_changed)
+        cfg.target_language.valueChanged.connect(self._on_external_target_language_changed)
 
     def refresh_profiles(self) -> None:
         self._profiles_error = ""
@@ -457,8 +497,36 @@ class TranslationModeSelector(QWidget):
         for card_mode, card in self.cards.items():
             card.setChecked(card_mode is selected)
         self.options_stack.setCurrentIndex(index)
+        self._refresh_source_language_availability(selected)
         self._refresh_status()
         self.mode_changed.emit(selected)
+
+    def _refresh_source_language_availability(self, mode: TranslationMode) -> None:
+        """Expose manual source-language selection only where it is honored.
+
+        Traditional translators currently issue their own automatic source-language
+        detection requests.  Keeping a writable global selection in that mode
+        would imply that it is sent to Google, Bing, or DeepLX when it is not.
+        The stored value is deliberately preserved so switching back to an LLM
+        mode restores the user's selection.
+        """
+        manual_source_supported = mode is not TranslationMode.NON_LLM
+        displayed_value = str(cfg.source_language.value) if manual_source_supported else "auto"
+        signals_were_blocked = self.source_language_combo.blockSignals(True)
+        try:
+            self._select_data(self.source_language_combo, displayed_value)
+        finally:
+            self.source_language_combo.blockSignals(signals_were_blocked)
+        self.source_language_combo.setEnabled(manual_source_supported)
+        if manual_source_supported:
+            self.source_language_combo.setToolTip("")
+            self.source_language_hint.hide()
+            return
+
+        message = self.tr("非 LLM 翻译服务固定自动检测原语言；手动原语言仅用于 LLM 翻译。")
+        self.source_language_combo.setToolTip(message)
+        self.source_language_hint.setText(message)
+        self.source_language_hint.show()
 
     def _refresh_status(self) -> None:
         for mode, card in self.cards.items():
@@ -508,6 +576,12 @@ class TranslationModeSelector(QWidget):
         self._set_profile_combo_value(self.review_profile_combo, profile_id)
         self._refresh_status()
 
+    def _on_external_source_language_changed(self, value: object) -> None:
+        self._select_data(self.source_language_combo, str(value))
+
+    def _on_external_target_language_changed(self, value: object) -> None:
+        self._select_data(self.target_language_combo, value)
+
     def _on_main_profile_changed(self) -> None:
         if self._syncing:
             return
@@ -526,16 +600,24 @@ class TranslationModeSelector(QWidget):
             return
         cfg.set(cfg.review_llm_profile_id, str(self.review_profile_combo.currentData() or ""))
 
+    def _on_source_language_changed(self) -> None:
+        cfg.set(cfg.source_language, str(self.source_language_combo.currentData() or "auto"))
+
+    def _on_target_language_changed(self) -> None:
+        language = self.target_language_combo.currentData()
+        if isinstance(language, TargetLanguage):
+            cfg.set(cfg.target_language, language)
+
     def edit_main_prompt(self) -> None:
         dialog = _PromptEditor(
-            self.tr("主翻译 Prompt"), str(cfg.main_translation_prompt.value), self
+            self.tr("主翻译 Prompt"), str(cfg.main_translation_prompt.value), self.window()
         )
         if dialog.exec():
             cfg.set(cfg.main_translation_prompt, dialog.editor.toPlainText())
 
     def edit_review_prompt(self) -> None:
         dialog = _PromptEditor(
-            self.tr("高级校对 Prompt"), str(cfg.review_translation_prompt.value), self
+            self.tr("高级校对 Prompt"), str(cfg.review_translation_prompt.value), self.window()
         )
         if dialog.exec():
             cfg.set(cfg.review_translation_prompt, dialog.editor.toPlainText())

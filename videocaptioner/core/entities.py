@@ -760,6 +760,10 @@ class SubtitleConfig:
     max_word_count_cjk: int = 12
     max_word_count_english: int = 18
     need_split: bool = True
+    # ``auto`` delegates source-language identification to the translation
+    # workflow; otherwise this is a TargetLanguage display value selected by
+    # the user (for example, ``英语``).
+    source_language: str = "auto"
     target_language: Optional["TargetLanguage"] = None
     subtitle_style: Optional[str] = None
     subtitle_style_reference_width: int = 1280
@@ -838,6 +842,7 @@ class SubtitleConfig:
                 lines.append(f"  Reflect Translation: {self.need_reflect}")
             elif self.translator_service == TranslatorServiceEnum.DEEPLX:
                 lines.append(f"  DeepLX Endpoint: {self.deeplx_endpoint}")
+            lines.append(f"  Source Language: {self.source_language}")
             lines.append(
                 f"  Target Language: {self.target_language.value if self.target_language else 'None'}"
             )

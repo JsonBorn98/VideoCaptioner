@@ -14,7 +14,7 @@ from videocaptioner.core.translate.enhanced.models import (
     TranslationAuditMode,
     TranslationExecutionMode,
 )
-from videocaptioner.core.translate.types import TranslationMode
+from videocaptioner.core.translate.types import TargetLanguage, TranslationMode
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.task_factory import TaskFactory
 
@@ -127,6 +127,8 @@ def test_task_factory_freezes_role_profiles_and_role_settings(tmp_path):
         cfg.review_translation_prompt: cfg.review_translation_prompt.value,
         cfg.enhanced_batch_size: cfg.enhanced_batch_size.value,
         cfg.term_context_radius: cfg.term_context_radius.value,
+        cfg.source_language: cfg.source_language.value,
+        cfg.target_language: cfg.target_language.value,
     }
     try:
         cfg.set(cfg.translation_mode, TranslationMode.ENHANCED_LLM)
@@ -136,6 +138,8 @@ def test_task_factory_freezes_role_profiles_and_role_settings(tmp_path):
         cfg.set(cfg.review_translation_prompt, "review role prompt")
         cfg.set(cfg.enhanced_batch_size, 17)
         cfg.set(cfg.term_context_radius, 8)
+        cfg.set(cfg.source_language, TargetLanguage.ENGLISH.value)
+        cfg.set(cfg.target_language, TargetLanguage.JAPANESE)
 
         task = TaskFactory.create_subtitle_task(
             str(tmp_path / "source.srt"),
@@ -163,10 +167,37 @@ def test_task_factory_freezes_role_profiles_and_role_settings(tmp_path):
         assert config.review_translation_prompt == "review role prompt"
         assert config.enhanced_batch_size == 17
         assert config.term_context_radius == 8
+        assert config.source_language == TargetLanguage.ENGLISH.value
+        assert config.target_language is TargetLanguage.JAPANESE
         assert config.term_confirmation_mode is TermConfirmationMode.MANUAL
         assert config.translation_audit_mode is TranslationAuditMode.REVIEW_AND_CONFIRM
         assert config.translation_execution_mode is TranslationExecutionMode.GUI_WORKFLOW
         assert config.imported_glossary_path == str(tmp_path / "terms.vcglossary.json")
+    finally:
+        for item, value in items.items():
+            cfg.set(item, value)
+
+
+def test_non_llm_task_freezes_automatic_source_language(tmp_path):
+    items = {
+        cfg.translation_mode: cfg.translation_mode.value,
+        cfg.translator_service: cfg.translator_service.value,
+        cfg.source_language: cfg.source_language.value,
+    }
+    try:
+        cfg.set(cfg.translation_mode, TranslationMode.NON_LLM)
+        cfg.set(cfg.translator_service, TranslatorServiceEnum.GOOGLE)
+        cfg.set(cfg.source_language, TargetLanguage.KOREAN.value)
+
+        task = TaskFactory.create_subtitle_task(
+            str(tmp_path / "source.srt"),
+            profile_store=LLMModelProfileStore(tmp_path / "profiles.json"),
+        )
+
+        assert task.subtitle_config is not None
+        assert task.subtitle_config.source_language == "auto"
+        # The LLM preference remains available if the user switches modes later.
+        assert cfg.source_language.value == TargetLanguage.KOREAN.value
     finally:
         for item, value in items.items():
             cfg.set(item, value)

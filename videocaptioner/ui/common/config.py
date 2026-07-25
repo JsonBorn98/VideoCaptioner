@@ -33,6 +33,7 @@ from videocaptioner.core.entities import (
     VideoQualityEnum,
     WhisperModelEnum,
 )
+from videocaptioner.core.llm.request_logger import set_llm_content_logging
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.speed import available_speed_presets, get_speed_policy
 from videocaptioner.core.translate.enhanced.defaults import (
@@ -154,6 +155,9 @@ class Config(QConfig):
     chatglm_api_key = ConfigItem("LLM", "ChatGLM_API_Key", "")
     chatglm_api_base = ConfigItem(
         "LLM", "ChatGLM_API_Base", "https://open.bigmodel.cn/api/paas/v4"
+    )
+    llm_content_logging = ConfigItem(
+        "LLMLog", "ContentLogging", False, BoolValidator()
     )
 
     # ------------------- 翻译配置 -------------------
@@ -345,6 +349,12 @@ class Config(QConfig):
     need_optimize = ConfigItem("Subtitle", "NeedOptimize", False, BoolValidator())
     need_translate = ConfigItem("Subtitle", "NeedTranslate", False, BoolValidator())
     need_split = ConfigItem("Subtitle", "NeedSplit", False, BoolValidator())
+    source_language = OptionsConfigItem(
+        "Subtitle",
+        "SourceLanguage",
+        "auto",
+        OptionsValidator(["auto", *(language.value for language in TargetLanguage)]),
+    )
     target_language = OptionsConfigItem(
         "Subtitle",
         "TargetLanguage",
@@ -720,3 +730,5 @@ cfg.themeMode.value = Theme.DARK
 cfg.themeColor.value = QColor("#ff28f08b")
 migrate_legacy_translation_settings(SETTINGS_PATH)
 qconfig.load(SETTINGS_PATH, cfg)
+set_llm_content_logging(bool(cfg.get(cfg.llm_content_logging)))
+cfg.llm_content_logging.valueChanged.connect(set_llm_content_logging)

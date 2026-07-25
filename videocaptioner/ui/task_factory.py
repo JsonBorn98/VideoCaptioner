@@ -476,7 +476,15 @@ class TaskFactory:
             max_word_count_cjk=cfg.max_word_count_cjk.value,
             max_word_count_english=cfg.max_word_count_english.value,
             need_split=cfg.need_split.value,
-            # 字幕翻译
+            # Traditional translators always use their own automatic source-language
+            # detection. Keep the LLM-only preference intact in cfg, but freeze the
+            # task with the value actually honored by the selected backend.
+            source_language=(
+                str(cfg.source_language.value)
+                if translation_mode
+                in {TranslationMode.SINGLE_LLM, TranslationMode.ENHANCED_LLM}
+                else "auto"
+            ),
             target_language=cfg.target_language.value,
             # 字幕提示
             custom_prompt_text=cfg.optimization_prompt_text.value,

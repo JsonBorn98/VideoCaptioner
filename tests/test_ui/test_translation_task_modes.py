@@ -26,12 +26,18 @@ from qfluentwidgets import CardWidget, ComboBox, SimpleCardWidget, SpinBox, Swit
 from videocaptioner.core.llm.models import LLMModelProfile, LLMTransport, ProviderDialect
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.translate.enhanced.models import TranslationAuditMode
-from videocaptioner.core.translate.types import TranslationMode
+from videocaptioner.core.translate.types import TargetLanguage, TranslationMode
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.TranslationModeSelector import TranslationModeSelector
 
 app = QApplication([])
-old = (cfg.translation_mode.value, cfg.main_llm_profile_id.value, cfg.review_llm_profile_id.value)
+old = (
+    cfg.translation_mode.value,
+    cfg.main_llm_profile_id.value,
+    cfg.review_llm_profile_id.value,
+    cfg.source_language.value,
+    cfg.target_language.value,
+)
 store = LLMModelProfileStore({profile_path})
 store.save(LLMModelProfile(
     profile_id='main', name='Main profile', transport=LLMTransport.OPENAI_COMPATIBLE,
@@ -48,6 +54,21 @@ try:
     assert isinstance(widget.main_profile_combo, ComboBox)
     assert isinstance(widget.enhanced_batch_spin, SpinBox)
     assert isinstance(widget.reflect_checkbox, SwitchButton)
+    assert widget.source_language_combo.itemData(0) == 'auto'
+    assert all(
+        widget.target_language_combo.itemData(index) is not None
+        for index in range(widget.target_language_combo.count()))
+    assert all(
+        widget.target_language_combo.itemData(index) != 'auto'
+        for index in range(widget.target_language_combo.count()))
+    widget.source_language_combo.setCurrentIndex(
+        widget.source_language_combo.findData(TargetLanguage.ENGLISH.value))
+    app.processEvents()
+    assert cfg.source_language.value == TargetLanguage.ENGLISH.value
+    widget.target_language_combo.setCurrentIndex(
+        widget.target_language_combo.findData(TargetLanguage.JAPANESE))
+    app.processEvents()
+    assert cfg.target_language.value is TargetLanguage.JAPANESE
     assert widget.audit_mode_combo.itemText(0) == '审计并人工确认'
     assert widget.audit_mode_combo.itemText(1) == '自动采纳校对修正'
     assert cfg.translation_audit_mode.defaultValue is TranslationAuditMode.AUTO_APPLY_REVIEW
@@ -82,6 +103,8 @@ finally:
     cfg.set(cfg.translation_mode, old[0])
     cfg.set(cfg.main_llm_profile_id, old[1])
     cfg.set(cfg.review_llm_profile_id, old[2])
+    cfg.set(cfg.source_language, old[3])
+    cfg.set(cfg.target_language, old[4])
 """
     )
 
@@ -98,19 +121,60 @@ from videocaptioner.ui.components.TranslationModeSelector import TranslationMode
 app = QApplication([])
 old_service = cfg.translator_service.value
 old_mode = cfg.translation_mode.value
+old_source = cfg.source_language.value
 try:
     cfg.set(cfg.translator_service, TranslatorServiceEnum.OPENAI)
+    cfg.set(cfg.source_language, '英语')
     widget = TranslationModeSelector()
     widget.set_mode(TranslationMode.NON_LLM)
     assert not widget.is_selected_mode_available
     assert widget.missing_configuration(TranslationMode.NON_LLM) == ('非 LLM 翻译服务',)
+    assert not widget.source_language_combo.isEnabled()
+    assert widget.source_language_combo.currentData() == 'auto'
+    assert '固定自动检测' in widget.source_language_hint.text()
+    assert '仅用于 LLM' in widget.source_language_combo.toolTip()
 
     cfg.set(cfg.translator_service, TranslatorServiceEnum.GOOGLE)
     assert widget.is_selected_mode_available
+    assert cfg.source_language.value == '英语'
+    widget.set_mode(TranslationMode.SINGLE_LLM)
+    assert widget.source_language_combo.isEnabled()
+    assert widget.source_language_combo.currentData() == '英语'
+    assert widget.source_language_hint.isHidden()
     widget.close()
 finally:
     cfg.set(cfg.translator_service, old_service)
     cfg.set(cfg.translation_mode, old_mode)
+    cfg.set(cfg.source_language, old_source)
+"""
+    )
+
+
+def test_translation_workspace_and_toolbar_share_target_language_setting():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.core.translate.types import TargetLanguage
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.subtitle_interface import SubtitleInterface
+
+app = QApplication([])
+old = cfg.target_language.value
+try:
+    widget = SubtitleInterface()
+    cfg.set(cfg.target_language, TargetLanguage.JAPANESE)
+    app.processEvents()
+    assert widget.target_language_button.text() == TargetLanguage.JAPANESE.value
+    assert widget.translation_mode_selector.target_language_combo.currentData() is TargetLanguage.JAPANESE
+
+    combo = widget.translation_mode_selector.target_language_combo
+    combo.setCurrentIndex(combo.findData(TargetLanguage.FRENCH))
+    app.processEvents()
+    assert cfg.target_language.value is TargetLanguage.FRENCH
+    assert widget.target_language_button.text() == TargetLanguage.FRENCH.value
+    widget.close()
+finally:
+    cfg.set(cfg.target_language, old)
 """
     )
 
@@ -162,6 +226,58 @@ page.continue_button.click()
 assert len(captured) == 1
 assert captured[0][0].final_translation == ''
 assert captured[0][0].selection_source is GlossarySelectionSource.USER_CUSTOM
+page.close()
+"""
+    )
+
+
+def test_glossary_review_requires_manual_choice_for_obvious_target_language_conflicts():
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.core.translate.enhanced.models import (
+    GlossarySelectionSource, TermCandidate)
+from videocaptioner.ui.components.GlossaryReviewPage import GlossaryReviewPage
+
+app = QApplication([])
+page = GlossaryReviewPage()
+page.show()
+candidates = (
+    TermCandidate(candidate_id='korean', source_term='frontier', sense='model family',
+        main_translation='前沿', review_translation='프론티어', final_translation='프론티어'),
+    TermCandidate(candidate_id='spanish', source_term='reasoning tokens', sense='model output',
+        main_translation='推理令牌', review_translation='tokens de razonamiento',
+        final_translation='tokens de razonamiento'),
+)
+page.set_candidates(candidates, target_language='简体中文')
+app.processEvents()
+assert '韩文' in page.language_warning_label.text()
+assert not page.main_radio.isChecked()
+assert not page.review_radio.isChecked()
+assert page.candidates[0].final_translation == ''
+
+captured = []
+page.confirmed.connect(captured.append)
+page.continue_button.click()
+assert captured == []
+assert page.term_list.currentRow() == 0
+page.main_radio.setChecked(True)
+page.continue_button.click()
+assert captured == []
+assert page.term_list.currentRow() == 1
+assert '西班牙语' in page.language_warning_label.text()
+page.main_radio.setChecked(True)
+page.continue_button.click()
+assert len(captured) == 1
+assert captured[0][0].final_translation == '前沿'
+assert captured[0][0].selection_source is GlossarySelectionSource.USER_MAIN
+
+# Common English product names remain valid Chinese-target terminology.
+page.set_candidates((TermCandidate(
+    candidate_id='openai', source_term='OpenAI', sense='company',
+    main_translation='OpenAI', review_translation='OpenAI', final_translation='OpenAI'),),
+    target_language='简体中文')
+assert page.language_warning_label.isHidden()
 page.close()
 """
     )
@@ -279,5 +395,57 @@ try:
     dialog.close()
 finally:
     cfg.set(cfg.main_translation_prompt, old_main)
+"""
+    )
+
+
+def test_translation_mode_prompt_editor_uses_window_height_for_its_footer():
+    _run_qt_script(
+        """
+from PyQt5.QtCore import Qt
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QApplication, QWidget
+import videocaptioner.ui.components.TranslationModeSelector as selector_module
+from videocaptioner.ui.components.TranslationModeSelector import TranslationModeSelector
+
+app = QApplication([])
+root = QWidget()
+root.resize(1200, 720)
+selector = TranslationModeSelector(root)
+# The selector is deliberately shorter than the prompt editor's natural
+# content height, matching the translation workspace in the reported bug.
+selector.setGeometry(0, 250, 1200, 404)
+root.show()
+app.processEvents()
+
+created = []
+base_editor = selector_module._PromptEditor
+class CapturingPromptEditor(base_editor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        created.append(self)
+    def exec(self):
+        self.show()
+        app.processEvents()
+        QTest.mouseClick(self.editor.viewport(), Qt.LeftButton)
+        app.processEvents()
+        return 0
+
+selector_module._PromptEditor = CapturingPromptEditor
+try:
+    selector.edit_main_prompt()
+    selector.edit_review_prompt()
+    assert len(created) == 2
+    for dialog in created:
+        # MessageBoxBase constrains its mask to its parent.  The top-level
+        # window has room for both the editor and its fixed 81px button bar.
+        assert dialog.parentWidget() is root
+        assert dialog.editor.geometry().bottom() < dialog.buttonGroup.geometry().top()
+        assert dialog.yesButton.isVisible()
+        assert dialog.cancelButton.isVisible()
+        dialog.close()
+finally:
+    selector_module._PromptEditor = base_editor
+    root.close()
 """
     )

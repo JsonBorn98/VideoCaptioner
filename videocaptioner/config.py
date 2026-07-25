@@ -47,6 +47,13 @@ else:
     APPDATA_PATH = ROOT_PATH
     WORK_PATH = Path.home() / APP_NAME
 
+# Tests and isolated tooling can redirect all writable application data before
+# importing this module.  Normal desktop/CLI launches leave the variable unset
+# and continue to use the platform-specific paths above.
+_APPDATA_PATH_OVERRIDE = os.getenv("VIDEOCAPTIONER_APPDATA_PATH", "").strip()
+if _APPDATA_PATH_OVERRIDE:
+    APPDATA_PATH = Path(_APPDATA_PATH_OVERRIDE).expanduser().resolve()
+
 ASSETS_PATH = RESOURCE_PATH / "assets"
 TRANSLATIONS_PATH = RESOURCE_PATH / "translations"
 BUNDLED_FONTS_PATH = RESOURCE_PATH / "fonts"

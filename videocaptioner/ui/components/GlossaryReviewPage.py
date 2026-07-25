@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import Mapping, Optional, Sequence
 
@@ -34,6 +35,47 @@ from videocaptioner.core.translate.enhanced.models import (
     TermCandidate,
 )
 
+_KOREAN_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]")
+_WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+")
+_SPANISH_FUNCTION_WORDS = frozenset(
+    {
+        "a",
+        "al",
+        "con",
+        "como",
+        "de",
+        "del",
+        "el",
+        "en",
+        "es",
+        "esta",
+        "este",
+        "la",
+        "las",
+        "los",
+        "más",
+        "para",
+        "por",
+        "que",
+        "se",
+        "sin",
+        "un",
+        "una",
+        "y",
+    }
+)
+_SPANISH_INDICATOR_WORDS = frozenset(
+    {
+        "razonamiento",
+        "respuesta",
+        "traducción",
+        "traduccion",
+        "pensamiento",
+        "configuración",
+        "configuracion",
+    }
+)
+
 
 class GlossaryReviewPage(QWidget):
     """Master/detail editor that trusts the user's current selection as-is."""
@@ -45,6 +87,9 @@ class GlossaryReviewPage(QWidget):
         super().__init__(parent)
         self._candidates: list[TermCandidate] = []
         self._contexts: Mapping[int, str] = {}
+        self._target_language = ""
+        self._language_warnings: dict[str, tuple[str, ...]] = {}
+        self._pending_language_confirmation: set[str] = set()
         self._updating = False
         self._build_ui()
 
@@ -117,6 +162,11 @@ class GlossaryReviewPage(QWidget):
         self.custom_edit = LineEdit(detail)
         self.custom_edit.setPlaceholderText(self.tr("输入最终译法（可留空）"))
         self.custom_edit.textEdited.connect(self._on_custom_edited)
+        self.language_warning_label = CaptionLabel(detail)
+        self.language_warning_label.setObjectName("glossaryLanguageWarning")
+        self.language_warning_label.setWordWrap(True)
+        self.language_warning_label.setStyleSheet("color: #c42b1c;")
+        self.language_warning_label.hide()
         self.final_label = BodyLabel(detail)
         self.final_label.setWordWrap(True)
         self.occurrence_label = CaptionLabel(detail)
@@ -132,6 +182,7 @@ class GlossaryReviewPage(QWidget):
         detail_layout.addWidget(self.custom_radio)
         detail_layout.addWidget(self.custom_edit)
         detail_layout.addWidget(self.ignore_radio)
+        detail_layout.addWidget(self.language_warning_label)
         detail_layout.addSpacing(4)
         detail_layout.addWidget(self.final_label)
         detail_layout.addWidget(self.occurrence_label)
@@ -172,22 +223,81 @@ class GlossaryReviewPage(QWidget):
         self,
         candidates: Sequence[TermCandidate],
         contexts: Optional[Mapping[int, str]] = None,
+        target_language: object | None = None,
     ) -> None:
-        self._candidates = list(candidates)
+        if target_language is not None:
+            self._target_language = str(getattr(target_language, "value", target_language))
+        self._language_warnings = {
+            candidate.candidate_id: self._detect_target_language_conflicts(candidate.review_translation)
+            for candidate in candidates
+        }
+        self._language_warnings = {
+            candidate_id: warnings
+            for candidate_id, warnings in self._language_warnings.items()
+            if warnings
+        }
+        self._pending_language_confirmation = set(self._language_warnings)
+        # A suspect review result must never become an authoritative term merely
+        # because this page defaults to the review option.  Leave its final
+        # value blank until the user deliberately chooses an option.
+        self._candidates = [
+            replace(
+                candidate,
+                final_translation="",
+                selection_source=GlossarySelectionSource.USER_CUSTOM,
+            )
+            if candidate.candidate_id in self._pending_language_confirmation
+            else candidate
+            for candidate in candidates
+        ]
         self._contexts = contexts or {}
         self.count_label.setText(self.tr("{0} 个候选").format(len(self._candidates)))
         self.term_list.clear()
         for candidate in self._candidates:
-            item = QListWidgetItem(candidate.source_term)
+            warning = self._language_warnings.get(candidate.candidate_id)
+            item = QListWidgetItem(
+                self.tr("⚠ ") + candidate.source_term if warning else candidate.source_term
+            )
             item.setToolTip(candidate.sense)
+            if warning:
+                item.setToolTip(candidate.sense + "\n" + "；".join(warning))
             self.term_list.addItem(item)
         if self._candidates:
             self.term_list.setCurrentRow(0)
+
+    def _detect_target_language_conflicts(self, translation: str) -> tuple[str, ...]:
+        """Return high-confidence script/language conflicts for the selected target.
+
+        The check intentionally stays conservative: terminology often contains
+        English product names, so Latin text alone is not treated as an error.
+        More language-specific detectors can be added without changing the UI
+        contract.
+        """
+
+        if self._target_language != "简体中文" or not translation.strip():
+            return ()
+        warnings: list[str] = []
+        if _KOREAN_RE.search(translation):
+            warnings.append(self.tr("高级校对结论含有韩文字符"))
+
+        words = {word.casefold() for word in _WORD_RE.findall(translation)}
+        function_word_count = len(words & _SPANISH_FUNCTION_WORDS)
+        has_indicator = bool(words & _SPANISH_INDICATOR_WORDS)
+        has_spanish_punctuation_or_accent = bool(re.search(r"[¡¿ñáéíóúü]", translation, re.I))
+        if (
+            function_word_count >= 2
+            or (has_indicator and function_word_count >= 1)
+            or (has_spanish_punctuation_or_accent and function_word_count >= 1)
+        ):
+            warnings.append(self.tr("高级校对结论疑似为西班牙语短语"))
+        return tuple(warnings)
 
     def _show_candidate(self, row: int) -> None:
         if row < 0 or row >= len(self._candidates):
             return
         candidate = self._candidates[row]
+        language_warnings = self._language_warnings.get(candidate.candidate_id, ())
+        needs_language_confirmation = candidate.candidate_id in self._pending_language_confirmation
         self._updating = True
         try:
             self.source_label.setText(self.tr("源术语：") + candidate.source_term)
@@ -199,7 +309,29 @@ class GlossaryReviewPage(QWidget):
                 if candidate.selection_source is GlossarySelectionSource.USER_CUSTOM
                 else ""
             )
-            if candidate.ignored or not candidate.is_term:
+            if needs_language_confirmation:
+                # QButtonGroup is exclusive, so clear it temporarily to make
+                # the user make an explicit choice instead of inheriting the
+                # page's normal "use review" default.
+                self.choice_group.setExclusive(False)
+                for radio in (
+                    self.main_radio,
+                    self.review_radio,
+                    self.custom_radio,
+                    self.ignore_radio,
+                ):
+                    radio.setAutoExclusive(False)
+                    radio.setChecked(False)
+                    radio.setAutoExclusive(True)
+                self.choice_group.setExclusive(True)
+                self.language_warning_label.setText(
+                    self.tr("目标语言为“{0}”：{1}。请手动选择最终译法后再继续。").format(
+                        self._target_language,
+                        "；".join(language_warnings),
+                    )
+                )
+                self.language_warning_label.show()
+            elif candidate.ignored or not candidate.is_term:
                 self.ignore_radio.setChecked(True)
             elif candidate.selection_source is GlossarySelectionSource.USER_MAIN:
                 self.main_radio.setChecked(True)
@@ -207,7 +339,16 @@ class GlossaryReviewPage(QWidget):
                 self.custom_radio.setChecked(True)
             else:
                 self.review_radio.setChecked(True)
-            self.final_label.setText(self.tr("当前最终译法：") + candidate.final_translation)
+            self.final_label.setText(
+                self.tr("当前最终译法：")
+                + (
+                    self.tr("待人工确认")
+                    if needs_language_confirmation
+                    else candidate.final_translation
+                )
+            )
+            if not needs_language_confirmation:
+                self.language_warning_label.hide()
             ids = ", ".join(str(value) for value in candidate.occurrence_ids)
             self.occurrence_label.setText(self.tr("出现位置：") + ids)
             representative_ids = (
@@ -248,7 +389,7 @@ class GlossaryReviewPage(QWidget):
                 is_term=True,
                 ignored=False,
             )
-        else:
+        elif self.review_radio.isChecked():
             updated = replace(
                 candidate,
                 final_translation=candidate.review_translation,
@@ -256,8 +397,19 @@ class GlossaryReviewPage(QWidget):
                 is_term=True,
                 ignored=False,
             )
+        else:
+            return
         self._candidates[row] = updated
+        self._pending_language_confirmation.discard(candidate.candidate_id)
         self.final_label.setText(self.tr("当前最终译法：") + updated.final_translation)
+        language_warnings = self._language_warnings.get(candidate.candidate_id)
+        if language_warnings:
+            self.language_warning_label.setText(
+                self.tr("目标语言为“{0}”：{1}。已手动确认。").format(
+                    self._target_language,
+                    "；".join(language_warnings),
+                )
+            )
 
     def _on_custom_edited(self, _text: str) -> None:
         if not self.custom_radio.isChecked():
@@ -312,8 +464,21 @@ class GlossaryReviewPage(QWidget):
         self.term_list.setCurrentRow(new_row)
 
     def _confirm(self) -> None:
-        # Deliberately no pending-state or non-empty custom-value validation.
         self._store_current_choice()
+        if self._pending_language_confirmation:
+            row = next(
+                (
+                    index
+                    for index, candidate in enumerate(self._candidates)
+                    if candidate.candidate_id in self._pending_language_confirmation
+                ),
+                -1,
+            )
+            if row >= 0:
+                self.term_list.setCurrentRow(row)
+            return
+        # Deliberately no non-empty custom-value validation: an empty custom
+        # value remains a deliberate choice for users who need to clear a term.
         self.confirmed.emit(tuple(self._candidates))
 
 

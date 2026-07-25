@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, TypeAlias, Union, cast
 
 
 class LLMTransport(str, Enum):
     OPENAI_COMPATIBLE = "openai-compatible"
     ANTHROPIC_MESSAGES = "anthropic-messages"
     GEMINI = "gemini"
+
+
+class OpenAIEndpoint(str, Enum):
+    CHAT_COMPLETIONS = "chat_completions"
+    RESPONSES = "responses"
 
 
 class ProviderDialect(str, Enum):
@@ -28,6 +35,88 @@ class ProviderDialect(str, Enum):
 
 _PROFILE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 
+REQUEST_OPTIONS_MAX_BYTES = 64 * 1024
+REQUEST_OPTIONS_MAX_DEPTH = 16
+
+JSONScalar: TypeAlias = Union[None, bool, int, float, str]
+JSONValue: TypeAlias = Union[
+    JSONScalar,
+    list["JSONValue"],
+    tuple["JSONValue", ...],
+    Mapping[str, "JSONValue"],
+]
+
+
+def _freeze_json_value(value: Any, *, container_depth: int) -> JSONValue:
+    if value is None or type(value) in {bool, int, str}:
+        return cast(JSONScalar, value)
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("request_options numbers must be finite")
+        return value
+    if isinstance(value, Mapping):
+        if container_depth > REQUEST_OPTIONS_MAX_DEPTH:
+            raise ValueError(
+                f"request_options nesting depth must not exceed {REQUEST_OPTIONS_MAX_DEPTH}"
+            )
+        frozen: dict[str, JSONValue] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("request_options object keys must be strings")
+            frozen[key] = _freeze_json_value(item, container_depth=container_depth + 1)
+        return MappingProxyType(frozen)
+    if type(value) in {list, tuple}:
+        if container_depth > REQUEST_OPTIONS_MAX_DEPTH:
+            raise ValueError(
+                f"request_options nesting depth must not exceed {REQUEST_OPTIONS_MAX_DEPTH}"
+            )
+        return tuple(
+            _freeze_json_value(item, container_depth=container_depth + 1) for item in value
+        )
+    raise ValueError(
+        "request_options values must be JSON null, booleans, numbers, strings, arrays, or objects"
+    )
+
+
+def thaw_json_value(value: JSONValue) -> Any:
+    """Return a mutable, JSON-serializable copy of a frozen JSON value."""
+
+    if isinstance(value, Mapping):
+        return {key: thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [thaw_json_value(item) for item in value]
+    return value
+
+
+def thaw_json_object(value: Mapping[str, JSONValue]) -> dict[str, Any]:
+    """Return a mutable, JSON-serializable copy of a frozen JSON object."""
+
+    return {key: thaw_json_value(item) for key, item in value.items()}
+
+
+def freeze_json_object(value: Mapping[str, Any]) -> Mapping[str, JSONValue]:
+    """Validate, copy and recursively freeze a request-options JSON object."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("request_options must be a JSON object")
+    frozen = _freeze_json_value(value, container_depth=1)
+    frozen_object = cast(Mapping[str, JSONValue], frozen)
+    mutable = thaw_json_object(frozen_object)
+    try:
+        payload = json.dumps(
+            mutable,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError("request_options must be valid UTF-8 JSON") from exc
+    if len(payload) > REQUEST_OPTIONS_MAX_BYTES:
+        raise ValueError(
+            f"request_options must not exceed {REQUEST_OPTIONS_MAX_BYTES} UTF-8 bytes"
+        )
+    return frozen_object
+
 
 @dataclass(frozen=True)
 class LLMModelProfile:
@@ -42,24 +131,63 @@ class LLMModelProfile:
     model: str
     work_context_tokens: int = 65_536
     max_concurrency: int = 4
+    openai_endpoint: OpenAIEndpoint = OpenAIEndpoint.CHAT_COMPLETIONS
+    request_options: Mapping[str, JSONValue] = field(default_factory=dict)
+    max_output_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
+        if type(self.profile_id) is not str:
+            raise ValueError("profile_id must be a string")
         if not _PROFILE_ID_RE.fullmatch(self.profile_id):
             raise ValueError("profile_id must contain 1-64 lowercase ASCII id characters")
+        if type(self.name) is not str:
+            raise ValueError("name must be a string")
         name = self.name.strip()
         if not name or len(name) > 80 or any(ord(char) < 32 for char in name):
             raise ValueError("name must contain 1-80 printable characters")
+        if not isinstance(self.transport, LLMTransport):
+            raise ValueError("transport must be an LLMTransport")
+        if not isinstance(self.dialect, ProviderDialect):
+            raise ValueError("dialect must be a ProviderDialect")
+        if not isinstance(self.openai_endpoint, OpenAIEndpoint):
+            raise ValueError("openai_endpoint must be an OpenAIEndpoint")
+        if (
+            self.transport is not LLMTransport.OPENAI_COMPATIBLE
+            and self.openai_endpoint is not OpenAIEndpoint.CHAT_COMPLETIONS
+        ):
+            raise ValueError(
+                "openai_endpoint must be chat_completions for native LLM transports"
+            )
+        if type(self.base_url) is not str:
+            raise ValueError("base_url must be a string")
         if not self.base_url.strip():
             raise ValueError("base_url is required")
+        if type(self.api_key) is not str:
+            raise ValueError("api_key must be a string")
+        if type(self.model) is not str:
+            raise ValueError("model must be a string")
         if not self.model.strip():
             raise ValueError("model is required")
+        if type(self.work_context_tokens) is not int:
+            raise ValueError("work_context_tokens must be an integer")
         if self.work_context_tokens < 16_384:
             raise ValueError("work_context_tokens must be at least 16384")
+        if type(self.max_concurrency) is not int:
+            raise ValueError("max_concurrency must be an integer")
         if not 1 <= self.max_concurrency <= 50:
             raise ValueError("max_concurrency must be between 1 and 50")
+        if self.max_output_tokens is not None:
+            if type(self.max_output_tokens) is not int:
+                raise ValueError("max_output_tokens must be an integer or None")
+            if not 1 <= self.max_output_tokens < self.work_context_tokens:
+                raise ValueError(
+                    "max_output_tokens must be at least 1 and less than work_context_tokens"
+                )
+        request_options = freeze_json_object(self.request_options)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "base_url", self.base_url.strip())
         object.__setattr__(self, "model", self.model.strip())
+        object.__setattr__(self, "request_options", request_options)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +200,9 @@ class LLMModelProfile:
             "model": self.model,
             "work_context_tokens": self.work_context_tokens,
             "max_concurrency": self.max_concurrency,
+            "openai_endpoint": self.openai_endpoint.value,
+            "request_options": thaw_json_object(self.request_options),
+            "max_output_tokens": self.max_output_tokens,
         }
 
     @classmethod
@@ -86,19 +217,48 @@ class LLMModelProfile:
             "model",
             "work_context_tokens",
             "max_concurrency",
+            "openai_endpoint",
+            "request_options",
+            "max_output_tokens",
         }
+        if not isinstance(value, Mapping):
+            raise ValueError("model profile must be an object")
         if set(value) != expected:
             raise ValueError("model profile fields do not match schema")
+        string_fields = {
+            "id",
+            "name",
+            "transport",
+            "dialect",
+            "base_url",
+            "api_key",
+            "model",
+            "openai_endpoint",
+        }
+        if any(type(value[key]) is not str for key in string_fields):
+            raise ValueError("model profile string fields must be strings")
+        if type(value["work_context_tokens"]) is not int:
+            raise ValueError("work_context_tokens must be an integer")
+        if type(value["max_concurrency"]) is not int:
+            raise ValueError("max_concurrency must be an integer")
+        if not isinstance(value["request_options"], Mapping):
+            raise ValueError("request_options must be a JSON object")
+        max_output_tokens = value["max_output_tokens"]
+        if max_output_tokens is not None and type(max_output_tokens) is not int:
+            raise ValueError("max_output_tokens must be an integer or null")
         return cls(
-            profile_id=str(value["id"]),
-            name=str(value["name"]),
-            transport=LLMTransport(str(value["transport"])),
-            dialect=ProviderDialect(str(value["dialect"])),
-            base_url=str(value["base_url"]),
-            api_key=str(value["api_key"]),
-            model=str(value["model"]),
-            work_context_tokens=int(value["work_context_tokens"]),
-            max_concurrency=int(value["max_concurrency"]),
+            profile_id=value["id"],
+            name=value["name"],
+            transport=LLMTransport(value["transport"]),
+            dialect=ProviderDialect(value["dialect"]),
+            base_url=value["base_url"],
+            api_key=value["api_key"],
+            model=value["model"],
+            work_context_tokens=value["work_context_tokens"],
+            max_concurrency=value["max_concurrency"],
+            openai_endpoint=OpenAIEndpoint(value["openai_endpoint"]),
+            request_options=value["request_options"],
+            max_output_tokens=max_output_tokens,
         )
 
 

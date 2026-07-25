@@ -19,8 +19,10 @@ from .models import (
     LLMRequest,
     LLMResult,
     LLMUsage,
+    OpenAIEndpoint,
     ProviderDialect,
 )
+from .request_options import RequestOptionsError, merge_profile_request_options
 
 
 def _read_attr(value: Any, name: str, default: Any = None) -> Any:
@@ -51,7 +53,8 @@ def _endpoint(base_url: str, suffix: str) -> str:
 
 def _http_error(response: requests.Response) -> LLMCallError:
     status = response.status_code
-    message = response.text.strip() or f"LLM provider returned HTTP {status}"
+    diagnostic = response.text.strip()
+    message = f"LLM provider returned HTTP {status}"
     if status in {401, 403}:
         return LLMCallError(
             message,
@@ -73,7 +76,7 @@ def _http_error(response: requests.Response) -> LLMCallError:
             status_code=status,
             retry_after_seconds=retry_after,
         )
-    if _is_context_limit_error(status, message):
+    if _is_context_limit_error(status, diagnostic):
         return LLMCallError(
             message,
             category=LLMErrorCategory.CONTEXT_LIMIT,
@@ -148,6 +151,16 @@ class LLMAdapter(ABC):
     def close(self) -> None:
         """Release provider resources owned by this adapter, if any."""
 
+    def _merge_request_options(self, application_body: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            return merge_profile_request_options(self.profile, application_body)
+        except RequestOptionsError as exc:
+            raise LLMCallError(
+                str(exc),
+                category=LLMErrorCategory.CONFIGURATION,
+                retryable=False,
+            ) from exc
+
 
 
 class OpenAICompatibleAdapter(LLMAdapter):
@@ -159,30 +172,10 @@ class OpenAICompatibleAdapter(LLMAdapter):
         )
 
     def complete(self, request: LLMRequest) -> LLMResult:
-        kwargs: dict[str, Any] = {
-            "model": self.profile.model,
-            "messages": [
-                {"role": message.role, "content": message.content}
-                for message in request.messages
-            ],
-            "temperature": request.temperature,
-        }
-        if request.max_output_tokens is not None:
-            kwargs["max_tokens"] = request.max_output_tokens
-        if request.response_schema is not None:
-            if self.profile.dialect in {ProviderDialect.OPENAI, ProviderDialect.QWEN}:
-                kwargs["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "structured_response",
-                        "strict": True,
-                        "schema": dict(request.response_schema),
-                    },
-                }
-            else:
-                kwargs["response_format"] = {"type": "json_object"}
         try:
-            response = self.client.chat.completions.create(**kwargs)
+            if self.profile.openai_endpoint is OpenAIEndpoint.RESPONSES:
+                return self._complete_responses(request)
+            return self._complete_chat(request)
         except (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError) as exc:
             retry_after: Optional[float] = None
             response = getattr(exc, "response", None)
@@ -192,32 +185,42 @@ class OpenAICompatibleAdapter(LLMAdapter):
             except (TypeError, ValueError):
                 retry_after = None
             raise LLMCallError(
-                str(exc),
+                (
+                    "LLM provider rate limit exceeded"
+                    if isinstance(exc, openai.RateLimitError)
+                    else "LLM provider request timed out"
+                    if isinstance(exc, openai.APITimeoutError)
+                    else "Could not connect to LLM provider"
+                ),
                 category=LLMErrorCategory.TRANSIENT,
                 retryable=True,
                 retry_after_seconds=retry_after,
-            ) from exc
+            ) from None
         except openai.InternalServerError as exc:
             raise LLMCallError(
-                str(exc),
+                f"LLM provider returned HTTP {getattr(exc, 'status_code', 500)}",
                 category=LLMErrorCategory.TRANSIENT,
                 retryable=True,
                 status_code=getattr(exc, "status_code", None),
-            ) from exc
+            ) from None
         except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
             raise LLMCallError(
-                str(exc),
+                "LLM provider authentication or permission check failed",
                 category=LLMErrorCategory.AUTHENTICATION,
                 retryable=False,
                 status_code=getattr(exc, "status_code", None),
-            ) from exc
+            ) from None
         except openai.APIStatusError as exc:
             status = getattr(exc, "status_code", None)
             retryable = status == 429 or (status is not None and status >= 500)
             message = _exception_text(exc)
             context_limit = _is_context_limit_error(status, message)
             raise LLMCallError(
-                message,
+                (
+                    f"LLM provider returned HTTP {status}"
+                    if status is not None
+                    else "LLM provider returned an API error"
+                ),
                 category=(
                     LLMErrorCategory.CONTEXT_LIMIT
                     if context_limit
@@ -227,7 +230,57 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 ),
                 retryable=retryable and not context_limit,
                 status_code=status,
-            ) from exc
+            ) from None
+
+    def _effective_output_cap(self, request: LLMRequest) -> Optional[int]:
+        return (
+            self.profile.max_output_tokens
+            if self.profile.max_output_tokens is not None
+            else request.max_output_tokens
+        )
+
+    def _complete_chat(self, request: LLMRequest) -> LLMResult:
+        application_body: dict[str, Any] = {
+            "model": self.profile.model,
+            "messages": [
+                {"role": message.role, "content": message.content}
+                for message in request.messages
+            ],
+            "stream": False,
+            "n": 1,
+            "temperature": request.temperature,
+            "store": False,
+        }
+        output_cap = self._effective_output_cap(request)
+        if output_cap is not None:
+            application_body["max_completion_tokens"] = output_cap
+        if request.response_schema is not None:
+            if self.profile.dialect in {ProviderDialect.OPENAI, ProviderDialect.QWEN}:
+                application_body["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "structured_response",
+                        "strict": True,
+                        "schema": dict(request.response_schema),
+                    },
+                }
+            else:
+                application_body["response_format"] = {"type": "json_object"}
+        final_body = self._merge_request_options(application_body)
+        kwargs = {
+            name: final_body.pop(name)
+            for name in (
+                "model",
+                "messages",
+                "stream",
+                "n",
+                "max_completion_tokens",
+                "response_format",
+            )
+            if name in final_body
+        }
+        kwargs["extra_body"] = final_body
+        response = self.client.chat.completions.create(**kwargs)
 
         choices = _read_attr(response, "choices", []) or []
         message = _read_attr(choices[0], "message") if choices else None
@@ -278,6 +331,99 @@ class OpenAICompatibleAdapter(LLMAdapter):
         )
         return LLMResult(text=text.strip(), usage=normalized, raw=response)
 
+    def _complete_responses(self, request: LLMRequest) -> LLMResult:
+        application_body: dict[str, Any] = {
+            "model": self.profile.model,
+            "input": [
+                {
+                    "role": message.role,
+                    "content": [{"type": "input_text", "text": message.content}],
+                }
+                for message in request.messages
+            ],
+            "stream": False,
+            "background": False,
+            "temperature": request.temperature,
+            "store": False,
+        }
+        output_cap = self._effective_output_cap(request)
+        if output_cap is not None:
+            application_body["max_output_tokens"] = output_cap
+        if request.response_schema is not None:
+            application_body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": "structured_response",
+                    "strict": True,
+                    "schema": dict(request.response_schema),
+                }
+            }
+        final_body = self._merge_request_options(application_body)
+        kwargs = {
+            name: final_body.pop(name)
+            for name in ("model", "input", "stream", "background", "max_output_tokens")
+            if name in final_body
+        }
+        kwargs["extra_body"] = final_body
+        response = self.client.responses.create(**kwargs)
+
+        status = _read_attr(response, "status")
+        status_value = getattr(status, "value", status)
+        if status_value != "completed":
+            raise LLMCallError(
+                f"Responses API returned non-completed status: {status_value or 'missing'}",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=False,
+            )
+
+        text_parts: list[str] = []
+        refused = False
+        for output_item in _read_attr(response, "output", []) or []:
+            if _read_attr(output_item, "type") != "message":
+                continue
+            for content_item in _read_attr(output_item, "content", []) or []:
+                content_type = _read_attr(content_item, "type")
+                if content_type == "refusal":
+                    refused = True
+                elif content_type == "output_text":
+                    part = _read_attr(content_item, "text")
+                    if isinstance(part, str):
+                        text_parts.append(part)
+        if refused:
+            raise LLMCallError(
+                "Responses API refused the request",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=False,
+            )
+        text = "".join(text_parts).strip()
+        if not text:
+            raise LLMCallError(
+                "Responses API returned no final output_text",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=False,
+            )
+
+        usage = _read_attr(response, "usage")
+        input_details = _read_attr(usage, "input_tokens_details") if usage else None
+        output_details = _read_attr(usage, "output_tokens_details") if usage else None
+        normalized = LLMUsage(
+            input_tokens=_optional_int(_read_attr(usage, "input_tokens")) if usage else None,
+            output_tokens=(
+                _optional_int(_read_attr(usage, "output_tokens")) if usage else None
+            ),
+            cache_read_tokens=(
+                _optional_int(_read_attr(input_details, "cached_tokens"))
+                if input_details
+                else None
+            ),
+            reasoning_tokens=(
+                _optional_int(_read_attr(output_details, "reasoning_tokens"))
+                if output_details
+                else None
+            ),
+        )
+        return LLMResult(text=text, usage=normalized, raw=response)
+
 
 class AnthropicMessagesAdapter(LLMAdapter):
     def __init__(
@@ -308,25 +454,32 @@ class AnthropicMessagesAdapter(LLMAdapter):
                     "cache_control": {"type": "ephemeral"},
                 }
             ]
-        payload: dict[str, Any] = {
+        output_cap = (
+            self.profile.max_output_tokens
+            if self.profile.max_output_tokens is not None
+            else request.max_output_tokens
+        )
+        application_body: dict[str, Any] = {
             "model": self.profile.model,
             "system": system,
             "messages": messages,
+            "stream": False,
             "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens or 4096,
+            "max_tokens": output_cap or 4096,
         }
         if request.response_schema is not None:
-            payload["tools"] = [
+            application_body["tools"] = [
                 {
                     "name": "structured_response",
                     "description": "Return the requested structured response.",
                     "input_schema": dict(request.response_schema),
                 }
             ]
-            payload["tool_choice"] = {
+            application_body["tool_choice"] = {
                 "type": "tool",
                 "name": "structured_response",
             }
+        payload = self._merge_request_options(application_body)
         try:
             response = self.session.post(
                 _endpoint(self.profile.base_url, "/v1/messages"),
@@ -340,8 +493,14 @@ class AnthropicMessagesAdapter(LLMAdapter):
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise LLMCallError(
-                str(exc), category=LLMErrorCategory.TRANSIENT, retryable=True
-            ) from exc
+                (
+                    "LLM provider request timed out"
+                    if isinstance(exc, requests.Timeout)
+                    else "Could not connect to LLM provider"
+                ),
+                category=LLMErrorCategory.TRANSIENT,
+                retryable=True,
+            ) from None
         if not response.ok:
             raise _http_error(response)
         try:
@@ -479,9 +638,17 @@ class GeminiAdapter(LLMAdapter):
             for item in request.messages
             if item.role != "system"
         ]
-        generation_config: dict[str, Any] = {"temperature": request.temperature}
-        if request.max_output_tokens is not None:
-            generation_config["maxOutputTokens"] = request.max_output_tokens
+        generation_config: dict[str, Any] = {
+            "candidateCount": 1,
+            "temperature": request.temperature,
+        }
+        output_cap = (
+            self.profile.max_output_tokens
+            if self.profile.max_output_tokens is not None
+            else request.max_output_tokens
+        )
+        if output_cap is not None:
+            generation_config["maxOutputTokens"] = output_cap
         if request.response_schema is not None:
             generation_config["responseMimeType"] = "application/json"
             generation_config["responseSchema"] = dict(request.response_schema)
@@ -498,6 +665,7 @@ class GeminiAdapter(LLMAdapter):
             payload["cachedContent"] = cached_content
         elif system_text:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+        payload = self._merge_request_options(payload)
         base = self.profile.base_url.rstrip("/")
         url = f"{base}/models/{quote(self.profile.model, safe='')}:generateContent"
         try:
@@ -509,8 +677,14 @@ class GeminiAdapter(LLMAdapter):
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise LLMCallError(
-                str(exc), category=LLMErrorCategory.TRANSIENT, retryable=True
-            ) from exc
+                (
+                    "LLM provider request timed out"
+                    if isinstance(exc, requests.Timeout)
+                    else "Could not connect to LLM provider"
+                ),
+                category=LLMErrorCategory.TRANSIENT,
+                retryable=True,
+            ) from None
         if not response.ok and cached_content:
             fingerprint = hashlib.sha256(system_text.encode("utf-8")).hexdigest()
             self._drop_cached_prefix(fingerprint)
@@ -525,8 +699,14 @@ class GeminiAdapter(LLMAdapter):
                 )
             except (requests.Timeout, requests.ConnectionError) as exc:
                 raise LLMCallError(
-                    str(exc), category=LLMErrorCategory.TRANSIENT, retryable=True
-                ) from exc
+                    (
+                        "LLM provider request timed out"
+                        if isinstance(exc, requests.Timeout)
+                        else "Could not connect to LLM provider"
+                    ),
+                    category=LLMErrorCategory.TRANSIENT,
+                    retryable=True,
+                ) from None
         if not response.ok:
             raise _http_error(response)
         try:

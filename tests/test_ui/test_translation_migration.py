@@ -3,6 +3,7 @@ import json
 from videocaptioner.core.llm.models import LLMTransport, ProviderDialect
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.translate.enhanced.defaults import (
+    DEFAULT_MAIN_TRANSLATION_PROMPT,
     DEFAULT_REVIEW_TRANSLATION_PROMPT,
 )
 from videocaptioner.ui.common.translation_migration import (
@@ -104,6 +105,90 @@ def test_legacy_prompt_moves_only_to_main_prompt_and_clears_old_field(tmp_path) 
     )
     assert settings["Translate"]["ReviewTranslationPrompt"] != old_prompt
     assert settings["Subtitle"]["CustomPromptText"] == ""
+
+
+def test_blank_legacy_prompt_keeps_the_enhanced_main_prompt_default(tmp_path) -> None:
+    settings_path = tmp_path / "settings.json"
+    profiles_path = tmp_path / "profiles.json"
+    _write_settings(
+        settings_path,
+        _legacy_settings(service="微软翻译", prompt="  \n\t "),
+    )
+
+    assert migrate_legacy_translation_settings(
+        settings_path,
+        profile_store=LLMModelProfileStore(profiles_path),
+    )
+
+    settings = _read_settings(settings_path)
+    assert settings["Translate"]["MainTranslationPrompt"] == DEFAULT_MAIN_TRANSLATION_PROMPT
+    assert settings["Subtitle"]["CustomPromptText"] == ""
+    assert not migrate_legacy_translation_settings(
+        settings_path,
+        profile_store=LLMModelProfileStore(profiles_path),
+    )
+
+
+def test_v2_repairs_blank_main_prompt_without_repeating_v1_migration(tmp_path) -> None:
+    settings_path = tmp_path / "settings.json"
+    profiles_path = tmp_path / "profiles.json"
+    settings = _legacy_settings(service="LLM 大模型翻译", prompt="keep this legacy value")
+    settings["Translate"].update(
+        {
+            "TranslationMigrationVersion": 1,
+            "TranslationMode": "enhanced_llm",
+            "MainLLMProfileId": "custom-main-profile",
+            "ReviewLLMProfileId": "custom-review-profile",
+            "MainTranslationPrompt": " \n\t ",
+            "ReviewTranslationPrompt": "Keep this review prompt.",
+            "EnhancedBatchSize": 42,
+        }
+    )
+    expected = json.loads(json.dumps(settings))
+    expected["Translate"]["MainTranslationPrompt"] = DEFAULT_MAIN_TRANSLATION_PROMPT
+    expected["Translate"]["TranslationMigrationVersion"] = MIGRATION_VERSION
+    _write_settings(settings_path, settings)
+
+    assert migrate_legacy_translation_settings(
+        settings_path,
+        profile_store=LLMModelProfileStore(profiles_path),
+    )
+
+    assert _read_settings(settings_path) == expected
+    assert not profiles_path.exists()
+
+
+def test_v2_preserves_existing_main_prompt_and_is_idempotent(tmp_path) -> None:
+    settings_path = tmp_path / "settings.json"
+    profiles_path = tmp_path / "profiles.json"
+    main_prompt = "Preserve this user-customized prompt."
+    settings = _legacy_settings(service="LLM 大模型翻译", prompt="legacy prompt remains untouched")
+    settings["Translate"].update(
+        {
+            "TranslationMigrationVersion": 1,
+            "TranslationMode": "enhanced_llm",
+            "MainLLMProfileId": "custom-main-profile",
+            "ReviewLLMProfileId": "custom-review-profile",
+            "MainTranslationPrompt": main_prompt,
+        }
+    )
+    expected = json.loads(json.dumps(settings))
+    expected["Translate"]["TranslationMigrationVersion"] = MIGRATION_VERSION
+    _write_settings(settings_path, settings)
+
+    assert migrate_legacy_translation_settings(
+        settings_path,
+        profile_store=LLMModelProfileStore(profiles_path),
+    )
+    assert _read_settings(settings_path) == expected
+    assert not profiles_path.exists()
+
+    settings_after_v2 = settings_path.read_bytes()
+    assert not migrate_legacy_translation_settings(
+        settings_path,
+        profile_store=LLMModelProfileStore(profiles_path),
+    )
+    assert settings_path.read_bytes() == settings_after_v2
 
 
 def test_migration_is_idempotent_and_does_not_duplicate_profile(tmp_path) -> None:

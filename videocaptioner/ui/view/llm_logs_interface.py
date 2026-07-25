@@ -192,6 +192,16 @@ class LLMLogsInterface(QWidget):
         self.main_layout.setContentsMargins(20, 20, 20, 20)
         self.main_layout.setSpacing(12)
 
+        self.privacy_hint = CaptionLabel(
+            self.tr(
+                "新日志默认只含调用元数据；开启内容日志后会包含提示词和最终文本。"
+                "旧日志可能仍含字幕、回答或服务端原始内容，可使用“清空日志”删除。"
+            )
+        )
+        self.privacy_hint.setWordWrap(True)
+        self.privacy_hint.setStyleSheet("color: gray;")
+        self.main_layout.addWidget(self.privacy_hint)
+
         self._setup_toolbar()
         self._setup_table()
         self._setup_footer()
@@ -479,13 +489,17 @@ class LLMLogsInterface(QWidget):
         """清空日志"""
         w = MessageBox(
             self.tr("确认清空"),
-            self.tr("确定要清空所有日志吗？此操作不可恢复。"),
+            self.tr(
+                "确定要删除当前及已轮转的 LLM 日志吗？旧日志可能包含字幕、"
+                "回答或服务端原始内容；此操作不可恢复。"
+            ),
             self,
         )
         if w.exec():
             try:
-                if LLM_LOG_FILE.exists():
-                    LLM_LOG_FILE.unlink()
+                for path in (LLM_LOG_FILE, LLM_LOG_FILE.with_suffix(".jsonl.old")):
+                    if path.exists():
+                        path.unlink()
                 self.all_logs = []
                 self.filtered_logs = []
                 self._update_table()

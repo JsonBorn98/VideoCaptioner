@@ -10,6 +10,8 @@ from videocaptioner.cli.config import (
     _set_nested,
     _toml_value,
     build_config,
+    build_legacy_llm_profile,
+    build_translation_llm_profiles,
     load_config_file,
     load_env_overrides,
     save_config_value,
@@ -187,3 +189,327 @@ class TestBuildConfig:
 
         assert validate_subtitle(config) is False
         assert "LLM API key" in capsys.readouterr().err
+
+
+class TestTranslationLLMProfiles:
+    def test_new_role_table_does_not_trigger_legacy_non_llm_migration(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            '[translate.llm.main]\nmodel = "translation-model"\n',
+            encoding="utf-8",
+        )
+
+        config = build_config(config_path=config_file)
+
+        assert config["translate"]["mode"] == "enhanced_llm"
+
+    def test_missing_new_sections_is_exact_legacy_fallback(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            '[llm]\napi_key = "legacy-key"\nmodel = "legacy-model"\n',
+            encoding="utf-8",
+        )
+        config = build_config(config_path=config_file)
+
+        legacy = build_legacy_llm_profile(config)
+        main, review = build_translation_llm_profiles(config)
+
+        assert main == legacy
+        assert review == legacy
+        assert main.profile_id == "cli-legacy"
+        assert main is review
+
+    def test_role_fields_inherit_by_presence_and_support_explicit_clears(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[llm]
+api_key = "legacy-key"
+api_base = "https://legacy.example/v1"
+model = "legacy-model"
+work_context_tokens = 65536
+
+[translate.llm.main]
+api_key = ""
+model = "main-model"
+openai_endpoint = "responses"
+max_output_tokens = 2048
+request_options_json = '{"reasoning":{"effort":"high"}}'
+
+[translate.llm.review]
+model = "review-model"
+max_output_tokens = "auto"
+request_options_json = "{}"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        main, review = build_translation_llm_profiles(
+            build_config(config_path=config_file)
+        )
+
+        assert main.profile_id == "cli-main"
+        assert main.api_key == ""
+        assert main.model == "main-model"
+        assert main.openai_endpoint.value == "responses"
+        assert main.max_output_tokens == 2048
+        assert main.request_options["reasoning"]["effort"] == "high"
+        assert review.profile_id == "cli-review"
+        assert review.api_key == ""
+        assert review.base_url == "https://legacy.example/v1"
+        assert review.model == "review-model"
+        assert review.openai_endpoint.value == "responses"
+        assert review.max_output_tokens is None
+        assert dict(review.request_options) == {}
+
+    def test_source_priority_keeps_role_layers_above_global_cli(
+        self, tmp_path, monkeypatch
+    ):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[llm]
+api_key = "file-global-key"
+model = "file-global"
+
+[translate.llm.main]
+model = "file-main"
+openai_endpoint = "chat_completions"
+
+[translate.llm.review]
+model = "file-review"
+""".strip(),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_MODEL", "env-global")
+        monkeypatch.setenv("VIDEOCAPTIONER_TRANSLATE_LLM_MAIN_MODEL", "env-main")
+        monkeypatch.setenv("VIDEOCAPTIONER_TRANSLATE_LLM_REVIEW_MODEL", "env-review")
+        config = build_config(
+            cli_overrides={
+                "llm": {"model": "cli-global"},
+                "translate": {
+                    "llm": {
+                        "main": {
+                            "openai_endpoint": "responses",
+                            "max_output_tokens": "2048",
+                        },
+                        "review": {"max_output_tokens": "auto"},
+                    }
+                },
+            },
+            config_path=config_file,
+        )
+
+        main, review = build_translation_llm_profiles(config)
+
+        assert config["llm"]["model"] == "cli-global"
+        assert main.model == "env-main"
+        assert main.openai_endpoint.value == "responses"
+        assert main.max_output_tokens == 2048
+        assert review.model == "env-review"
+        assert review.openai_endpoint.value == "responses"
+        assert review.max_output_tokens is None
+
+    def test_lower_priority_role_aliases_are_normalized_before_env_and_cli_merge(
+        self, tmp_path, monkeypatch
+    ):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[llm]
+api_key = "key"
+
+[translate.llm.main]
+base_url = "https://file.example/v1"
+endpoint = "chat_completions"
+
+[translate.llm.review]
+base_url = "https://review-file.example/v1"
+endpoint = "chat_completions"
+""".strip(),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(
+            "VIDEOCAPTIONER_TRANSLATE_LLM_MAIN_API_BASE",
+            "https://env.example/v1",
+        )
+        monkeypatch.setenv(
+            "VIDEOCAPTIONER_TRANSLATE_LLM_MAIN_OPENAI_ENDPOINT", "responses"
+        )
+
+        config = build_config(
+            config_path=config_file,
+            cli_overrides={
+                "translate": {
+                    "llm": {
+                        "review": {
+                            "api_base": "https://cli-review.example/v1",
+                            "openai_endpoint": "responses",
+                        }
+                    }
+                }
+            },
+        )
+        main, review = build_translation_llm_profiles(config)
+
+        assert main.base_url == "https://env.example/v1"
+        assert main.openai_endpoint.value == "responses"
+        assert review.base_url == "https://cli-review.example/v1"
+        assert review.openai_endpoint.value == "responses"
+
+    def test_conflicting_aliases_in_the_same_source_are_rejected(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[translate.llm.main]
+base_url = "https://alias.example/v1"
+api_base = "https://canonical.example/v1"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="config file.*conflicts"):
+            build_config(config_path=config_file)
+
+    def test_role_environment_supports_complete_connection_fields(
+        self, tmp_path, monkeypatch
+    ):
+        config_file = tmp_path / "empty.toml"
+        config_file.write_text("", encoding="utf-8")
+        prefix = "VIDEOCAPTIONER_TRANSLATE_LLM_MAIN_"
+        values = {
+            "API_KEY": "",
+            "API_BASE": "https://anthropic.example/v1",
+            "MODEL": "claude-test",
+            "TRANSPORT": "anthropic-messages",
+            "DIALECT": "anthropic",
+            "WORK_CONTEXT_TOKENS": "32768",
+            "MAX_CONCURRENCY": "2",
+            "OPENAI_ENDPOINT": "chat_completions",
+            "MAX_OUTPUT_TOKENS": "4096",
+            "REQUEST_OPTIONS_JSON": '{"thinking":{"type":"enabled","budget_tokens":1024}}',
+        }
+        for suffix, value in values.items():
+            monkeypatch.setenv(prefix + suffix, value)
+
+        main, _ = build_translation_llm_profiles(
+            build_config(config_path=config_file)
+        )
+
+        assert main.api_key == ""
+        assert main.base_url == "https://anthropic.example/v1"
+        assert main.model == "claude-test"
+        assert main.transport.value == "anthropic-messages"
+        assert main.dialect.value == "anthropic"
+        assert main.work_context_tokens == 32768
+        assert main.max_concurrency == 2
+        assert main.max_output_tokens == 4096
+        assert main.request_options["thinking"]["budget_tokens"] == 1024
+
+    @pytest.mark.parametrize("raw", ["", "[]", "null", "{not-json}"])
+    def test_request_options_json_must_be_a_valid_object(self, raw):
+        config = build_config(
+            cli_overrides={
+                "llm": {"api_key": "key"},
+                "translate": {
+                    "llm": {"main": {"request_options_json": raw}}
+                },
+            }
+        )
+
+        with pytest.raises(ValueError, match="request_options_json"):
+            build_translation_llm_profiles(config)
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "one", True, 1.0, 1.5])
+    def test_max_output_tokens_rejects_invalid_values(self, raw):
+        config = build_config(
+            cli_overrides={
+                "llm": {"api_key": "key"},
+                "translate": {"llm": {"main": {"max_output_tokens": raw}}},
+            }
+        )
+
+        with pytest.raises(ValueError, match="max_output_tokens"):
+            build_translation_llm_profiles(config)
+
+    def test_protected_request_option_is_rejected_during_cli_preflight(self):
+        config = build_config(
+            cli_overrides={
+                "llm": {"api_key": "key"},
+                "translate": {
+                    "llm": {
+                        "main": {"request_options_json": '{"model":"other"}'}
+                    }
+                },
+            }
+        )
+
+        with pytest.raises(ValueError, match="application-controlled"):
+            build_translation_llm_profiles(config)
+
+    def test_native_transport_rejects_responses_endpoint(self):
+        config = build_config(
+            cli_overrides={
+                "translate": {
+                    "llm": {
+                        "main": {
+                            "api_key": "",
+                            "transport": "gemini",
+                            "dialect": "gemini",
+                            "openai_endpoint": "responses",
+                        }
+                    }
+                }
+            }
+        )
+
+        with pytest.raises(ValueError, match="chat_completions"):
+            build_translation_llm_profiles(config)
+
+    def test_explicit_empty_key_is_valid_for_keyless_translation_profile(self):
+        from videocaptioner.cli.validators import validate_translation_llm
+
+        config = build_config(
+            cli_overrides={
+                "translate": {"llm": {"main": {"api_key": ""}}},
+            }
+        )
+
+        assert validate_translation_llm(config, "single_llm") is True
+
+    @pytest.mark.parametrize("mode", ["single_llm", "enhanced_llm"])
+    def test_explicit_empty_legacy_key_is_valid_without_role_sections(
+        self, tmp_path, mode
+    ):
+        from videocaptioner.cli.validators import validate_translation_llm
+
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[llm]
+api_key = ""
+api_base = "http://localhost:11434/v1"
+model = "local-model"
+""".strip(),
+            encoding="utf-8",
+        )
+        config = build_config(config_path=config_file)
+
+        assert validate_translation_llm(config, mode) is True
+
+    def test_single_mode_does_not_validate_unused_review_profile(self):
+        from videocaptioner.cli.validators import validate_translation_llm
+
+        config = build_config(
+            cli_overrides={
+                "llm": {"api_key": "key"},
+                "translate": {
+                    "llm": {
+                        "review": {"request_options_json": '{"model":"forbidden"}'}
+                    }
+                },
+            }
+        )
+
+        assert validate_translation_llm(config, "single_llm") is True
+        assert validate_translation_llm(config, "enhanced_llm") is False

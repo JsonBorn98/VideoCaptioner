@@ -46,11 +46,22 @@ protected tokens。选择“自动修复客观问题”时，模型建议只有�
 
 GUI 可以让两个角色使用不同模型方案，也允许复用同一方案。
 
+### 原语言与目标语言
+
+翻译工作区会始终要求选择**目标语言**，不会提供“自动”目标语言。原语言可保留为
+“自动检测”，或在单 LLM / 增强型双角色 LLM 模式中手动指定；该设置会写入任务快照并
+注入各 LLM 阶段的语言约束。
+
+非 LLM（Bing、Google、DeepLX）模式目前固定由服务端自动检测原语言，界面会禁用手动
+原语言选择并明确提示。这样不会把 LLM 的原语言偏好误解为传统翻译服务已收到的请求参数；
+切换回 LLM 模式后，先前的手动选择仍会保留。
+
 ## CLI
 
 ```bash
 uv run videocaptioner subtitle input.srt \
   --translation-mode enhanced_llm \
+  --source-language auto \
   --target-language en \
   --review-prompt "Pay special attention to product terminology."
 ```
@@ -67,11 +78,15 @@ uv run videocaptioner subtitle input.srt \
 | `--glossary FILE` | 导入项目术语表，仅增强模式 |
 | `--review-prompt TEXT` | 高级校对 Prompt，仅增强模式 |
 | `--reflect` | 单 LLM 反思翻译，仅单 LLM 模式 |
+| `--source-language AUTO\|LANG` | LLM 原语言；可用 `auto`、语言代码或语言名称 |
 | `--target-language CODE` | BCP 47 目标语言代码 |
+| `--main-llm-endpoint` / `--review-llm-endpoint` | 每个角色选择 `chat_completions` 或 `responses` |
+| `--main-llm-max-output-tokens` / review 对应项 | 每个角色使用 `auto` 或正整数输出预算 |
+| `--main-llm-request-options-json` / review 对应项 | 每个角色的 provider-native JSON 参数 |
 
 CLI 和批量任务不会打开人工术语确认页，会强制使用自动确认和客观问题自动修复策略。
-当前 CLI 从 legacy `[llm]` 配置中读取一个模型 profile，并同时绑定给两个角色；
-两个角色的 Prompt、请求和日志阶段仍然独立。需要分别绑定模型时请使用 GUI。
+CLI 支持 `[translate.llm.main]` 与 `[translate.llm.review]` 字段级继承；review 继承 main，
+main 再继承旧 `[llm]`。没有新 section 时仍把 legacy profile 用于两个角色，保持旧行为。
 
 ## 模型方案与 Transport
 
@@ -81,13 +96,14 @@ CLI 和批量任务不会打开人工术语确认页，会强制使用自动确�
 - Base URL 与 API Key
 - 模型名称
 - 工作上下文预算
+- OpenAI Chat/Responses endpoint
+- 最大输出 token 与 provider-native 高级 JSON
 - 最大并发
 
 GUI 的命名模型方案支持 OpenAI-compatible、Anthropic Messages 和 Gemini transport。
-当前 CLI 不读取这些命名方案，而是从 legacy `[llm]` 配置构建
-OpenAI-compatible profile 并同时绑定给两个角色。连接检查会保留 reasoning 模型所需的
-响应预算；运行时遇到 context limit 时，当前任务会降低预算重排，但不会静默修改已保存
-的模型方案。
+CLI 不读取 GUI 的命名方案文件，而是从 `[llm]` 和两个角色 section 构建不可变 profile。
+完整能力测试会分别验证文本和结构化输出；运行时遇到 context limit 时，当前任务会降低
+预算重排，但不会静默修改已保存方案或缩小显式 output cap。
 
 详细配置见 [LLM 模型方案](/config/llm)。
 
@@ -101,8 +117,8 @@ OpenAI-compatible profile 并同时绑定给两个角色。连接检查会保留
 - 按角色和阶段统计的 token usage
 - `llm_requests.jsonl` 请求日志
 
-请求日志包含完整 messages、Prompt 和模型原始响应，可能包含字幕全文。处理敏感内容时，
-请自行控制日志文件的保留和访问权限。
+请求日志默认只包含调用元数据。GUI 显式开启内容日志后会额外保存 Prompt 与最终文本，但
+不会保存原始响应、高级参数或推理内容；旧版本日志可能仍含字幕全文。
 
 ## 失败与回退
 
