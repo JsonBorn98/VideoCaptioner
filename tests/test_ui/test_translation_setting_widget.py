@@ -1,3 +1,4 @@
+import json
 import os
 from importlib import import_module
 
@@ -204,7 +205,6 @@ def test_profile_dialog_round_trips_responses_options_and_output_cap():
         openai_endpoint=OpenAIEndpoint.RESPONSES,
         request_options={
             "reasoning": {"effort": "high"},
-            "$omit": ["temperature"],
         },
         max_output_tokens=8192,
     )
@@ -219,7 +219,6 @@ def test_profile_dialog_round_trips_responses_options_and_output_cap():
     assert restored.max_output_tokens == 8192
     assert thaw_json_object(restored.request_options) == {
         "reasoning": {"effort": "high"},
-        "$omit": ["temperature"],
     }
     dialog.close()
     parent.close()
@@ -271,6 +270,13 @@ def test_advanced_templates_replace_only_json_and_all_are_locally_valid(monkeypa
 
     dialog.close()
     parent.close()
+
+
+def test_advanced_templates_never_add_temperature_options():
+    assert all(
+        "temperature" not in json.dumps(options)
+        for _label, _description, options in _REQUEST_OPTION_TEMPLATES.values()
+    )
 
 
 def test_profile_dialog_advanced_editor_stays_visible_and_accepts_typing():

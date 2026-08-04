@@ -217,7 +217,7 @@ class LLMTranslator(BaseTranslator):
 
         return True, ""
 
-    def _call_text(self, messages: List[dict], *, temperature: float = 1) -> str:
+    def _call_text(self, messages: List[dict]) -> str:
         if self.profile is not None:
             assert self.gateway is not None
             result = self.gateway.complete(
@@ -227,13 +227,12 @@ class LLMTranslator(BaseTranslator):
                         LLMMessage(str(message["role"]), str(message["content"]))
                         for message in messages
                     ),
-                    temperature=temperature,
                     max_output_tokens=self.profile.max_output_tokens,
                     metadata={"stage": "single_llm_translation", "role": "main"},
                 ),
             )
             return result.text.strip()
-        response = call_llm(messages=messages, model=self.model, temperature=temperature)
+        response = call_llm(messages=messages, model=self.model)
         return response.choices[0].message.content.strip()
 
     def _translate_chunk_single(
@@ -254,7 +253,6 @@ class LLMTranslator(BaseTranslator):
                         {"role": "system", "content": single_prompt},
                         {"role": "user", "content": data.original_text},
                     ],
-                    temperature=0.7,
                 )
                 data.translated_text = translated_text
             except Exception as e:

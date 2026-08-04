@@ -20,6 +20,10 @@ from videocaptioner.core.llm.context import (
     set_task_context,
     update_stage,
 )
+from videocaptioner.core.llm.request_options import (
+    RequestOptionsError,
+    validate_structured_output_compatibility,
+)
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
 from videocaptioner.core.split.split import SubtitleSplitter
 from videocaptioner.core.subtitle import clone_subtitle_data
@@ -151,6 +155,24 @@ class SubtitleThread(QThread):
     def _enum(value, enum_type):
         return value if isinstance(value, enum_type) else enum_type(str(value))
 
+    @staticmethod
+    def _validate_enhanced_profile_compatibility(config: SubtitleConfig) -> None:
+        if (
+            not config.need_translate
+            or config.effective_translation_mode() != TranslationMode.ENHANCED_LLM.value
+        ):
+            return
+        for role_name, profile in (
+            ("主翻译", config.main_llm_profile),
+            ("高级校对", config.review_llm_profile),
+        ):
+            if profile is None:
+                continue
+            try:
+                validate_structured_output_compatibility(profile)
+            except RequestOptionsError as exc:
+                raise ValueError(f"{role_name}模型方案无法用于增强翻译：{exc}") from exc
+
     def submit_term_confirmation(self, candidates: Sequence[TermCandidate]) -> None:
         """Resume a manual enhanced task with the user's current selections."""
 
@@ -269,6 +291,7 @@ class SubtitleThread(QThread):
 
             subtitle_config = self.task.subtitle_config
             assert subtitle_config is not None, self.tr("字幕配置为空")
+            self._validate_enhanced_profile_compatibility(subtitle_config)
             if self.task.input_data is not None:
                 asr_data = clone_subtitle_data(self.task.input_data)
             elif self.task.editor_data_json is not None:

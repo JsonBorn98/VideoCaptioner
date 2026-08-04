@@ -37,18 +37,26 @@ def _profile(
     concurrency: int = 1,
     work_context_tokens: int = 16_384,
     max_output_tokens: int | None = None,
+    transport: LLMTransport = LLMTransport.OPENAI_COMPATIBLE,
+    request_options=None,
 ) -> LLMModelProfile:
+    dialect = (
+        ProviderDialect.ANTHROPIC
+        if transport is LLMTransport.ANTHROPIC_MESSAGES
+        else ProviderDialect.GENERIC
+    )
     return LLMModelProfile(
         profile_id=profile_id,
         name=profile_id.title(),
-        transport=LLMTransport.OPENAI_COMPATIBLE,
-        dialect=ProviderDialect.GENERIC,
+        transport=transport,
+        dialect=dialect,
         base_url=f"https://{profile_id}.test/v1",
         api_key="secret",
         model=f"{profile_id}-model",
         work_context_tokens=work_context_tokens,
         max_concurrency=concurrency,
         max_output_tokens=max_output_tokens,
+        request_options=request_options or {},
     )
 
 
@@ -183,6 +191,26 @@ def test_enhanced_planners_and_requests_use_each_role_output_cap(monkeypatch):
     assert gateway.stage_calls["analysis_window"][0].max_output_tokens == 4_000
     assert gateway.stage_calls["translation"][0].max_output_tokens == 4_000
     assert gateway.stage_calls["audit"][0].max_output_tokens == 2_000
+
+
+def test_anthropic_manual_thinking_conflict_is_rejected_before_any_stage():
+    review_profile = _profile(
+        "review",
+        transport=LLMTransport.ANTHROPIC_MESSAGES,
+        request_options={"thinking": {"type": "enabled", "budget_tokens": 4096}},
+    )
+    gateway = ScriptedGateway()
+
+    with pytest.raises(EnhancedTranslationError) as raised:
+        EnhancedTranslationOrchestrator(
+            _config(review_profile=review_profile), gateway=gateway
+        )
+
+    assert raised.value.stage == "profile_validation"
+    assert raised.value.category == "configuration"
+    assert "高级校对模型方案无法用于增强翻译" in str(raised.value)
+    assert "force tool_choice" in str(raised.value)
+    assert gateway.calls == []
 
 
 def test_context_fallback_auto_recalculates_output_reserve_for_lower_context(monkeypatch):
@@ -587,6 +615,67 @@ def test_audit_retries_duplicate_suggestions_for_the_same_subtitle():
     assert result.translations[1] == "新译文"
     assert len(gateway.stage_calls["audit"]) == 2
     assert len(result.audit_report.issues) == 1
+
+
+def test_invalid_audit_shape_degrades_after_retries_and_keeps_local_audit(
+    monkeypatch,
+):
+    secret = "private model explanation must never enter diagnostics"
+    invalid = {"summary": secret, "items": [{"value": 1}, {"value": 2}]}
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "Source"))],
+        audit=[invalid, invalid, invalid],
+    )
+    logged: list[str] = []
+
+    def capture_warning(message, *args):
+        logged.append(message % args if args else message)
+
+    monkeypatch.setattr(orchestrator_module.logger, "warning", capture_warning)
+
+    result = EnhancedTranslationOrchestrator(_config(), gateway=gateway).run(
+        (SubtitleCue(1, "Source"),)
+    )
+
+    assert result.translations == {1: "Source"}
+    assert len(gateway.stage_calls["audit"]) == 3
+    assert result.audit_report.issues[0].category == "source_copied"
+    assert result.audit_report.warnings == (
+        "高级校对对字幕 1 的响应结构无效，已跳过该批次模型审校；"
+        "译文和本地审计结果已保留。",
+    )
+    for request in gateway.stage_calls["audit"][1:]:
+        feedback = request.messages[-1].content
+        assert "response_shape=object(" in feedback
+        assert "summary" in feedback
+        assert "items" in feedback
+        assert "array_lengths=[items:2]" in feedback
+        assert secret not in feedback
+    assert secret not in "\n".join(logged)
+    assert any("已跳过该批次模型审校" in message for message in logged)
+
+
+def test_audit_configuration_error_is_not_degraded():
+    failure = LLMCallError(
+        "invalid provider configuration",
+        category=LLMErrorCategory.CONFIGURATION,
+        retryable=False,
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[failure],
+    )
+
+    with pytest.raises(EnhancedTranslationError) as raised:
+        EnhancedTranslationOrchestrator(_config(), gateway=gateway).run(
+            (SubtitleCue(1, "Source"),)
+        )
+
+    assert raised.value.stage == "audit"
+    assert raised.value.category == LLMErrorCategory.CONFIGURATION.value
+    assert len(gateway.stage_calls["audit"]) == 1
 
 
 def test_manual_audit_does_not_pause_when_there_are_no_findings():

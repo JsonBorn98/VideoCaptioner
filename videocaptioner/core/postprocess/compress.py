@@ -132,7 +132,7 @@ def _agent_loop(candidates: list, cfg: PostprocessConfig) -> dict:
 
     last_result: dict = {}
     for step in range(MAX_STEPS):
-        response = call_llm(messages=messages, model=cfg.llm_model or "", temperature=0.2)
+        response = call_llm(messages=messages, model=cfg.llm_model or "")
         text = response.choices[0].message.content
         parsed = json_repair.loads(text)
         if not isinstance(parsed, dict):

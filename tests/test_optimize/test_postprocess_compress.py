@@ -21,7 +21,8 @@ def _fast_cjk_data():
 def test_compress_writes_back_valid_result(monkeypatch):
     """合法压缩结果应写回中文侧，时间戳不变。"""
 
-    def fake(messages, model, temperature=1, **kwargs):
+    def fake(messages, model, **kwargs):
+        assert "temperature" not in kwargs
         return _resp(json.dumps({"1": "这是一句非常长的"}, ensure_ascii=False))
 
     monkeypatch.setattr("videocaptioner.core.postprocess.compress.call_llm", fake)
@@ -38,7 +39,8 @@ def test_compress_writes_back_valid_result(monkeypatch):
 def test_compress_keeps_original_when_result_too_long(monkeypatch):
     """超长/不合格结果应保留原文并记入失败队列。"""
 
-    def fake(messages, model, temperature=1, **kwargs):
+    def fake(messages, model, **kwargs):
+        assert "temperature" not in kwargs
         # 返回比 target 还长的文本
         return _resp(json.dumps({"1": "这个压缩结果依然非常长根本没有压缩到位一点用都没有"}, ensure_ascii=False))
 
@@ -65,7 +67,8 @@ def test_compress_missing_model_is_skipped():
 def test_compress_segment_count_never_changes(monkeypatch):
     """压缩绝不改变段数。"""
 
-    def fake(messages, model, temperature=1, **kwargs):
+    def fake(messages, model, **kwargs):
+        assert "temperature" not in kwargs
         return _resp(json.dumps({"1": "短"}, ensure_ascii=False))
 
     monkeypatch.setattr("videocaptioner.core.postprocess.compress.call_llm", fake)

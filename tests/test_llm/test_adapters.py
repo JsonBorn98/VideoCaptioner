@@ -113,7 +113,6 @@ def test_openai_compatible_maps_request_and_usage():
         },
     }
     assert completions.kwargs["extra_body"] == {
-        "temperature": 0.25,
         "store": False,
     }
     assert result.text == '{"translation":"ok"}'
@@ -223,7 +222,6 @@ def test_openai_responses_maps_standard_body_text_and_usage():
     assert responses.kwargs["background"] is False
     assert responses.kwargs["max_output_tokens"] == 321
     assert responses.kwargs["extra_body"] == {
-        "temperature": 0.25,
         "store": True,
         "reasoning": {"effort": "high"},
         "text": {
@@ -291,7 +289,7 @@ def test_openai_responses_rejects_non_final_results(response, message):
     assert caught.value.retryable is False
 
 
-def test_openai_chat_omits_temperature_and_passes_unknown_options_via_extra_body():
+def test_openai_chat_accepts_legacy_temperature_omit_and_passes_unknown_options():
     completions = _OpenAICompletions()
     profile = _profile(
         LLMTransport.OPENAI_COMPATIBLE,
@@ -389,6 +387,7 @@ def test_openai_sdk_extra_body_produces_the_expected_final_http_json():
     assert captured["extra_body"] == {"enable_thinking": True}
     assert captured["store"] is False
     assert captured["stream"] is False
+    assert "temperature" not in captured
 
 
 class _Response:
@@ -456,7 +455,6 @@ def test_anthropic_maps_request_cache_hint_and_usage():
             {"role": "assistant", "content": "Prior answer"},
         ],
         "stream": False,
-        "temperature": 0.25,
         "max_tokens": 321,
         "tools": [
             {
@@ -478,7 +476,7 @@ def test_anthropic_maps_request_cache_hint_and_usage():
     assert result.usage.cache_write_tokens == 9
 
 
-def test_anthropic_applies_native_thinking_options_and_omit():
+def test_anthropic_applies_native_thinking_options_with_legacy_temperature_omit():
     session = _Session(_Response({"content": [{"type": "text", "text": "ok"}]}))
     adapter = AnthropicMessagesAdapter(
         _profile(
@@ -495,13 +493,41 @@ def test_anthropic_applies_native_thinking_options_and_omit():
         session=session,
     )
 
-    adapter.complete(_request())
+    adapter.complete(
+        LLMRequest(
+            messages=_request().messages,
+            max_output_tokens=_request().max_output_tokens,
+        )
+    )
 
     payload = session.calls[0][1]["json"]
     assert "temperature" not in payload
     assert payload["max_tokens"] == 900
     assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2048}
     assert payload["output_config"] == {"effort": "high"}
+
+
+def test_anthropic_rejects_manual_thinking_with_forced_structured_tool_before_http():
+    session = _Session(_Response({"content": [{"type": "text", "text": "unused"}]}))
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+            request_options={
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
+            },
+        ),
+        session=session,
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    assert caught.value.category is LLMErrorCategory.CONFIGURATION
+    assert caught.value.retryable is False
+    assert "force tool_choice" in str(caught.value)
+    assert session.calls == []
 
 
 def test_gemini_maps_request_schema_and_usage():
@@ -546,7 +572,6 @@ def test_gemini_maps_request_schema_and_usage():
         ],
         "generationConfig": {
             "candidateCount": 1,
-            "temperature": 0.25,
             "maxOutputTokens": 321,
             "responseMimeType": "application/json",
             "responseSchema": dict(_request().response_schema),

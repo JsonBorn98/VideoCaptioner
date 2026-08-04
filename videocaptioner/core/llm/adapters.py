@@ -22,7 +22,11 @@ from .models import (
     OpenAIEndpoint,
     ProviderDialect,
 )
-from .request_options import RequestOptionsError, merge_profile_request_options
+from .request_options import (
+    RequestOptionsError,
+    merge_profile_request_options,
+    validate_structured_output_compatibility,
+)
 
 
 def _read_attr(value: Any, name: str, default: Any = None) -> Any:
@@ -161,6 +165,16 @@ class LLMAdapter(ABC):
                 retryable=False,
             ) from exc
 
+    def _validate_structured_output_compatibility(self) -> None:
+        try:
+            validate_structured_output_compatibility(self.profile)
+        except RequestOptionsError as exc:
+            raise LLMCallError(
+                str(exc),
+                category=LLMErrorCategory.CONFIGURATION,
+                retryable=False,
+            ) from exc
+
 
 
 class OpenAICompatibleAdapter(LLMAdapter):
@@ -248,7 +262,6 @@ class OpenAICompatibleAdapter(LLMAdapter):
             ],
             "stream": False,
             "n": 1,
-            "temperature": request.temperature,
             "store": False,
         }
         output_cap = self._effective_output_cap(request)
@@ -343,7 +356,6 @@ class OpenAICompatibleAdapter(LLMAdapter):
             ],
             "stream": False,
             "background": False,
-            "temperature": request.temperature,
             "store": False,
         }
         output_cap = self._effective_output_cap(request)
@@ -437,6 +449,8 @@ class AnthropicMessagesAdapter(LLMAdapter):
         self.timeout = timeout
 
     def complete(self, request: LLMRequest) -> LLMResult:
+        if request.response_schema is not None:
+            self._validate_structured_output_compatibility()
         system_text = "\n\n".join(
             item.content for item in request.messages if item.role == "system"
         )
@@ -464,7 +478,6 @@ class AnthropicMessagesAdapter(LLMAdapter):
             "system": system,
             "messages": messages,
             "stream": False,
-            "temperature": request.temperature,
             "max_tokens": output_cap or 4096,
         }
         if request.response_schema is not None:
@@ -640,7 +653,6 @@ class GeminiAdapter(LLMAdapter):
         ]
         generation_config: dict[str, Any] = {
             "candidateCount": 1,
-            "temperature": request.temperature,
         }
         output_cap = (
             self.profile.max_output_tokens

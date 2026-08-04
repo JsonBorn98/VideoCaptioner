@@ -85,7 +85,6 @@ def _split_with_agent_loop(
         response = call_llm(
             messages=messages,
             model=model,
-            temperature=0.1,
             timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
         )
 

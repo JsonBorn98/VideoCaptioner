@@ -47,6 +47,22 @@ def _profile(profile_id: str) -> LLMModelProfile:
     )
 
 
+def _anthropic_thinking_profile(profile_id: str) -> LLMModelProfile:
+    return LLMModelProfile(
+        profile_id=profile_id,
+        name=profile_id.title(),
+        transport=LLMTransport.ANTHROPIC_MESSAGES,
+        dialect=ProviderDialect.ANTHROPIC,
+        base_url=f"https://{profile_id}.test/v1",
+        api_key="secret",
+        model=f"{profile_id}-model",
+        max_concurrency=1,
+        request_options={
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+        },
+    )
+
+
 def _source(text: str = "A uniquely identifiable source line.") -> ASRData:
     return ASRData([ASRDataSeg(text, 0, 1000)])
 
@@ -157,6 +173,41 @@ def test_enhanced_mode_uses_runner_sets_artifacts_and_saves_initial_subtitle(
     assert captured["config"].review_role.user_prompt == "review prompt"
     assert captured["kwargs"]["cancellation"] is thread.cancellation
     assert captured["kwargs"]["confirm_audit"] is None
+
+
+def test_enhanced_thinking_conflict_fails_before_split_or_translation(
+    tmp_path, monkeypatch, qapp
+):
+    config = _config(TranslationMode.ENHANCED_LLM)
+    config.need_split = True
+    config.main_llm_profile = _profile("main")
+    config.review_llm_profile = _anthropic_thinking_profile("review")
+    task = _task(tmp_path, config)
+
+    monkeypatch.setattr(
+        thread_module,
+        "SubtitleSplitter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("profile preflight must run before subtitle splitting")
+        ),
+    )
+    monkeypatch.setattr(
+        thread_module,
+        "run_enhanced_translation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("profile preflight must run before enhanced translation")
+        ),
+    )
+    thread = SubtitleThread(task)
+    signals = _signals(thread)
+
+    thread.run()
+
+    assert signals["finished"] == []
+    assert len(signals["error"]) == 1
+    assert "高级校对模型方案无法用于增强翻译" in signals["error"][0]
+    assert "force tool_choice" in signals["error"][0]
+    assert not Path(task.output_path or "").exists()
 
 
 def test_standalone_manual_audit_passes_blocking_confirmation_callback(

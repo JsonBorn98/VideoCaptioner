@@ -460,7 +460,7 @@ source_language = "auto"
 [translate.llm.main]
 openai_endpoint = "responses"
 max_output_tokens = 8192
-request_options_json = '{"reasoning":{"effort":"high"},"$omit":["temperature"]}'
+request_options_json = '{"reasoning":{"effort":"high"}}'
 
 [translate.llm.review]
 model = "review-model"

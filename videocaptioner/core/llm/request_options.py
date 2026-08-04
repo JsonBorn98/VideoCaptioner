@@ -97,7 +97,6 @@ _THINKING_BUDGET_PATHS: tuple[JSONPath, ...] = (
 @dataclass(frozen=True)
 class PreparedRequestOptions:
     body: dict[str, Any]
-    omit_temperature: bool
 
 
 def _protected_paths(profile: LLMModelProfile) -> tuple[JSONPath, ...]:
@@ -116,6 +115,27 @@ def _temperature_path(profile: LLMModelProfile) -> JSONPath:
     if profile.transport is LLMTransport.GEMINI:
         return ("generationConfig", "temperature")
     return ("temperature",)
+
+
+def _temperature_option_paths(profile: LLMModelProfile) -> tuple[JSONPath, ...]:
+    """Return known provider-option paths that would control sampling temperature.
+
+    ``request_options`` is a provider-body patch.  OpenAI-compatible services also
+    commonly use these extension objects for provider-native parameters, so do not
+    allow them to reintroduce the retired sampling control there either.  This is
+    deliberately path-based rather than recursive: a response JSON schema may
+    legitimately contain a business property named ``temperature``.
+    """
+
+    paths = [_temperature_path(profile)]
+    if profile.transport is LLMTransport.OPENAI_COMPATIBLE:
+        paths.extend(
+            (
+                ("extra_body", "temperature"),
+                ("chat_template_kwargs", "temperature"),
+            )
+        )
+    return tuple(paths)
 
 
 def _path_value(value: Mapping[str, Any], path: Sequence[str]) -> tuple[bool, Any]:
@@ -178,6 +198,15 @@ def prepare_profile_request_options(profile: LLMModelProfile) -> PreparedRequest
     ):
         raise RequestOptionsError("request_options.generationConfig must be an object")
 
+    for path in _temperature_option_paths(profile):
+        exists, _ = _path_value(options, path)
+        if exists:
+            raise RequestOptionsError(
+                "request_options."
+                + ".".join(path)
+                + " is not supported: VideoCaptioner never sends temperature; remove it"
+            )
+
     for path in _protected_paths(profile):
         exists, _ = _path_value(options, path)
         if exists:
@@ -187,17 +216,10 @@ def prepare_profile_request_options(profile: LLMModelProfile) -> PreparedRequest
                 + " is application-controlled and cannot be overridden"
             )
 
-    omit_temperature = "temperature" in omit_value
-    if omit_temperature:
-        temperature_path = _temperature_path(profile)
-        exists, _ = _path_value(options, temperature_path)
-        if exists:
-            raise RequestOptionsError(
-                "request_options.$omit removes temperature, but request_options."
-                + ".".join(temperature_path)
-                + " also provides it"
-            )
-    return PreparedRequestOptions(options, omit_temperature)
+    # ``$omit: ["temperature"]`` was emitted by previous built-in templates.
+    # Temperature is no longer generated in the first place, so retain the syntax
+    # only as a harmless migration compatibility marker.
+    return PreparedRequestOptions(options)
 
 
 def validate_profile_request_options(profile: LLMModelProfile) -> None:
@@ -206,11 +228,33 @@ def validate_profile_request_options(profile: LLMModelProfile) -> None:
     prepare_profile_request_options(profile)
 
 
+def validate_structured_output_compatibility(profile: LLMModelProfile) -> None:
+    """Reject provider options that cannot coexist with app-owned schema controls.
+
+    Anthropic Messages implements structured output with a forced tool choice.
+    Anthropic's manual extended-thinking mode only permits automatic tool
+    selection, so sending both settings would make the request invalid.  Keep
+    the profile usable for ordinary text calls and reject only schema requests.
+    """
+
+    if profile.transport is not LLMTransport.ANTHROPIC_MESSAGES:
+        return
+    prepared = prepare_profile_request_options(profile)
+    exists, thinking_type = _path_value(prepared.body, ("thinking", "type"))
+    if exists and thinking_type == "enabled":
+        raise RequestOptionsError(
+            "Anthropic Messages structured output is incompatible with "
+            "request_options.thinking.type='enabled' because VideoCaptioner must "
+            "force tool_choice. Disable manual thinking for this profile or use a "
+            "different structured-output profile."
+        )
+
+
 def merge_profile_request_options(
     profile: LLMModelProfile,
     application_body: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Apply ``$omit`` and a top-level shallow patch, then restore protected paths."""
+    """Apply a top-level shallow patch, then restore protected paths."""
 
     prepared = prepare_profile_request_options(profile)
     result = deepcopy(dict(application_body))
@@ -220,8 +264,6 @@ def merge_profile_request_options(
         if exists:
             protected_values.append((path, deepcopy(item)))
 
-    if prepared.omit_temperature:
-        _delete_path(result, _temperature_path(profile))
     result.update(deepcopy(prepared.body))
 
     for path, item in protected_values:
@@ -230,6 +272,15 @@ def merge_profile_request_options(
         exists, actual = _path_value(result, path)
         if not exists or actual != expected:  # pragma: no cover - defensive invariant
             raise AssertionError(f"failed to restore protected request path: {'.'.join(path)}")
+
+    # Defend against stale call sites that still put temperature in an application
+    # body.  Validation prevents a profile patch from adding it back; do this after
+    # both merges so the final payload cannot contain any known sampling path.
+    for path in _temperature_option_paths(profile):
+        _delete_path(result, path)
+        exists, _ = _path_value(result, path)
+        if exists:  # pragma: no cover - defensive invariant
+            raise AssertionError(f"failed to remove temperature request path: {'.'.join(path)}")
     return result
 
 
@@ -250,4 +301,5 @@ __all__ = [
     "merge_profile_request_options",
     "prepare_profile_request_options",
     "validate_profile_request_options",
+    "validate_structured_output_compatibility",
 ]

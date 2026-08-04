@@ -289,7 +289,6 @@ def _default_rewriter(model: str) -> SemanticRewriter:
                 },
             ],
             model=model,
-            temperature=0.2,
             response_format={"type": "json_object"},
             timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
         )
@@ -324,7 +323,6 @@ def _default_reviewer(model: str) -> SemanticReviewer:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             model=model,
-            temperature=0,
             response_format={"type": "json_object"},
             timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
         )

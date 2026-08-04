@@ -86,7 +86,6 @@ def test_profile_single_llm_forwards_configured_max_output_tokens():
             {"role": "system", "content": "translate faithfully"},
             {"role": "user", "content": "hello"},
         ],
-        temperature=0.7,
     )
 
     assert result == "translated text"
@@ -95,7 +94,6 @@ def test_profile_single_llm_forwards_configured_max_output_tokens():
     assert used_profile is profile
     assert cancelled is None
     assert request.max_output_tokens == 777
-    assert request.temperature == 0.7
     assert request.metadata == {"stage": "single_llm_translation", "role": "main"}
 
 

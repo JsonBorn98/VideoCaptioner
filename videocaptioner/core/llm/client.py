@@ -2,6 +2,7 @@
 
 import os
 import threading
+from collections.abc import Mapping
 from typing import Any, List, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -132,6 +133,24 @@ def before_sleep_log(retry_state: RetryCallState) -> None:
     )
 
 
+def _sanitize_legacy_extra_body(kwargs: dict[str, Any]) -> None:
+    """Remove retired sampling controls without mutating the caller's mapping."""
+
+    extra_body = kwargs.get("extra_body")
+    if not isinstance(extra_body, Mapping):
+        return
+
+    sanitized = dict(extra_body)
+    sanitized.pop("temperature", None)
+    for container_name in ("extra_body", "chat_template_kwargs"):
+        container = sanitized.get(container_name)
+        if isinstance(container, Mapping):
+            container = dict(container)
+            container.pop("temperature", None)
+            sanitized[container_name] = container
+    kwargs["extra_body"] = sanitized
+
+
 @retry(
     stop=stop_after_attempt(10),
     wait=wait_random_exponential(multiplier=1, min=5, max=60),
@@ -144,14 +163,18 @@ def _call_llm_api(
     temperature: float = 1,
     **kwargs: Any,
 ) -> Any:
-    """实际调用 LLM API（带重试）"""
+    """实际调用 LLM API（带重试）。
+
+    ``temperature`` is retained only for compatibility with legacy callers.  Modern
+    providers increasingly reject it, so it must never be included in the SDK call.
+    """
     client = get_llm_client()
+    _sanitize_legacy_extra_body(kwargs)
 
     try:
         response = client.chat.completions.create(
             model=model,
             messages=messages,  # pyright: ignore[reportArgumentType]
-            temperature=temperature,
             **kwargs,
         )
     except BaseException:
@@ -171,9 +194,12 @@ def call_llm(
     temperature: float = 1,
     **kwargs: Any,
 ) -> Any:
-    """Call LLM API with automatic caching."""
+    """Call LLM API with automatic caching.
+
+    ``temperature`` remains an ignored compatibility parameter for external callers.
+    """
     try:
-        response = _call_llm_api(messages, model, temperature, **kwargs)
+        response = _call_llm_api(messages, model, **kwargs)
     except LLMCallError:
         raise
     except Exception as exc:

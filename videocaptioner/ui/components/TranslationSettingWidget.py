@@ -61,20 +61,17 @@ _REQUEST_OPTION_TEMPLATES: dict[str, tuple[str, str, dict]] = {
     "gpt-chat": (
         "GPT · Chat",
         "OpenAI-compatible Chat Completions 推理强度示例。",
-        {"reasoning_effort": "high", "$omit": ["temperature"]},
+        {"reasoning_effort": "high"},
     ),
     "gpt-responses": (
         "GPT · Responses",
         "标准 OpenAI Responses 推理强度示例。",
-        {"reasoning": {"effort": "high"}, "$omit": ["temperature"]},
+        {"reasoning": {"effort": "high"}},
     ),
     "claude-manual": (
         "Claude · 手动思考",
         "Anthropic Messages 手动 thinking budget 示例。",
-        {
-            "thinking": {"type": "enabled", "budget_tokens": 4096},
-            "$omit": ["temperature"],
-        },
+        {"thinking": {"type": "enabled", "budget_tokens": 4096}},
     ),
     "claude-adaptive": (
         "Claude · 自适应思考",
@@ -82,7 +79,6 @@ _REQUEST_OPTION_TEMPLATES: dict[str, tuple[str, str, dict]] = {
         {
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "high"},
-            "$omit": ["temperature"],
         },
     ),
     "gemini": (
@@ -93,15 +89,12 @@ _REQUEST_OPTION_TEMPLATES: dict[str, tuple[str, str, dict]] = {
     "qwen": (
         "Qwen",
         "OpenAI-compatible 服务的 provider-native extra_body 示例。",
-        {"extra_body": {"enable_thinking": True}, "$omit": ["temperature"]},
+        {"extra_body": {"enable_thinking": True}},
     ),
     "glm": (
         "GLM",
         "OpenAI-compatible GLM provider-native thinking 示例。",
-        {
-            "extra_body": {"thinking": {"type": "enabled"}},
-            "$omit": ["temperature"],
-        },
+        {"extra_body": {"thinking": {"type": "enabled"}}},
     ),
     "deepseek": (
         "DeepSeek",
@@ -110,7 +103,6 @@ _REQUEST_OPTION_TEMPLATES: dict[str, tuple[str, str, dict]] = {
             "extra_body": {
                 "thinking": {"type": "enabled", "budget_tokens": 4096}
             },
-            "$omit": ["temperature"],
         },
     ),
     "kimi": (
@@ -441,7 +433,7 @@ class _ProfileDialog(MessageBoxBase):
         confirm = MessageBox(
             self.tr("应用高级参数模板"),
             self.tr(
-                "模板“{label}”会替换当前高级 JSON（包括 $omit），但不会修改连接、"
+                "模板“{label}”会替换当前高级 JSON，但不会修改连接、"
                 "模型或接口格式。继续吗？"
             ).format(label=label),
             self,

@@ -29,7 +29,6 @@ from pydantic import BaseModel
 
 BATCH_SIZE = 10
 MODEL = "gpt-5"
-TEMPERATURE = 1
 
 # Technical terms that should not be translated
 PRESERVE_TERMS = [
@@ -171,7 +170,6 @@ Return EXACTLY {len(texts)} translations with matching indices."""
             {"role": "user", "content": prompt},
         ],
         response_format=TranslationBatch,
-        temperature=TEMPERATURE,
     )
 
     result = completion.choices[0].message.parsed

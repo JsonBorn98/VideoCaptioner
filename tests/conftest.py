@@ -200,10 +200,10 @@ def mock_llm_client(monkeypatch):
     def fake_call_llm(
         messages: List[Dict[str, Any]],
         model: str,
-        temperature: float = 1,
         **kwargs: Any,
     ) -> SimpleNamespace:
-        del model, temperature, kwargs
+        assert "temperature" not in kwargs
+        del model, kwargs
         user_content = _last_user_content(messages)
 
         if "Please use multiple <br> tags" in user_content:

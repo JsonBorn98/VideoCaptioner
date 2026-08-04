@@ -12,6 +12,7 @@ from videocaptioner.core.llm.request_options import (
     RequestOptionsError,
     merge_profile_request_options,
     validate_profile_request_options,
+    validate_structured_output_compatibility,
 )
 
 
@@ -151,7 +152,7 @@ def test_every_documented_protected_path_is_rejected(transport, endpoint, path):
             {
                 "labels": {"contents": "nested"},
                 "generationConfig": {
-                    "temperature": 0.4,
+                    "topP": 0.4,
                     "thinkingConfig": {"thinkingBudget": 1024},
                 },
             },
@@ -191,14 +192,14 @@ def test_responses_shallow_merge_restores_only_application_text_format():
         {"$omit": ["temperature"], "temperature": 0.1},
     ],
 )
-def test_omit_rejects_invalid_and_self_contradictory_configuration(options):
+def test_omit_rejects_invalid_and_temperature_configuration(options):
     profile = _profile(LLMTransport.OPENAI_COMPATIBLE, options=options)
 
     with pytest.raises(RequestOptionsError):
         validate_profile_request_options(profile)
 
 
-def test_gemini_omit_temperature_uses_native_nested_path():
+def test_legacy_omit_temperature_is_a_noop_while_merge_defensively_removes_it():
     profile = _profile(
         LLMTransport.GEMINI,
         options={"$omit": ["temperature"], "generationConfig": {"topP": 0.7}},
@@ -212,6 +213,80 @@ def test_gemini_omit_temperature_uses_native_nested_path():
     assert merged == {"generationConfig": {"topP": 0.7, "candidateCount": 1}}
 
 
+@pytest.mark.parametrize(
+    ("transport", "endpoint", "options", "path"),
+    [
+        (
+            LLMTransport.OPENAI_COMPATIBLE,
+            OpenAIEndpoint.CHAT_COMPLETIONS,
+            {"temperature": 0.2},
+            "temperature",
+        ),
+        (
+            LLMTransport.OPENAI_COMPATIBLE,
+            OpenAIEndpoint.RESPONSES,
+            {"extra_body": {"temperature": 0.2}},
+            "extra_body.temperature",
+        ),
+        (
+            LLMTransport.OPENAI_COMPATIBLE,
+            OpenAIEndpoint.CHAT_COMPLETIONS,
+            {"chat_template_kwargs": {"temperature": 0.2}},
+            "chat_template_kwargs.temperature",
+        ),
+        (
+            LLMTransport.ANTHROPIC_MESSAGES,
+            OpenAIEndpoint.CHAT_COMPLETIONS,
+            {"temperature": 0.2},
+            "temperature",
+        ),
+        (
+            LLMTransport.GEMINI,
+            OpenAIEndpoint.CHAT_COMPLETIONS,
+            {"generationConfig": {"temperature": 0.2}},
+            "generationConfig.temperature",
+        ),
+    ],
+)
+def test_sampling_temperature_options_are_rejected_at_native_request_paths(
+    transport, endpoint, options, path
+):
+    profile = _profile(transport, endpoint=endpoint, options=options)
+
+    with pytest.raises(RequestOptionsError, match=r"never sends temperature") as caught:
+        validate_profile_request_options(profile)
+
+    assert f"request_options.{path}" in str(caught.value)
+
+
+def test_merge_removes_stale_temperature_without_touching_response_schema_property():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        endpoint=OpenAIEndpoint.RESPONSES,
+        options={"$omit": ["temperature"], "text": {"verbosity": "low"}},
+    )
+    application = {
+        "model": "model",
+        "temperature": 0.2,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"temperature": {"type": "number"}},
+                },
+            }
+        },
+    }
+
+    merged = merge_profile_request_options(profile, application)
+
+    assert "temperature" not in merged
+    assert merged["text"]["format"]["schema"]["properties"] == {
+        "temperature": {"type": "number"}
+    }
+
+
 def test_literal_extra_body_is_not_treated_as_an_sdk_control_layer():
     profile = _profile(
         LLMTransport.OPENAI_COMPATIBLE,
@@ -221,3 +296,33 @@ def test_literal_extra_body_is_not_treated_as_an_sdk_control_layer():
     merged = merge_profile_request_options(profile, {"model": "model"})
 
     assert merged["extra_body"] == {"enable_thinking": True}
+
+
+def test_anthropic_manual_thinking_is_rejected_only_for_structured_output():
+    profile = _profile(
+        LLMTransport.ANTHROPIC_MESSAGES,
+        options={"thinking": {"type": "enabled", "budget_tokens": 4096}},
+    )
+
+    validate_profile_request_options(profile)
+    with pytest.raises(RequestOptionsError, match=r"force tool_choice") as caught:
+        validate_structured_output_compatibility(profile)
+
+    assert "request_options.thinking.type='enabled'" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("transport", "options"),
+    [
+        (LLMTransport.ANTHROPIC_MESSAGES, {"thinking": {"type": "disabled"}}),
+        (LLMTransport.OPENAI_COMPATIBLE, {"reasoning_effort": "high"}),
+        (
+            LLMTransport.GEMINI,
+            {"generationConfig": {"thinkingConfig": {"thinkingBudget": 4096}}},
+        ),
+    ],
+)
+def test_structured_output_compatibility_keeps_supported_reasoning_options(
+    transport, options
+):
+    validate_structured_output_compatibility(_profile(transport, options=options))

@@ -16,7 +16,8 @@ def _resp(text: str) -> SimpleNamespace:
 def test_optimizer_injects_extra_rules_into_system_prompt(monkeypatch):
     captured = {}
 
-    def fake_call_llm(messages, model, temperature=1, **kwargs):
+    def fake_call_llm(messages, model, **kwargs):
+        assert "temperature" not in kwargs
         captured["system"] = messages[0]["content"]
         return _resp(json.dumps({"1": "你好"}, ensure_ascii=False))
 

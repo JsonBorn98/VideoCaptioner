@@ -50,7 +50,6 @@ class SubtitleOptimizer:
             batch_num: 每批处理的字幕数量
             model: LLM模型名称
             custom_prompt: 自定义优化提示词
-            temperature: LLM温度参数
             update_callback: 进度更新回调函数
             extra_rules: 由可选规则型后处理注入的额外输出约束
         """
@@ -246,7 +245,6 @@ class SubtitleOptimizer:
             response = call_llm(
                 messages=messages,
                 model=self.model,
-                temperature=0.2,
             )
 
             result_text = response.choices[0].message.content

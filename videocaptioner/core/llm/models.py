@@ -275,6 +275,7 @@ class LLMMessage:
 @dataclass(frozen=True)
 class LLMRequest:
     messages: Sequence[LLMMessage]
+    # Deprecated compatibility input. Adapters intentionally never serialize it.
     temperature: float = 0.2
     max_output_tokens: Optional[int] = None
     response_schema: Optional[Mapping[str, Any]] = None

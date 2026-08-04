@@ -69,19 +69,17 @@ max_output_tokens: int | None = None  # None 表示 auto
 
 ```text
 1. 由 LLMRequest 构造应用请求
-2. 执行 request_options.$omit
-3. 顶层浅合并 request_options
-4. 重新写入并断言应用保护字段
-5. 发送最终请求
+2. 顶层浅合并 request_options
+3. 重新写入并断言应用保护字段
+4. 发送最终请求
 ```
 
 规则：
 
 - 未知且非保护字段原样透传，由 provider 的真实请求验证。
 - 顶层对象浅合并；嵌套对象和数组整体替换，不做通用递归合并。
-- `$omit` 是仅供本地处理的保留键，不发送给 provider。
-- 第一版 `$omit` 只接受 `"temperature"`；在各 transport 中删除对应原生字段。
-- `$omit` 包含 `temperature` 时，请求补丁不得同时在该 transport 的原生位置重新提供 temperature；这种自相矛盾配置直接报错。
+- 应用不再向任何 transport 发送 `temperature`；高级 JSON 也不得在各 transport 的原生位置重新加入它。
+- 为兼容已有方案，旧的 `$omit: ["temperature"]` 会作为无操作接受，且不会发送给 provider。
 - 保护字段冲突在保存、CLI 预检和调用前均明确报错，不忽略、不静默覆盖。
 - URL、Authorization、headers、query 和 timeout 不属于请求体 JSON 配置面。
 
@@ -95,16 +93,16 @@ max_output_tokens: int | None = None  # None 表示 auto
 
 允许用户配置采样参数、`reasoning`、`reasoning_effort`、`thinking`、`output_config`、`extra_body`、`chat_template_kwargs`、`service_tier`、`metadata`、`user` 和 `store` 等非保护字段。
 
-Gemini 的 `generationConfig` 仍按顶层浅合并规则整体替换；适配器随后恢复其中受保护的输出 token 与结构化输出子字段。若用户只希望删除应用温度，使用顶层 `$omit`。
+Gemini 的 `generationConfig` 仍按顶层浅合并规则整体替换；适配器随后恢复其中受保护的输出 token 与结构化输出子字段，并移除 `temperature` 子字段。
 
 保护规则检查**精确 JSON path**，不递归拒绝其他位置的同名普通字段：
 
 | Transport / endpoint | 禁止的 request option path |
 |---|---|
-| OpenAI Chat | `model`、`messages`、`stream`、`n`、`tools`、`tool_choice`、`parallel_tool_calls`、`functions`、`function_call`、`max_tokens`、`max_completion_tokens`、`response_format` |
-| OpenAI Responses | `model`、`input`、`instructions`、`stream`、`background`、`tools`、`tool_choice`、`parallel_tool_calls`、`max_tool_calls`、`previous_response_id`、`conversation`、`prompt`、`max_output_tokens`、`text.format` |
-| Anthropic Messages | `model`、`messages`、`system`、`stream`、`max_tokens`、`tools`、`tool_choice` |
-| Gemini | `model`、`contents`、`systemInstruction`、`cachedContent`、`tools`、`toolConfig`、`generationConfig.candidateCount`、`generationConfig.maxOutputTokens`、`generationConfig.responseMimeType`、`generationConfig.responseSchema` |
+| OpenAI Chat | `model`、`messages`、`stream`、`n`、`tools`、`tool_choice`、`parallel_tool_calls`、`functions`、`function_call`、`max_tokens`、`max_completion_tokens`、`response_format`、`temperature` |
+| OpenAI Responses | `model`、`input`、`instructions`、`stream`、`background`、`tools`、`tool_choice`、`parallel_tool_calls`、`max_tool_calls`、`previous_response_id`、`conversation`、`prompt`、`max_output_tokens`、`text.format`、`temperature` |
+| Anthropic Messages | `model`、`messages`、`system`、`stream`、`max_tokens`、`tools`、`tool_choice`、`temperature` |
+| Gemini | `model`、`contents`、`systemInstruction`、`cachedContent`、`tools`、`toolConfig`、`generationConfig.candidateCount`、`generationConfig.maxOutputTokens`、`generationConfig.responseMimeType`、`generationConfig.responseSchema`、`generationConfig.temperature` |
 
 Responses 的 `text` 和 Gemini 的 `generationConfig` 可以包含其他非保护子字段。适配器先接受用户的整个对象，再恢复上表中的保护子字段。例如用户可以设置 `text.verbosity` 或 `generationConfig.thinkingConfig`，但不能替换 `text.format` 或 `generationConfig.responseSchema`。
 
@@ -156,7 +154,7 @@ JSON 验证边界固定为：UTF-8 编码后最多 64 KiB、最大嵌套深度 1
 - 最大输出 token：`自动` 或正整数；
 - 可折叠高级 JSON 编辑器，保存前定位 JSON/保护字段错误；
 - 一次性模板：空白、GPT、Claude、Gemini、Qwen、GLM、DeepSeek、Kimi、Doubao；
-- 模板仅替换高级 JSON 与 `$omit`，应用前确认，不修改连接、模型或 endpoint；模板更新不影响已有 profile；
+- 模板仅替换高级 JSON，应用前确认，不修改连接、模型或 endpoint；模板更新不影响已有 profile；
 - “文本能力”和“结构化输出能力”两项探测结果。
 
 探测规则：
@@ -171,10 +169,10 @@ JSON 验证边界固定为：UTF-8 编码后最多 64 KiB、最大嵌套深度 1
 | 模板 | 初始 JSON 要点 |
 |---|---|
 | 空白 | `{}` |
-| GPT Chat | `reasoning_effort` + `$omit: ["temperature"]` |
-| GPT Responses | `reasoning.effort` + `$omit: ["temperature"]` |
-| Claude 手动思考 | `thinking.enabled` + `budget_tokens` + `$omit` |
-| Claude 自适应思考 | `thinking.adaptive` + `output_config.effort` + `$omit` |
+| GPT Chat | `reasoning_effort` |
+| GPT Responses | `reasoning.effort` |
+| Claude 手动思考 | `thinking.enabled` + `budget_tokens` |
+| Claude 自适应思考 | `thinking.adaptive` + `output_config.effort` |
 | Gemini | `generationConfig.thinkingConfig.thinkingBudget` |
 | Qwen | provider-native `extra_body.enable_thinking` 示例 |
 | GLM / DeepSeek | provider-native `extra_body.thinking` / budget 示例 |
@@ -272,7 +270,7 @@ JSON 验证边界固定为：UTF-8 编码后最多 64 KiB、最大嵌套深度 1
 
 ### Phase 2：适配层
 
-- [x] 实现共享的 options 校验、`$omit`、保护字段和浅合并。
+- [x] 实现共享的 options 校验、保护字段和浅合并；保留旧 `$omit: ["temperature"]` 作为兼容性无操作。
 - [x] Chat 使用 `max_completion_tokens` 并支持高级参数与 `store=false`。
 - [x] 新增标准 OpenAI Responses adapter 分支与响应/usage 解析。
 - [x] Anthropic/Gemini 支持 provider-native options。
@@ -343,7 +341,7 @@ uv run pyright
 2. CLI 无新配置时行为不变；main/review 继承、参数、环境变量和旧 `[llm]` fallback 有测试证明。
 3. 两种翻译模式均通过 profile gateway 使用正确 endpoint/options/token cap。
 4. Responses 请求使用标准 `input`/`text.format`，并从 message/output_text 提取最终文本和 reasoning usage。
-5. 保护字段、`$omit`、浅合并、未知字段透传及 `store` 规则有逐 transport payload 测试。
+5. 保护字段、无 `temperature` 请求、浅合并、未知字段透传及 `store` 规则有逐 transport payload 测试。
 6. 数值 output cap 与 enhanced planner reserve 一致；auto 保持既有行为。
 7. 文本/结构化探测可独立成功或失败，不修改 profile、不阻止模式。
 8. 默认日志没有字幕、回答、raw response、options 或 reasoning；opt-in 也绝不包含后三者。
@@ -358,7 +356,7 @@ uv run pyright
 | 2 | 通过 | CLI legacy fallback、main/review 逐层继承、alias 规范化、环境变量与参数优先级测试通过。 |
 | 3 | 通过 | single/enhanced 模式的 profile、endpoint、options 与独立角色 token cap 回归测试通过。 |
 | 4 | 通过 | Responses 标准 payload、全部 message/output_text 聚合、状态与 usage 解析测试通过。 |
-| 5 | 通过 | 四 transport 的保护路径、`$omit`、浅合并、未知字段和 `store` payload 测试通过。 |
+| 5 | 通过 | 四 transport 的保护路径、无 `temperature` 请求、浅合并、未知字段和 `store` payload 测试通过。 |
 | 6 | 通过 | single 数值/auto cap 及 enhanced 分角色 reserve、context fallback 测试通过。 |
 | 7 | 通过 | 文本与结构化探测的独立结果、预算、profile 不变性和 GUI 展示测试通过。 |
 | 8 | 通过 | gateway/legacy client 默认与 opt-in 隐私测试通过；并发关联、失败清理和错误正文脱敏已覆盖。 |

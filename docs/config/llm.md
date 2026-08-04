@@ -57,7 +57,7 @@ VideoCaptioner 会通过对应 adapter 统一请求和 usage 记录，但不会�
 高级 JSON 是最终请求体的附加补丁，不是完整请求体。未知且非保护字段会原样发送，因而可
 配置不同服务的 `reasoning`、`reasoning_effort`、`thinking`、`output_config`、
 `generationConfig.thinkingConfig`、`extra_body` 等参数。对象按顶层浅合并；嵌套对象整体
-替换。`$omit: ["temperature"]` 可删除应用默认温度，`$omit` 不会发送给服务端。
+替换。应用不会在请求中附加 `temperature`；高级 JSON 也不能重新加入该参数。
 
 应用始终保护模型、消息/input、工具、结构化输出和输出 token 字段。尝试覆盖这些字段会在
 保存时直接报错。模板只提供静态起点，不保证具体 provider/model 接受；请以能力测试和服务商
@@ -102,7 +102,7 @@ uv run videocaptioner subtitle input.srt \
 [translate.llm.main]
 openai_endpoint = "responses"
 max_output_tokens = 8192
-request_options_json = '{"reasoning":{"effort":"high"},"$omit":["temperature"]}'
+request_options_json = '{"reasoning":{"effort":"high"}}'
 
 [translate.llm.review]
 model = "review-model"

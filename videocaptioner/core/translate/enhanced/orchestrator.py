@@ -7,12 +7,17 @@ import json
 import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import replace
+from itertools import islice
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
 
 import json_repair
 
 from videocaptioner.core.llm import LLMGateway, LLMMessage, LLMRequest, LLMUsage
 from videocaptioner.core.llm.models import LLMCallError, LLMErrorCategory
+from videocaptioner.core.llm.request_options import (
+    RequestOptionsError,
+    validate_structured_output_compatibility,
+)
 from videocaptioner.core.utils.logger import setup_logger
 
 from .audit import apply_review_fixes, local_audit_issues
@@ -138,6 +143,46 @@ def _safe_id_value_summary(value: Any) -> str:
         return f"float(value={value!r})"
     if isinstance(value, (list, tuple, set, frozenset, Mapping)):
         return f"{type(value).__name__}(length={len(value)})"
+    return type(value).__name__
+
+
+def _safe_json_key_summary(key: Any) -> str:
+    if (
+        isinstance(key, str)
+        and 0 < len(key) <= 64
+        and key.isascii()
+        and all(character.isalnum() or character in {"_", "-"} for character in key)
+    ):
+        return key
+    if isinstance(key, str):
+        return f"<str-key:length={len(key)}>"
+    return f"<{type(key).__name__}-key>"
+
+
+def _safe_json_shape(value: Any) -> str:
+    """Describe parsed JSON structure without echoing model-controlled values."""
+
+    if isinstance(value, Mapping):
+        key_summaries: list[str] = []
+        array_lengths: list[str] = []
+        visible_items = list(islice(value.items(), 20))
+        for key, item in visible_items:
+            key_summary = _safe_json_key_summary(key)
+            key_summaries.append(key_summary)
+            if isinstance(item, list):
+                array_lengths.append(f"{key_summary}:{len(item)}")
+        if len(value) > len(visible_items):
+            key_summaries.append(f"...(+{len(value) - len(visible_items)})")
+        return (
+            f"object(keys=[{','.join(key_summaries)}], "
+            f"array_lengths=[{','.join(array_lengths)}])"
+        )
+    if isinstance(value, list):
+        return f"array(length={len(value)})"
+    if isinstance(value, str):
+        return f"string(length={len(value)})"
+    if value is None:
+        return "null"
     return type(value).__name__
 
 
@@ -326,6 +371,17 @@ class EnhancedTranslationOrchestrator:
         cancellation: Optional[CancellationToken] = None,
         progress: Optional[Callable[[int, str], None]] = None,
     ) -> None:
+        for role in (config.main_role, config.review_role):
+            try:
+                validate_structured_output_compatibility(role.profile)
+            except RequestOptionsError as exc:
+                role_name = "主翻译" if role.role == "main" else "高级校对"
+                raise EnhancedTranslationError(
+                    f"{role_name}模型方案无法用于增强翻译：{exc}",
+                    stage="profile_validation",
+                    category="configuration",
+                    retryable=False,
+                ) from exc
         self.config = config
         self.gateway = gateway or LLMGateway()
         self.cancellation = cancellation or CancellationToken()
@@ -581,7 +637,6 @@ class EnhancedTranslationOrchestrator:
             self.cancellation.raise_if_cancelled()
             request = LLMRequest(
                 messages=tuple(messages),
-                temperature=0.1,
                 max_output_tokens=self._output_reserve(
                     role, self._runtime_budget(role)
                 ),
@@ -609,21 +664,37 @@ class EnhancedTranslationOrchestrator:
             self._usage.add(role.role, stage, result.usage)
             try:
                 parsed = json_repair.loads(result.text)
-                return validator(parsed)
             except (TypeError, ValueError, KeyError) as exc:
-                last_error = str(exc)
-                if attempt >= mechanical_attempts:
-                    break
-                messages.extend(
-                    (
-                        LLMMessage("assistant", result.text),
-                        LLMMessage(
-                            "user",
-                            "The response failed deterministic validation: "
-                            f"{last_error}. Return a corrected response only.",
-                        ),
-                    )
+                last_error = (
+                    "response is not valid JSON "
+                    f"({type(exc).__name__}); response_shape=unparsed"
                 )
+            else:
+                try:
+                    return validator(parsed)
+                except (TypeError, ValueError, KeyError) as exc:
+                    last_error = f"{exc}; response_shape={_safe_json_shape(parsed)}"
+            logger.warning(
+                "Structured response validation failed for stage=%s role=%s "
+                "attempt=%s/%s: %s",
+                stage,
+                role.role,
+                attempt,
+                mechanical_attempts,
+                last_error,
+            )
+            if attempt >= mechanical_attempts:
+                break
+            messages.extend(
+                (
+                    LLMMessage("assistant", result.text),
+                    LLMMessage(
+                        "user",
+                        "The response failed deterministic validation: "
+                        f"{last_error}. Return a corrected response only.",
+                    ),
+                )
+            )
         raise EnhancedTranslationError(
             last_error,
             stage=stage,
@@ -1226,8 +1297,8 @@ class EnhancedTranslationOrchestrator:
                     if issue.cue_id in allowed
                 ],
             }
-            model_issues.extend(
-                self._call_json(
+            try:
+                batch_issues = self._call_json(
                     role,
                     stage="audit",
                     brief=brief,
@@ -1239,7 +1310,23 @@ class EnhancedTranslationOrchestrator:
                         value, allowed, cues, translations
                     ),
                 )
-            )
+            except EnhancedTranslationError as exc:
+                if exc.category != "invalid_response":
+                    raise
+                subject_ids = batch.subject_ids
+                batch_label = (
+                    str(subject_ids[0])
+                    if len(subject_ids) == 1
+                    else f"{subject_ids[0]}-{subject_ids[-1]}"
+                )
+                warning = (
+                    f"高级校对对字幕 {batch_label} 的响应结构无效，已跳过该批次模型审校；"
+                    "译文和本地审计结果已保留。"
+                )
+                logger.warning("%s 诊断：%s", warning, exc)
+                self._warnings.append(warning)
+                continue
+            model_issues.extend(batch_issues)
         local_by_id: dict[int, list[TranslationAuditIssue]] = {}
         for issue in local:
             local_by_id.setdefault(issue.cue_id, []).append(issue)
