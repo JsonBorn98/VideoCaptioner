@@ -84,6 +84,37 @@ def test_gateway_does_not_retry_permanent_failure():
     assert sleeps == []
 
 
+def test_gateway_retries_invalid_response_only_once():
+    class InvalidResponseAdapter(LLMAdapter):
+        def __init__(self, profile):
+            super().__init__(profile)
+            self.calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            raise LLMCallError(
+                "empty completion",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=True,
+            )
+
+    profile = _profile()
+    adapter = InvalidResponseAdapter(profile)
+    sleeps = []
+    gateway = LLMGateway(
+        adapter_factory=lambda unused: adapter,
+        sleep=sleeps.append,
+        random_source=lambda: 0.5,
+    )
+
+    with pytest.raises(LLMCallError) as raised:
+        gateway.complete(profile, REQUEST)
+
+    assert adapter.calls == 2
+    assert raised.value.attempts == 2
+    assert sleeps == [1.0]
+
+
 class _SuccessAdapter(LLMAdapter):
     def __init__(self, profile):
         super().__init__(profile)

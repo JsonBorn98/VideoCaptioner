@@ -49,10 +49,7 @@ from videocaptioner.core.llm.models import (
     thaw_json_object,
 )
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
-from videocaptioner.core.llm.request_options import (
-    known_thinking_budget,
-    validate_profile_request_options,
-)
+from videocaptioner.core.llm.request_options import validate_profile_request_options
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
 
@@ -510,11 +507,6 @@ class _ProfileDialog(MessageBoxBase):
             warnings.append("最大输出 token 小于 1024，可能没有足够空间返回译文")
         if cap is not None and cap > profile.work_context_tokens // 2:
             warnings.append("最大输出 token 超过工作上下文的一半")
-        budget = known_thinking_budget(thaw_json_object(profile.request_options))
-        if cap is not None and budget is not None and budget >= cap:
-            warnings.append(
-                f"识别到的 thinking budget（{budget}）不小于最大输出 token（{cap}）"
-            )
         return tuple(warnings)
 
     def _confirmStore(self) -> bool:

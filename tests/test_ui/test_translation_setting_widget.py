@@ -32,6 +32,7 @@ from videocaptioner.ui.components.TranslationSettingWidget import (
 from videocaptioner.ui.view.setting_interface import SettingInterface
 
 app = QApplication.instance() or QApplication([])
+app.setQuitOnLastWindowClosed(False)
 
 
 def _profile(profile_id: str, name: str, model: str) -> LLMModelProfile:
@@ -367,7 +368,7 @@ def test_profile_dialog_resize_keeps_actions_clear_and_hidden_editor_unfocused()
     parent.close()
 
 
-def test_store_true_requires_confirmation_on_every_save_and_cap_warnings(monkeypatch):
+def test_store_true_requires_confirmation_on_every_save_and_cap_warning(monkeypatch):
     parent = QWidget()
     dialog = _ProfileDialog(parent=parent)
     dialog.nameEdit.setText("Stored")
@@ -375,9 +376,7 @@ def test_store_true_requires_confirmation_on_every_save_and_cap_warnings(monkeyp
     dialog.modelEdit.setText("model")
     dialog.outputModeCombo.setCurrentIndex(dialog.outputModeCombo.findData("custom"))
     dialog.outputTokensSpin.setValue(512)
-    dialog.requestOptionsEdit.setPlainText(
-        '{"store": true, "thinking": {"budget_tokens": 512}}'
-    )
+    dialog.requestOptionsEdit.setPlainText('{"store": true}')
     confirmations = []
     monkeypatch.setattr(
         dialog,
@@ -390,7 +389,6 @@ def test_store_true_requires_confirmation_on_every_save_and_cap_warnings(monkeyp
     assert confirmations == ["confirmed", "confirmed"]
     warnings = dialog.profileWarnings(dialog.temporaryProfile())
     assert any("小于 1024" in warning for warning in warnings)
-    assert any("thinking budget" in warning for warning in warnings)
     dialog.close()
     parent.close()
 

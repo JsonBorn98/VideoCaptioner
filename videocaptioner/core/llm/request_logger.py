@@ -16,7 +16,7 @@ import httpx
 from videocaptioner.config import LOG_PATH
 
 from .context import get_task_context
-from .models import LLMCallError, LLMModelProfile, LLMRequest, LLMResult
+from .models import LLMCallError, LLMModelProfile, LLMRequest, LLMResult, LLMUsage
 
 LLM_LOG_FILE = LOG_PATH / "llm_requests.jsonl"
 MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
@@ -80,12 +80,16 @@ def _write_log(entry: Dict[str, Any]) -> None:
 
 
 def _usage_entry(result: LLMResult) -> dict[str, Optional[int]]:
+    return _normalized_usage_entry(result.usage)
+
+
+def _normalized_usage_entry(usage: LLMUsage) -> dict[str, Optional[int]]:
     return {
-        "input_tokens": result.usage.input_tokens,
-        "output_tokens": result.usage.output_tokens,
-        "cache_read_tokens": result.usage.cache_read_tokens,
-        "cache_write_tokens": result.usage.cache_write_tokens,
-        "reasoning_tokens": result.usage.reasoning_tokens,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
     }
 
 
@@ -104,6 +108,14 @@ def _error_entry(error: Optional[BaseException]) -> dict[str, Any]:
                 "status_code": error.status_code,
             }
         )
+        diagnostics = {
+            "finish_reason": error.finish_reason,
+            "response_status": error.response_status,
+            "choice_count": error.choice_count,
+        }
+        entry["diagnostics"] = {
+            key: value for key, value in diagnostics.items() if value is not None
+        }
     return entry
 
 
@@ -162,6 +174,8 @@ def finish_gateway_request(
     else:
         entry["status"] = "error"
         entry["error"] = _error_entry(error)
+        if isinstance(error, LLMCallError) and error.usage is not None:
+            entry["usage"] = _normalized_usage_entry(error.usage)
     _write_log(entry)
 
 

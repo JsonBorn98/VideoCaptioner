@@ -144,6 +144,48 @@ def test_gateway_logs_each_retry_with_its_own_attempt_number(tmp_path, monkeypat
     assert entries[1]["status"] == "success"
 
 
+def test_error_log_keeps_safe_finish_reason_and_usage_without_raw_content(
+    tmp_path, monkeypatch
+):
+    class DiagnosticFailureAdapter(LLMAdapter):
+        def complete(self, request):
+            raise LLMCallError(
+                "private provider response must not be logged",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=False,
+                finish_reason="length",
+                response_status="completed",
+                choice_count=1,
+                usage=LLMUsage(
+                    input_tokens=3000,
+                    output_tokens=8192,
+                    reasoning_tokens=8192,
+                ),
+            )
+
+    log_path = tmp_path / "diagnostic-error.jsonl"
+    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
+    profile = _profile()
+
+    with pytest.raises(LLMCallError):
+        LLMGateway(
+            adapter_factory=lambda _profile: DiagnosticFailureAdapter(profile)
+        ).complete(profile, LLMRequest(messages=(LLMMessage("user", "secret"),)))
+
+    entry = json.loads(log_path.read_text("utf-8"))
+    assert entry["error"]["diagnostics"] == {
+        "finish_reason": "length",
+        "response_status": "completed",
+        "choice_count": 1,
+    }
+    assert entry["usage"]["input_tokens"] == 3000
+    assert entry["usage"]["output_tokens"] == 8192
+    assert entry["usage"]["reasoning_tokens"] == 8192
+    serialized = log_path.read_text("utf-8")
+    assert "private provider response" not in serialized
+    assert "secret" not in serialized
+
+
 def test_content_logging_only_adds_prompts_and_normalized_final_text(
     tmp_path, monkeypatch
 ):

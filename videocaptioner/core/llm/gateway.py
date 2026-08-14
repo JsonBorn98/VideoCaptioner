@@ -16,7 +16,14 @@ from .adapters import (
     LLMAdapter,
     OpenAICompatibleAdapter,
 )
-from .models import LLMCallError, LLMModelProfile, LLMRequest, LLMResult, LLMTransport
+from .models import (
+    LLMCallError,
+    LLMErrorCategory,
+    LLMModelProfile,
+    LLMRequest,
+    LLMResult,
+    LLMTransport,
+)
 from .request_logger import begin_gateway_request, finish_gateway_request
 
 logger = setup_logger("llm_gateway")
@@ -101,7 +108,15 @@ class LLMGateway:
             except LLMCallError as exc:
                 exc.attempts = attempt
                 last_error = exc
-                if not exc.retryable or attempt >= max_attempts:
+                # Invalid provider responses get one bounded retry. Repeating a
+                # reasoning-heavy empty completion four times is expensive and
+                # rarely useful, while one retry recovers transient empty bodies.
+                attempt_limit = (
+                    min(max_attempts, 2)
+                    if exc.category is LLMErrorCategory.INVALID_RESPONSE
+                    else max_attempts
+                )
+                if not exc.retryable or attempt >= attempt_limit:
                     raise
                 backoff = min(30.0, 2 ** (attempt - 1)) * (
                     0.75 + self._random() * 0.5
@@ -111,7 +126,7 @@ class LLMGateway:
                     "LLM transient error for profile %s; retry %s/%s in %.1fs: %s",
                     profile.name,
                     attempt + 1,
-                    max_attempts,
+                    attempt_limit,
                     delay,
                     exc,
                 )

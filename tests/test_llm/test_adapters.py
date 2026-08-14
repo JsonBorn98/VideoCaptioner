@@ -243,11 +243,12 @@ def test_openai_responses_maps_standard_body_text_and_usage():
 
 
 @pytest.mark.parametrize(
-    ("response", "message"),
+    ("response", "message", "retryable"),
     [
         (
             SimpleNamespace(status="incomplete", output=[]),
             "non-completed status: incomplete",
+            True,
         ),
         (
             SimpleNamespace(
@@ -260,6 +261,7 @@ def test_openai_responses_maps_standard_body_text_and_usage():
                 ],
             ),
             "refused the request",
+            False,
         ),
         (
             SimpleNamespace(
@@ -267,10 +269,11 @@ def test_openai_responses_maps_standard_body_text_and_usage():
                 output=[SimpleNamespace(type="reasoning", content=[])],
             ),
             "no final output_text",
+            True,
         ),
     ],
 )
-def test_openai_responses_rejects_non_final_results(response, message):
+def test_openai_responses_rejects_non_final_results(response, message, retryable):
     profile = _profile(
         LLMTransport.OPENAI_COMPATIBLE,
         ProviderDialect.OPENAI,
@@ -286,7 +289,50 @@ def test_openai_responses_rejects_non_final_results(response, message):
         adapter.complete(_request())
 
     assert caught.value.category is LLMErrorCategory.INVALID_RESPONSE
-    assert caught.value.retryable is False
+    assert caught.value.retryable is retryable
+
+
+def test_openai_chat_empty_completion_preserves_safe_diagnostics():
+    class EmptyCompletions:
+        def create(self, **_kwargs):
+            return SimpleNamespace(
+                status="completed",
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(content=None, refusal=None),
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=3000,
+                    completion_tokens=8192,
+                    completion_tokens_details=SimpleNamespace(reasoning_tokens=8192),
+                ),
+            )
+
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.OPENAI,
+            base_url="https://api.openai.test/v1",
+        ),
+        client=SimpleNamespace(
+            chat=SimpleNamespace(completions=EmptyCompletions())
+        ),
+    )
+
+    with pytest.raises(LLMCallError, match="output limit") as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.category is LLMErrorCategory.INVALID_RESPONSE
+    assert error.retryable is True
+    assert error.finish_reason == "length"
+    assert error.response_status == "completed"
+    assert error.choice_count == 1
+    assert error.usage.input_tokens == 3000
+    assert error.usage.output_tokens == 8192
+    assert error.usage.reasoning_tokens == 8192
 
 
 def test_openai_chat_accepts_legacy_temperature_omit_and_passes_unknown_options():
@@ -476,6 +522,36 @@ def test_anthropic_maps_request_cache_hint_and_usage():
     assert result.usage.cache_write_tokens == 9
 
 
+def test_anthropic_empty_completion_preserves_stop_reason_and_usage():
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+        ),
+        session=_Session(
+            _Response(
+                {
+                    "content": [],
+                    "stop_reason": "max_tokens",
+                    "usage": {"input_tokens": 3000, "output_tokens": 8192},
+                }
+            )
+        ),
+    )
+
+    with pytest.raises(LLMCallError, match="empty content") as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.retryable is True
+    assert error.finish_reason == "max_tokens"
+    assert error.response_status == "empty"
+    assert error.choice_count == 0
+    assert error.usage.input_tokens == 3000
+    assert error.usage.output_tokens == 8192
+
+
 def test_anthropic_applies_native_thinking_options_with_legacy_temperature_omit():
     session = _Session(_Response({"content": [{"type": "text", "text": "ok"}]}))
     adapter = AnthropicMessagesAdapter(
@@ -583,6 +659,56 @@ def test_gemini_maps_request_schema_and_usage():
     assert result.usage.output_tokens == 10
     assert result.usage.cache_read_tokens == 40
     assert result.usage.cache_write_tokens is None
+
+
+@pytest.mark.parametrize(
+    ("body", "retryable", "finish_reason", "response_status"),
+    [
+        (
+            {
+                "candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}],
+                "usageMetadata": {
+                    "promptTokenCount": 3000,
+                    "candidatesTokenCount": 8192,
+                },
+            },
+            True,
+            "MAX_TOKENS",
+            "empty",
+        ),
+        (
+            {
+                "candidates": [],
+                "promptFeedback": {"blockReason": "SAFETY"},
+                "usageMetadata": {"promptTokenCount": 25},
+            },
+            False,
+            "SAFETY",
+            "blocked",
+        ),
+    ],
+)
+def test_gemini_empty_completion_preserves_safe_diagnostics(
+    body, retryable, finish_reason, response_status
+):
+    adapter = GeminiAdapter(
+        _profile(
+            LLMTransport.GEMINI,
+            ProviderDialect.GEMINI,
+            base_url="https://generativelanguage.test/v1beta",
+        ),
+        session=_Session(_Response(body)),
+    )
+
+    with pytest.raises(LLMCallError, match="empty content") as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.retryable is retryable
+    assert error.finish_reason == finish_reason
+    assert error.response_status == response_status
+    assert error.choice_count == len(body["candidates"])
+    assert error.usage.input_tokens == body["usageMetadata"]["promptTokenCount"]
 
 
 def test_gemini_shallow_options_restore_protected_generation_fields():

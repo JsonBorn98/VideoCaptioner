@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Sequence
+from typing import Callable, Optional, Sequence
 
 from .models import AnalysisWindow, SubtitleCue, TranslationBatch
 
@@ -126,6 +126,12 @@ def plan_translation_batches(
     fixed_prompt_tokens: int = 0,
     output_reserve_tokens: int = 0,
     context_radius: int = 3,
+    batch_input_estimator: Optional[
+        Callable[
+            [Sequence[SubtitleCue], Sequence[SubtitleCue], Sequence[SubtitleCue]],
+            int,
+        ]
+    ] = None,
 ) -> tuple[TranslationBatch, ...]:
     """Plan formal translation batches with strictly separated boundary context.
 
@@ -151,7 +157,13 @@ def plan_translation_batches(
         before = tuple(cues[max(0, start - radius) : start])
         subjects = tuple(cues[start:end])
         after = tuple(cues[end : min(len(cues), end + radius)])
-        estimated = _batch_estimate(before, subjects, after, fixed_prompt_tokens)
+        estimated = (
+            batch_input_estimator(before, subjects, after)
+            if batch_input_estimator is not None
+            else _batch_estimate(before, subjects, after, fixed_prompt_tokens)
+        )
+        if estimated < 0:
+            raise ValueError("batch_input_estimator must not return a negative value")
         return before, subjects, after, estimated
 
     batches: list[TranslationBatch] = []

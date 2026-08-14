@@ -342,6 +342,10 @@ class LLMCallError(RuntimeError):
         status_code: Optional[int] = None,
         retry_after_seconds: Optional[float] = None,
         attempts: int = 1,
+        finish_reason: Optional[str] = None,
+        response_status: Optional[str] = None,
+        choice_count: Optional[int] = None,
+        usage: Optional[LLMUsage] = None,
     ) -> None:
         super().__init__(message)
         self.category = category
@@ -349,3 +353,7 @@ class LLMCallError(RuntimeError):
         self.status_code = status_code
         self.retry_after_seconds = retry_after_seconds
         self.attempts = attempts
+        self.finish_reason = finish_reason
+        self.response_status = response_status
+        self.choice_count = choice_count
+        self.usage = usage

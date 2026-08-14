@@ -91,3 +91,18 @@ def test_translation_payload_budget_includes_output_reserve() -> None:
             working_context_tokens=100,
             output_reserve_tokens=100,
         )
+
+
+def test_translation_planner_accepts_stage_specific_input_estimator() -> None:
+    cues = tuple(SubtitleCue(index, f"cue {index}") for index in range(1, 5))
+
+    batches = plan_translation_batches(
+        cues,
+        batch_size=4,
+        working_context_tokens=250,
+        output_reserve_tokens=50,
+        context_radius=0,
+        batch_input_estimator=lambda _before, subjects, _after: len(subjects) * 100,
+    )
+
+    assert [batch.subject_ids for batch in batches] == [(1, 2), (3, 4)]

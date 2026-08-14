@@ -830,8 +830,9 @@ class SubtitleConfig:
                 lines.append(f"  Custom Prompt: {self.custom_prompt_text[:30]}...")
 
         if self.need_translate:
+            translation_mode = self.effective_translation_mode()
             lines.append("Translate: Yes")
-            lines.append(f"  Mode: {self.effective_translation_mode()}")
+            lines.append(f"  Mode: {translation_mode}")
             lines.append(
                 f"  Service: {self.translator_service.value if self.translator_service else 'None'}"
             )
@@ -848,6 +849,21 @@ class SubtitleConfig:
             )
             lines.append(f"  Concurrency: {self.thread_num}")
             lines.append(f"  Batch Size: {self.batch_size}")
+            if translation_mode in {"single_llm", "enhanced_llm"}:
+                if self.main_llm_profile is not None:
+                    lines.append(
+                        "  Main LLM: "
+                        f"{self.main_llm_profile.name} / {self.main_llm_profile.model}"
+                    )
+                if (
+                    translation_mode == "enhanced_llm"
+                    and self.review_llm_profile is not None
+                ):
+                    lines.append(
+                        "  Review LLM: "
+                        f"{self.review_llm_profile.name} / {self.review_llm_profile.model}"
+                    )
+                    lines.append(f"  Enhanced Batch Size: {self.enhanced_batch_size}")
 
         lines.append(f"Layout: {self.subtitle_layout.value}")
         lines.append("=" * 48)
@@ -966,6 +982,7 @@ class SubtitleTask:
     subtitle_config: Optional[SubtitleConfig] = None
     glossary_path: Optional[str] = None
     translation_audit_report_path: Optional[str] = None
+    translation_checkpoint_path: Optional[str] = None
     translation_audit_report: Optional["TranslationAuditReport"] = field(
         default=None, repr=False
     )

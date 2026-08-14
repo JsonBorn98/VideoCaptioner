@@ -266,6 +266,11 @@ class SubtitleThread(QThread):
         )
         self.task.glossary_path = str(run.artifacts.glossary_path)
         self.task.translation_audit_report_path = str(run.artifacts.audit_report_path)
+        self.task.translation_checkpoint_path = (
+            str(run.artifacts.translation_checkpoint_path)
+            if run.artifacts.translation_checkpoint_path is not None
+            else None
+        )
         self.task.translation_audit_report = run.result.audit_report
         if config.execution_mode is TranslationExecutionMode.GUI_STANDALONE:
             self.audit_ready.emit(run.result.audit_report)

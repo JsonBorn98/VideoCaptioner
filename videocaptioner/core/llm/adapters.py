@@ -44,6 +44,81 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
 
 
+def _diagnostic_text(value: Any) -> Optional[str]:
+    """Normalize provider enums into a short, content-free diagnostic label."""
+
+    value = getattr(value, "value", value)
+    if not isinstance(value, str):
+        return None
+    normalized = "".join(
+        character
+        for character in value.strip()[:64]
+        if character.isalnum() or character in {"_", "-", "."}
+    )
+    return normalized or None
+
+
+def _openai_chat_usage(response: Any) -> LLMUsage:
+    usage = _read_attr(response, "usage")
+    prompt_details = _read_attr(usage, "prompt_tokens_details") if usage else None
+    completion_details = (
+        _read_attr(usage, "completion_tokens_details") if usage else None
+    )
+    return LLMUsage(
+        input_tokens=_optional_int(_read_attr(usage, "prompt_tokens")) if usage else None,
+        output_tokens=(
+            _optional_int(_read_attr(usage, "completion_tokens")) if usage else None
+        ),
+        cache_read_tokens=(
+            next(
+                (
+                    value
+                    for value in (
+                        _optional_int(_read_attr(prompt_details, "cached_tokens")),
+                        _optional_int(_read_attr(usage, "cache_read_input_tokens")),
+                        _optional_int(_read_attr(usage, "prompt_cache_hit_tokens")),
+                        _optional_int(_read_attr(usage, "cached_tokens")),
+                    )
+                    if value is not None
+                ),
+                None,
+            )
+            if usage
+            else None
+        ),
+        cache_write_tokens=(
+            _optional_int(_read_attr(usage, "cache_creation_input_tokens"))
+            if usage
+            else None
+        ),
+        reasoning_tokens=(
+            _optional_int(_read_attr(completion_details, "reasoning_tokens"))
+            if completion_details
+            else None
+        ),
+    )
+
+
+def _openai_responses_usage(response: Any) -> LLMUsage:
+    usage = _read_attr(response, "usage")
+    input_details = _read_attr(usage, "input_tokens_details") if usage else None
+    output_details = _read_attr(usage, "output_tokens_details") if usage else None
+    return LLMUsage(
+        input_tokens=_optional_int(_read_attr(usage, "input_tokens")) if usage else None,
+        output_tokens=_optional_int(_read_attr(usage, "output_tokens")) if usage else None,
+        cache_read_tokens=(
+            _optional_int(_read_attr(input_details, "cached_tokens"))
+            if input_details
+            else None
+        ),
+        reasoning_tokens=(
+            _optional_int(_read_attr(output_details, "reasoning_tokens"))
+            if output_details
+            else None
+        ),
+    )
+
+
 def _endpoint(base_url: str, suffix: str) -> str:
     parsed = urlparse(base_url.rstrip("/"))
     path = parsed.path.rstrip("/")
@@ -296,53 +371,33 @@ class OpenAICompatibleAdapter(LLMAdapter):
         response = self.client.chat.completions.create(**kwargs)
 
         choices = _read_attr(response, "choices", []) or []
-        message = _read_attr(choices[0], "message") if choices else None
+        choice = choices[0] if choices else None
+        message = _read_attr(choice, "message") if choice is not None else None
         text = _read_attr(message, "content", "") if message is not None else ""
+        finish_reason = _diagnostic_text(_read_attr(choice, "finish_reason"))
+        response_status = _diagnostic_text(_read_attr(response, "status"))
+        usage = _openai_chat_usage(response)
         if not isinstance(text, str) or not text.strip():
+            refused = bool(_read_attr(message, "refusal")) if message is not None else False
+            if refused:
+                error_message = "LLM provider refused the request"
+                response_status = response_status or "refusal"
+            elif finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+                error_message = "LLM provider reached the output limit without final content"
+            else:
+                error_message = "LLM provider returned empty content"
             raise LLMCallError(
-                "LLM provider returned empty content",
+                error_message,
                 category=LLMErrorCategory.INVALID_RESPONSE,
-                retryable=False,
+                retryable=(
+                    not refused and finish_reason not in {"content_filter", "safety"}
+                ),
+                finish_reason=finish_reason,
+                response_status=response_status,
+                choice_count=len(choices),
+                usage=usage,
             )
-        usage = _read_attr(response, "usage")
-        prompt_details = _read_attr(usage, "prompt_tokens_details") if usage else None
-        completion_details = (
-            _read_attr(usage, "completion_tokens_details") if usage else None
-        )
-        normalized = LLMUsage(
-            input_tokens=_optional_int(_read_attr(usage, "prompt_tokens")) if usage else None,
-            output_tokens=(
-                _optional_int(_read_attr(usage, "completion_tokens")) if usage else None
-            ),
-            cache_read_tokens=(
-                next(
-                    (
-                        value
-                        for value in (
-                            _optional_int(_read_attr(prompt_details, "cached_tokens")),
-                            _optional_int(_read_attr(usage, "cache_read_input_tokens")),
-                            _optional_int(_read_attr(usage, "prompt_cache_hit_tokens")),
-                            _optional_int(_read_attr(usage, "cached_tokens")),
-                        )
-                        if value is not None
-                    ),
-                    None,
-                )
-                if usage
-                else None
-            ),
-            cache_write_tokens=(
-                _optional_int(_read_attr(usage, "cache_creation_input_tokens"))
-                if usage
-                else None
-            ),
-            reasoning_tokens=(
-                _optional_int(_read_attr(completion_details, "reasoning_tokens"))
-                if completion_details
-                else None
-            ),
-        )
-        return LLMResult(text=text.strip(), usage=normalized, raw=response)
+        return LLMResult(text=text.strip(), usage=usage, raw=response)
 
     def _complete_responses(self, request: LLMRequest) -> LLMResult:
         application_body: dict[str, Any] = {
@@ -379,18 +434,26 @@ class OpenAICompatibleAdapter(LLMAdapter):
         kwargs["extra_body"] = final_body
         response = self.client.responses.create(**kwargs)
 
-        status = _read_attr(response, "status")
-        status_value = getattr(status, "value", status)
-        if status_value != "completed":
+        status_value = _diagnostic_text(_read_attr(response, "status"))
+        status_label = status_value or "missing"
+        incomplete_details = _read_attr(response, "incomplete_details")
+        finish_reason = _diagnostic_text(_read_attr(incomplete_details, "reason"))
+        usage = _openai_responses_usage(response)
+        output_items = _read_attr(response, "output", []) or []
+        if status_label != "completed":
             raise LLMCallError(
-                f"Responses API returned non-completed status: {status_value or 'missing'}",
+                f"Responses API returned non-completed status: {status_label}",
                 category=LLMErrorCategory.INVALID_RESPONSE,
-                retryable=False,
+                retryable=status_label in {"incomplete", "missing"},
+                finish_reason=finish_reason,
+                response_status=status_label,
+                choice_count=len(output_items),
+                usage=usage,
             )
 
         text_parts: list[str] = []
         refused = False
-        for output_item in _read_attr(response, "output", []) or []:
+        for output_item in output_items:
             if _read_attr(output_item, "type") != "message":
                 continue
             for content_item in _read_attr(output_item, "content", []) or []:
@@ -406,35 +469,22 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 "Responses API refused the request",
                 category=LLMErrorCategory.INVALID_RESPONSE,
                 retryable=False,
+                response_status="refusal",
+                choice_count=len(output_items),
+                usage=usage,
             )
         text = "".join(text_parts).strip()
         if not text:
             raise LLMCallError(
                 "Responses API returned no final output_text",
                 category=LLMErrorCategory.INVALID_RESPONSE,
-                retryable=False,
+                retryable=True,
+                finish_reason=finish_reason,
+                response_status=status_label,
+                choice_count=len(output_items),
+                usage=usage,
             )
-
-        usage = _read_attr(response, "usage")
-        input_details = _read_attr(usage, "input_tokens_details") if usage else None
-        output_details = _read_attr(usage, "output_tokens_details") if usage else None
-        normalized = LLMUsage(
-            input_tokens=_optional_int(_read_attr(usage, "input_tokens")) if usage else None,
-            output_tokens=(
-                _optional_int(_read_attr(usage, "output_tokens")) if usage else None
-            ),
-            cache_read_tokens=(
-                _optional_int(_read_attr(input_details, "cached_tokens"))
-                if input_details
-                else None
-            ),
-            reasoning_tokens=(
-                _optional_int(_read_attr(output_details, "reasoning_tokens"))
-                if output_details
-                else None
-            ),
-        )
-        return LLMResult(text=text, usage=normalized, raw=response)
+        return LLMResult(text=text, usage=usage, raw=response)
 
 
 class AnthropicMessagesAdapter(LLMAdapter):
@@ -525,6 +575,16 @@ class AnthropicMessagesAdapter(LLMAdapter):
                 retryable=False,
             ) from exc
         content = value.get("content", [])
+        raw_usage = value.get("usage", {})
+        usage = LLMUsage(
+            input_tokens=_optional_int(raw_usage.get("input_tokens")),
+            output_tokens=_optional_int(raw_usage.get("output_tokens")),
+            cache_read_tokens=_optional_int(raw_usage.get("cache_read_input_tokens")),
+            cache_write_tokens=_optional_int(
+                raw_usage.get("cache_creation_input_tokens")
+            ),
+        )
+        finish_reason = _diagnostic_text(value.get("stop_reason"))
         text = "".join(
             str(item.get("text", ""))
             for item in content
@@ -544,19 +604,15 @@ class AnthropicMessagesAdapter(LLMAdapter):
             raise LLMCallError(
                 "Anthropic returned empty content",
                 category=LLMErrorCategory.INVALID_RESPONSE,
-                retryable=False,
+                retryable=finish_reason not in {"safety", "refusal"},
+                finish_reason=finish_reason,
+                response_status="empty",
+                choice_count=len(content),
+                usage=usage,
             )
-        usage = value.get("usage", {})
         return LLMResult(
             text=text,
-            usage=LLMUsage(
-                input_tokens=_optional_int(usage.get("input_tokens")),
-                output_tokens=_optional_int(usage.get("output_tokens")),
-                cache_read_tokens=_optional_int(usage.get("cache_read_input_tokens")),
-                cache_write_tokens=_optional_int(
-                    usage.get("cache_creation_input_tokens")
-                ),
-            ),
+            usage=usage,
             raw=value,
         )
 
@@ -730,11 +786,27 @@ class GeminiAdapter(LLMAdapter):
                 retryable=False,
             ) from exc
         candidates = value.get("candidates", [])
+        candidate = candidates[0] if candidates and isinstance(candidates[0], Mapping) else {}
         parts = (
-            candidates[0].get("content", {}).get("parts", [])
-            if candidates and isinstance(candidates[0], Mapping)
+            candidate.get("content", {}).get("parts", [])
+            if isinstance(candidate.get("content"), Mapping)
             else []
         )
+        raw_usage = value.get("usageMetadata", {})
+        prompt_tokens = _optional_int(raw_usage.get("promptTokenCount"))
+        cached_tokens = _optional_int(raw_usage.get("cachedContentTokenCount"))
+        usage = LLMUsage(
+            input_tokens=prompt_tokens,
+            output_tokens=_optional_int(raw_usage.get("candidatesTokenCount")),
+            cache_read_tokens=cached_tokens,
+        )
+        prompt_feedback = value.get("promptFeedback", {})
+        block_reason = (
+            _diagnostic_text(prompt_feedback.get("blockReason"))
+            if isinstance(prompt_feedback, Mapping)
+            else None
+        )
+        finish_reason = _diagnostic_text(candidate.get("finishReason")) or block_reason
         text = "".join(
             str(item.get("text", "")) for item in parts if isinstance(item, Mapping)
         ).strip()
@@ -742,17 +814,18 @@ class GeminiAdapter(LLMAdapter):
             raise LLMCallError(
                 "Gemini returned empty content",
                 category=LLMErrorCategory.INVALID_RESPONSE,
-                retryable=False,
+                retryable=finish_reason not in {
+                    "SAFETY",
+                    "PROHIBITED_CONTENT",
+                    "BLOCKLIST",
+                },
+                finish_reason=finish_reason,
+                response_status="blocked" if block_reason else "empty",
+                choice_count=len(candidates),
+                usage=usage,
             )
-        usage = value.get("usageMetadata", {})
-        prompt_tokens = _optional_int(usage.get("promptTokenCount"))
-        cached_tokens = _optional_int(usage.get("cachedContentTokenCount"))
         return LLMResult(
             text=text,
-            usage=LLMUsage(
-                input_tokens=prompt_tokens,
-                output_tokens=_optional_int(usage.get("candidatesTokenCount")),
-                cache_read_tokens=cached_tokens,
-            ),
+            usage=usage,
             raw=value,
         )

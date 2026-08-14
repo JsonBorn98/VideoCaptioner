@@ -186,6 +186,12 @@ def _safe_json_shape(value: Any) -> str:
     return type(value).__name__
 
 
+def _is_invalid_response_error(error: EnhancedTranslationError) -> bool:
+    """Accept both legacy internal spelling and provider enum spelling."""
+
+    return error.category.replace("_", "-") == LLMErrorCategory.INVALID_RESPONSE.value
+
+
 def _structured_output_instruction(schema: Mapping[str, Any]) -> str:
     """Describe the exact contract for providers that only support JSON mode.
 
@@ -403,6 +409,7 @@ class EnhancedTranslationOrchestrator:
         ] = None,
         confirm_audit: Optional[Callable[[TranslationAuditReport], Sequence[int]]] = None,
         on_glossary: Optional[Callable[[AuthoritativeGlossary], None]] = None,
+        on_translations: Optional[Callable[[Mapping[int, str]], None]] = None,
     ) -> EnhancedTranslationResult:
         ordered = tuple(cues)
         if not ordered:
@@ -474,6 +481,8 @@ class EnhancedTranslationOrchestrator:
         translations = self._with_context_fallback(
             self._translate, ordered, brief, glossary
         )
+        if on_translations is not None:
+            on_translations(dict(translations))
         self.cancellation.raise_if_cancelled()
         self._emit(80, "Auditing translated subtitles")
         translations, issues = self._with_context_fallback(
@@ -983,7 +992,7 @@ class EnhancedTranslationOrchestrator:
                     )
                     decision = TermReviewDecision(review_value["decision"])
                 except EnhancedTranslationError as exc:
-                    if exc.category != "invalid_response":
+                    if not _is_invalid_response_error(exc):
                         raise
                     self._warnings.append(
                         f"术语校对响应无效，已保留原文：{candidate.source_term}"
@@ -1240,27 +1249,10 @@ class EnhancedTranslationOrchestrator:
         local = list(local_audit_issues(cues, translations))
         role = self.config.review_role
         budget = self._runtime_budget(role)
-        batches = plan_translation_batches(
-            cues,
-            batch_size=self.config.batch_size,
-            working_context_tokens=budget,
-            fixed_prompt_tokens=estimate_tokens(
-                self._system_constraints()
-                + role.user_prompt
-                + brief.as_prompt_text()
-                + _AUDIT_INSTRUCTION
-                + _structured_output_instruction(_AUDIT_SCHEMA)
-            ),
-            output_reserve_tokens=self._output_reserve(role, budget),
-            context_radius=self.config.boundary_context_radius,
-        )
-        model_issues: list[TranslationAuditIssue] = []
-        for batch in batches:
-            relevant = select_relevant_entries(
-                glossary, (*batch.context_before, *batch.subjects, *batch.context_after)
-            )
+
+        def build_payload(batch: TranslationBatch) -> dict[str, Any]:
             allowed = set(batch.subject_ids)
-            payload = {
+            return {
                 "boundary_context_read_only": {
                     "before": [
                         {
@@ -1297,6 +1289,59 @@ class EnhancedTranslationOrchestrator:
                     if issue.cue_id in allowed
                 ],
             }
+
+        structured_audit_instruction = (
+            f"{_AUDIT_INSTRUCTION}\n\n{_structured_output_instruction(_AUDIT_SCHEMA)}"
+        )
+
+        def estimate_audit_input(
+            before: Sequence[SubtitleCue],
+            subjects: Sequence[SubtitleCue],
+            after: Sequence[SubtitleCue],
+        ) -> int:
+            candidate = TranslationBatch(
+                subjects=tuple(subjects),
+                context_before=tuple(before),
+                context_after=tuple(after),
+            )
+            relevant = select_relevant_entries(
+                glossary, (*candidate.context_before, *candidate.subjects, *candidate.context_after)
+            )
+            assembly = assemble_prompt(
+                system_constraints=self._system_constraints(),
+                user_role_prompt=role.user_prompt,
+                context_brief=brief,
+                glossary_entries=relevant,
+                stage_instruction=structured_audit_instruction,
+                dynamic_subtitles=build_payload(candidate),
+                glossary_version="1",
+            )
+            return estimate_tokens(assembly.full_prompt)
+
+        try:
+            batches = plan_translation_batches(
+                cues,
+                batch_size=self.config.batch_size,
+                working_context_tokens=budget,
+                fixed_prompt_tokens=0,
+                output_reserve_tokens=self._output_reserve(role, budget),
+                context_radius=self.config.boundary_context_radius,
+                batch_input_estimator=estimate_audit_input,
+            )
+        except TokenBudgetExceeded as exc:
+            raise EnhancedTranslationError(
+                str(exc),
+                stage="audit_planning",
+                category="context_budget",
+                retryable=False,
+            ) from exc
+        model_issues: list[TranslationAuditIssue] = []
+        for batch in batches:
+            relevant = select_relevant_entries(
+                glossary, (*batch.context_before, *batch.subjects, *batch.context_after)
+            )
+            allowed = set(batch.subject_ids)
+            payload = build_payload(batch)
             try:
                 batch_issues = self._call_json(
                     role,
@@ -1311,7 +1356,7 @@ class EnhancedTranslationOrchestrator:
                     ),
                 )
             except EnhancedTranslationError as exc:
-                if exc.category != "invalid_response":
+                if not _is_invalid_response_error(exc):
                     raise
                 subject_ids = batch.subject_ids
                 batch_label = (

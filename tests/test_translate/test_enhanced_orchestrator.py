@@ -29,6 +29,7 @@ from videocaptioner.core.translate.enhanced.models import (
 from videocaptioner.core.translate.enhanced.orchestrator import (
     EnhancedTranslationOrchestrator,
 )
+from videocaptioner.core.translate.enhanced.token_planner import TokenBudgetExceeded
 
 
 def _profile(
@@ -676,6 +677,56 @@ def test_audit_configuration_error_is_not_degraded():
     assert raised.value.stage == "audit"
     assert raised.value.category == LLMErrorCategory.CONFIGURATION.value
     assert len(gateway.stage_calls["audit"]) == 1
+
+
+def test_provider_invalid_audit_response_degrades_and_keeps_translation():
+    failure = LLMCallError(
+        "provider returned empty content",
+        category=LLMErrorCategory.INVALID_RESPONSE,
+        retryable=False,
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[failure],
+    )
+
+    result = EnhancedTranslationOrchestrator(_config(), gateway=gateway).run(
+        (SubtitleCue(1, "Source"),)
+    )
+
+    assert result.translations == {1: "译文"}
+    assert result.audit_report.issues == ()
+    assert result.audit_report.warnings == (
+        "高级校对对字幕 1 的响应结构无效，已跳过该批次模型审校；"
+        "译文和本地审计结果已保留。",
+    )
+
+
+def test_audit_planning_budget_error_uses_structured_failure(monkeypatch):
+    real_planner = orchestrator_module.plan_translation_batches
+
+    def fail_audit_planning(*args, **kwargs):
+        if kwargs.get("batch_input_estimator") is not None:
+            raise TokenBudgetExceeded("audit prompt cannot fit")
+        return real_planner(*args, **kwargs)
+
+    monkeypatch.setattr(
+        orchestrator_module, "plan_translation_batches", fail_audit_planning
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+    )
+
+    with pytest.raises(EnhancedTranslationError, match="audit prompt cannot fit") as raised:
+        EnhancedTranslationOrchestrator(_config(), gateway=gateway).run(
+            (SubtitleCue(1, "Source"),)
+        )
+
+    assert raised.value.stage == "audit_planning"
+    assert raised.value.category == "context_budget"
+    assert raised.value.retryable is False
 
 
 def test_manual_audit_does_not_pause_when_there_are_no_findings():
