@@ -281,10 +281,17 @@ class LLMRequest:
     response_schema: Optional[Mapping[str, Any]] = None
     cacheable_system_prefix: bool = True
     metadata: Mapping[str, str] = field(default_factory=dict)
+    request_options_override: Optional[Mapping[str, JSONValue]] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        if self.request_options_override is not None:
+            object.__setattr__(
+                self,
+                "request_options_override",
+                freeze_json_object(self.request_options_override),
+            )
         if self.response_schema is not None:
             object.__setattr__(
                 self,
@@ -330,6 +337,16 @@ class LLMErrorCategory(str, Enum):
     CONTEXT_LIMIT = "context-limit"
     INVALID_RESPONSE = "invalid-response"
     CANCELLED = "cancelled"
+
+
+def is_output_limit_finish_reason(reason: Optional[str]) -> bool:
+    """Return whether a provider finish label denotes generated-token exhaustion."""
+
+    return bool(
+        reason
+        and reason.casefold().replace("-", "_")
+        in {"length", "max_tokens", "max_output_tokens"}
+    )
 
 
 class LLMCallError(RuntimeError):

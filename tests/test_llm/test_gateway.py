@@ -115,6 +115,37 @@ def test_gateway_retries_invalid_response_only_once():
     assert sleeps == [1.0]
 
 
+def test_gateway_does_not_repeat_an_exhausted_output_cap():
+    class OutputLimitAdapter(LLMAdapter):
+        def __init__(self, profile):
+            super().__init__(profile)
+            self.calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            raise LLMCallError(
+                "output limit exhausted",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=True,
+                finish_reason="max_output_tokens",
+            )
+
+    profile = _profile()
+    adapter = OutputLimitAdapter(profile)
+    sleeps = []
+    gateway = LLMGateway(
+        adapter_factory=lambda unused: adapter,
+        sleep=sleeps.append,
+    )
+
+    with pytest.raises(LLMCallError) as raised:
+        gateway.complete(profile, REQUEST)
+
+    assert adapter.calls == 1
+    assert raised.value.attempts == 1
+    assert sleeps == []
+
+
 class _SuccessAdapter(LLMAdapter):
     def __init__(self, profile):
         super().__init__(profile)

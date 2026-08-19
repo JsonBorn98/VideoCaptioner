@@ -130,13 +130,17 @@ def test_gateway_logs_each_retry_with_its_own_attempt_number(tmp_path, monkeypat
         profile,
         LLMRequest(
             messages=(LLMMessage("user", "retry"),),
+            max_output_tokens=65_536,
             metadata={"stage": "translation", "role": "main"},
+            request_options_override={"reasoning_effort": "low"},
         ),
     )
 
     assert result.text == "ok"
     entries = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
     assert [entry["attempt"] for entry in entries] == [1, 2]
+    assert all(entry["max_output_tokens"] == 65_536 for entry in entries)
+    assert all(entry["adaptive_reasoning"] is True for entry in entries)
     assert entries[0]["status"] == "error"
     assert entries[0]["error"]["category"] == "transient"
     assert "message" not in entries[0]["error"]

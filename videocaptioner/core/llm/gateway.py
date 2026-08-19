@@ -23,6 +23,7 @@ from .models import (
     LLMRequest,
     LLMResult,
     LLMTransport,
+    is_output_limit_finish_reason,
 )
 from .request_logger import begin_gateway_request, finish_gateway_request
 
@@ -111,11 +112,14 @@ class LLMGateway:
                 # Invalid provider responses get one bounded retry. Repeating a
                 # reasoning-heavy empty completion four times is expensive and
                 # rarely useful, while one retry recovers transient empty bodies.
-                attempt_limit = (
-                    min(max_attempts, 2)
-                    if exc.category is LLMErrorCategory.INVALID_RESPONSE
-                    else max_attempts
-                )
+                if is_output_limit_finish_reason(exc.finish_reason):
+                    # Repeating an already exhausted output budget cannot recover.
+                    # Enhanced translation owns semantic cap escalation and input splitting.
+                    attempt_limit = 1
+                elif exc.category is LLMErrorCategory.INVALID_RESPONSE:
+                    attempt_limit = min(max_attempts, 2)
+                else:
+                    attempt_limit = max_attempts
                 if not exc.retryable or attempt >= attempt_limit:
                     raise
                 backoff = min(30.0, 2 ** (attempt - 1)) * (

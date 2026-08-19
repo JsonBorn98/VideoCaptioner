@@ -134,6 +134,8 @@ def begin_gateway_request(
         "stage": str(request.metadata.get("stage", "")),
         "role": str(request.metadata.get("role", "")),
         "attempt": attempt,
+        "max_output_tokens": request.max_output_tokens,
+        "adaptive_reasoning": request.request_options_override is not None,
         "profile": {
             "id": profile.profile_id,
             "model": profile.model,

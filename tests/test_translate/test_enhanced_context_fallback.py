@@ -83,11 +83,11 @@ def test_provider_context_overflow_replans_at_32k_then_16k_without_mutating_prof
     )
 
     assert result.translations == {1: "你好"}
-    assert [limit for stage, limit in gateway.output_limits if stage == "analysis_window"] == [
-        8192,
-        4096,
-        2048,
+    analysis_limits = [
+        limit for stage, limit in gateway.output_limits if stage == "analysis_window"
     ]
+    assert analysis_limits[0] == 32_768
+    assert 1_024 <= analysis_limits[2] < analysis_limits[1] < analysis_limits[0]
     assert main.work_context_tokens == 65_536
     assert len(result.audit_report.warnings) == 2
     assert "65536 token 的工作上下文" in result.audit_report.warnings[0]

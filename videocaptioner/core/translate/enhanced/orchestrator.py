@@ -13,7 +13,12 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
 import json_repair
 
 from videocaptioner.core.llm import LLMGateway, LLMMessage, LLMRequest, LLMUsage
-from videocaptioner.core.llm.models import LLMCallError, LLMErrorCategory
+from videocaptioner.core.llm.models import (
+    LLMCallError,
+    LLMErrorCategory,
+    is_output_limit_finish_reason,
+    thaw_json_object,
+)
 from videocaptioner.core.llm.request_options import (
     RequestOptionsError,
     validate_structured_output_compatibility,
@@ -59,6 +64,21 @@ from .token_planner import (
 logger = setup_logger("enhanced_translation")
 
 T = TypeVar("T")
+
+_AUTO_OUTPUT_CAP_TIERS = (32_768, 65_536, 256_000)
+_OUTPUT_CAP_SAFETY_TOKENS = 1024
+_EFFORT_PATHS = (
+    ("reasoning_effort",),
+    ("reasoning", "effort"),
+    ("output_config", "effort"),
+)
+_THINKING_BUDGET_PATHS = (
+    ("thinking", "budget_tokens"),
+    ("generationConfig", "thinkingConfig", "thinkingBudget"),
+    ("extra_body", "thinking_budget"),
+    ("extra_body", "thinking", "budget_tokens"),
+    ("chat_template_kwargs", "thinking_budget"),
+)
 
 
 class _ContextLimitSignal(RuntimeError):
@@ -190,6 +210,51 @@ def _is_invalid_response_error(error: EnhancedTranslationError) -> bool:
     """Accept both legacy internal spelling and provider enum spelling."""
 
     return error.category.replace("_", "-") == LLMErrorCategory.INVALID_RESPONSE.value
+
+
+def _lower_reasoning_options(
+    role: TranslationRoleSnapshot, output_cap: int
+) -> Optional[dict[str, Any]]:
+    """Return a retry-only copy with recognized reasoning controls reduced."""
+
+    options = thaw_json_object(role.profile.request_options)
+    changed = False
+
+    for path in _EFFORT_PATHS:
+        cursor: Any = options
+        for key in path[:-1]:
+            if not isinstance(cursor, dict) or not isinstance(cursor.get(key), dict):
+                cursor = None
+                break
+            cursor = cursor[key]
+        if not isinstance(cursor, dict):
+            continue
+        value = cursor.get(path[-1])
+        if isinstance(value, str) and value.casefold() not in {
+            "none",
+            "off",
+            "minimal",
+            "low",
+        }:
+            cursor[path[-1]] = "low"
+            changed = True
+
+    target_budget = max(1024, output_cap // 8)
+    for path in _THINKING_BUDGET_PATHS:
+        cursor = options
+        for key in path[:-1]:
+            if not isinstance(cursor, dict) or not isinstance(cursor.get(key), dict):
+                cursor = None
+                break
+            cursor = cursor[key]
+        if not isinstance(cursor, dict):
+            continue
+        value = cursor.get(path[-1])
+        if type(value) is int and value > target_budget:
+            cursor[path[-1]] = target_budget
+            changed = True
+
+    return options if changed else None
 
 
 def _structured_output_instruction(schema: Mapping[str, Any]) -> str:
@@ -644,32 +709,107 @@ class EnhancedTranslationOrchestrator:
         last_error = "invalid structured response"
         for attempt in range(1, mechanical_attempts + 1):
             self.cancellation.raise_if_cancelled()
-            request = LLMRequest(
-                messages=tuple(messages),
-                max_output_tokens=self._output_reserve(
-                    role, self._runtime_budget(role)
-                ),
-                response_schema=schema,
-                metadata={"stage": stage, "role": role.role},
+            input_tokens = estimate_tokens(
+                "\n".join(message.content for message in messages)
             )
-            try:
-                result = self.gateway.complete(
-                    role.profile,
-                    request,
-                    cancelled=lambda: self.cancellation.cancelled,
+            output_caps = self._request_output_caps(
+                role, self._runtime_budget(role), input_tokens, stage=stage
+            )
+            cap_index = 0
+            request_options_override: Optional[Mapping[str, Any]] = None
+            provider_attempts = 0
+            while True:
+                output_cap = output_caps[cap_index]
+                request = LLMRequest(
+                    messages=tuple(messages),
+                    max_output_tokens=output_cap,
+                    request_options_override=request_options_override,
+                    response_schema=schema,
+                    metadata={"stage": stage, "role": role.role},
                 )
-            except InterruptedError:
-                raise
-            except LLMCallError as exc:
-                if exc.category is LLMErrorCategory.CONTEXT_LIMIT:
-                    raise _ContextLimitSignal(role, stage, exc) from exc
-                raise EnhancedTranslationError(
-                    str(exc),
-                    stage=stage,
-                    category=exc.category.value,
-                    retryable=exc.retryable,
-                    attempts=exc.attempts,
-                ) from exc
+                try:
+                    provider_attempts += 1
+                    result = self.gateway.complete(
+                        role.profile,
+                        request,
+                        cancelled=lambda: self.cancellation.cancelled,
+                    )
+                    break
+                except InterruptedError:
+                    raise
+                except LLMCallError as exc:
+                    provider_attempts += max(1, exc.attempts) - 1
+                    if exc.usage is not None:
+                        self._usage.add(role.role, stage, exc.usage)
+                    if exc.category is LLMErrorCategory.CONTEXT_LIMIT:
+                        raise _ContextLimitSignal(role, stage, exc) from exc
+                    if not is_output_limit_finish_reason(exc.finish_reason):
+                        raise EnhancedTranslationError(
+                            str(exc),
+                            stage=stage,
+                            category=exc.category.value,
+                            retryable=exc.retryable,
+                            attempts=provider_attempts,
+                        ) from exc
+
+                    current_options = (
+                        request_options_override
+                        if request_options_override is not None
+                        else role.profile.request_options
+                    )
+                    retry_role = replace(
+                        role,
+                        profile=replace(
+                            role.profile,
+                            request_options=current_options,
+                        ),
+                    )
+                    lowered_options = _lower_reasoning_options(
+                        retry_role, output_cap
+                    )
+                    reasoning_changed = lowered_options is not None
+                    if reasoning_changed:
+                        request_options_override = lowered_options
+
+                    # Review/audit first retries at the same cap with less reasoning.
+                    if role.role == "review" and reasoning_changed:
+                        logger.warning(
+                            "Output cap exhausted for stage=%s; retrying at %s tokens "
+                            "with reduced reasoning",
+                            stage,
+                            output_cap,
+                        )
+                        continue
+
+                    if cap_index + 1 < len(output_caps):
+                        previous_cap = output_cap
+                        cap_index += 1
+                        logger.warning(
+                            "Output cap exhausted for stage=%s; increasing cap from %s "
+                            "to %s%s",
+                            stage,
+                            previous_cap,
+                            output_caps[cap_index],
+                            " with reduced reasoning" if reasoning_changed else "",
+                        )
+                        continue
+
+                    if reasoning_changed:
+                        logger.warning(
+                            "Output cap exhausted for stage=%s; retrying the configured "
+                            "cap %s with reduced reasoning",
+                            stage,
+                            output_cap,
+                        )
+                        continue
+
+                    raise EnhancedTranslationError(
+                        str(exc),
+                        stage=stage,
+                        category="output_limit",
+                        retryable=False,
+                        attempts=provider_attempts,
+                    ) from exc
             self._usage.add(role.role, stage, result.usage)
             try:
                 parsed = json_repair.loads(result.text)
@@ -713,12 +853,81 @@ class EnhancedTranslationOrchestrator:
         )
 
     @staticmethod
-    def _output_reserve(
-        role: TranslationRoleSnapshot, work_context_tokens: int
+    def _planning_output_reserve(
+        role: TranslationRoleSnapshot,
+        work_context_tokens: int,
+        *,
+        stage: str,
     ) -> int:
+        """Estimate output for batching without treating the API hard cap as usage."""
+
+        ceiling = 4096 if stage == "audit" else 8192
+        reserve = min(ceiling, max(1024, work_context_tokens // 8))
         if role.profile.max_output_tokens is not None:
-            return role.profile.max_output_tokens
-        return min(8192, max(1024, work_context_tokens // 8))
+            reserve = min(reserve, role.profile.max_output_tokens)
+        return reserve
+
+    @staticmethod
+    def _request_output_caps(
+        role: TranslationRoleSnapshot,
+        work_context_tokens: int,
+        estimated_input_tokens: int,
+        *,
+        stage: str,
+    ) -> tuple[int, ...]:
+        """Resolve an exact configured cap or bounded automatic escalation tiers."""
+
+        if role.profile.max_output_tokens is not None:
+            return (role.profile.max_output_tokens,)
+        available = (
+            work_context_tokens
+            - estimated_input_tokens
+            - _OUTPUT_CAP_SAFETY_TOKENS
+        )
+        if available < 1024:
+            raise EnhancedTranslationError(
+                "prompt leaves less than 1024 tokens for generated output",
+                stage=stage,
+                category="context_budget",
+                retryable=False,
+            )
+        caps: list[int] = []
+        for tier in _AUTO_OUTPUT_CAP_TIERS:
+            cap = min(tier, available)
+            if cap not in caps:
+                caps.append(cap)
+        return tuple(caps)
+
+    def _split_batch(
+        self, batch: TranslationBatch
+    ) -> tuple[TranslationBatch, TranslationBatch]:
+        """Split subjects in half while rebuilding read-only adjacent context."""
+
+        midpoint = len(batch.subjects) // 2
+        if midpoint <= 0:
+            raise ValueError("cannot split a single-subtitle batch")
+        left_subjects = batch.subjects[:midpoint]
+        right_subjects = batch.subjects[midpoint:]
+        radius = self.config.boundary_context_radius
+        if radius == 0:
+            left_before = left_after = right_before = right_after = ()
+        else:
+            left_before = batch.context_before[-radius:]
+            left_after = (*right_subjects, *batch.context_after)[:radius]
+            right_before = (*batch.context_before, *left_subjects)[-radius:]
+            right_after = batch.context_after[:radius]
+        return (
+            TranslationBatch(
+                subjects=left_subjects,
+                context_before=tuple(left_before),
+                context_after=tuple(left_after),
+            ),
+            TranslationBatch(
+                subjects=right_subjects,
+                context_before=tuple(right_before),
+                context_after=tuple(right_after),
+            ),
+        )
 
     def _analyze(
         self, cues: Sequence[SubtitleCue]
@@ -735,7 +944,9 @@ class EnhancedTranslationOrchestrator:
             cues,
             working_context_tokens=budget,
             fixed_prompt_tokens=fixed,
-            output_reserve_tokens=self._output_reserve(role, budget),
+            output_reserve_tokens=self._planning_output_reserve(
+                role, budget, stage="analysis"
+            ),
             overlap_cues=2,
         )
         analyses = [
@@ -794,7 +1005,10 @@ class EnhancedTranslationOrchestrator:
         budget: int,
     ) -> tuple[tuple[TranslationContextBrief, ...], ...]:
         available = max(
-            1024, budget - self._output_reserve(role, budget) - 2048
+            1024,
+            budget
+            - self._planning_output_reserve(role, budget, stage="analysis")
+            - 2048,
         )
         groups: list[list[TranslationContextBrief]] = []
         current: list[TranslationContextBrief] = []
@@ -1143,7 +1357,9 @@ class EnhancedTranslationOrchestrator:
                 batch_size=self.config.batch_size,
                 working_context_tokens=budget,
                 fixed_prompt_tokens=fixed,
-                output_reserve_tokens=self._output_reserve(role, budget),
+                output_reserve_tokens=self._planning_output_reserve(
+                    role, budget, stage="translation"
+                ),
                 context_radius=self.config.boundary_context_radius,
             )
         except TokenBudgetExceeded as exc:
@@ -1208,16 +1424,31 @@ class EnhancedTranslationOrchestrator:
             glossary, (*batch.context_before, *batch.subjects, *batch.context_after)
         )
         expected = set(batch.subject_ids)
-        return self._call_json(
-            self.config.main_role,
-            stage="translation",
-            brief=brief,
-            glossary_entries=relevant,
-            instruction=_TRANSLATE_INSTRUCTION,
-            payload=translation_batch_payload(batch),
-            schema=_TRANSLATION_SCHEMA,
-            validator=lambda value: self._parse_translations(value, expected),
-        )
+        try:
+            return self._call_json(
+                self.config.main_role,
+                stage="translation",
+                brief=brief,
+                glossary_entries=relevant,
+                instruction=_TRANSLATE_INSTRUCTION,
+                payload=translation_batch_payload(batch),
+                schema=_TRANSLATION_SCHEMA,
+                validator=lambda value: self._parse_translations(value, expected),
+            )
+        except EnhancedTranslationError as exc:
+            if exc.category != "output_limit" or len(batch.subjects) == 1:
+                raise
+            left, right = self._split_batch(batch)
+            logger.warning(
+                "Translation output remained truncated for subtitles %s-%s; "
+                "splitting the batch",
+                batch.subject_ids[0],
+                batch.subject_ids[-1],
+            )
+            return {
+                **self._translate_batch(left, brief, glossary),
+                **self._translate_batch(right, brief, glossary),
+            }
 
     @staticmethod
     def _parse_translations(value: Any, expected: set[int]) -> dict[int, str]:
@@ -1324,7 +1555,9 @@ class EnhancedTranslationOrchestrator:
                 batch_size=self.config.batch_size,
                 working_context_tokens=budget,
                 fixed_prompt_tokens=0,
-                output_reserve_tokens=self._output_reserve(role, budget),
+                output_reserve_tokens=self._planning_output_reserve(
+                    role, budget, stage="audit"
+                ),
                 context_radius=self.config.boundary_context_radius,
                 batch_input_estimator=estimate_audit_input,
             )
@@ -1336,7 +1569,9 @@ class EnhancedTranslationOrchestrator:
                 retryable=False,
             ) from exc
         model_issues: list[TranslationAuditIssue] = []
-        for batch in batches:
+        pending_batches = list(batches)
+        while pending_batches:
+            batch = pending_batches.pop(0)
             relevant = select_relevant_entries(
                 glossary, (*batch.context_before, *batch.subjects, *batch.context_after)
             )
@@ -1356,6 +1591,25 @@ class EnhancedTranslationOrchestrator:
                     ),
                 )
             except EnhancedTranslationError as exc:
+                if exc.category == "output_limit" and len(batch.subjects) > 1:
+                    left, right = self._split_batch(batch)
+                    pending_batches[0:0] = [left, right]
+                    logger.warning(
+                        "Audit output remained truncated for subtitles %s-%s; "
+                        "splitting the batch",
+                        batch.subject_ids[0],
+                        batch.subject_ids[-1],
+                    )
+                    continue
+                if exc.category == "output_limit":
+                    subject_ids = batch.subject_ids
+                    warning = (
+                        f"高级校对对字幕 {subject_ids[0]} 的输出额度仍不足，"
+                        "已跳过该字幕模型审校；译文和本地审计结果已保留。"
+                    )
+                    logger.warning("%s 诊断：%s", warning, exc)
+                    self._warnings.append(warning)
+                    continue
                 if not _is_invalid_response_error(exc):
                     raise
                 subject_ids = batch.subject_ids

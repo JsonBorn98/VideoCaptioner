@@ -6,6 +6,7 @@ import hashlib
 import json
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import Any, Mapping, Optional
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -21,6 +22,7 @@ from .models import (
     LLMUsage,
     OpenAIEndpoint,
     ProviderDialect,
+    is_output_limit_finish_reason,
 )
 from .request_options import (
     RequestOptionsError,
@@ -230,9 +232,21 @@ class LLMAdapter(ABC):
     def close(self) -> None:
         """Release provider resources owned by this adapter, if any."""
 
-    def _merge_request_options(self, application_body: Mapping[str, Any]) -> dict[str, Any]:
+    def _effective_profile(self, request: LLMRequest) -> LLMModelProfile:
+        if request.request_options_override is None:
+            return self.profile
+        return replace(
+            self.profile,
+            request_options=request.request_options_override,
+        )
+
+    def _merge_request_options(
+        self, application_body: Mapping[str, Any], request: LLMRequest
+    ) -> dict[str, Any]:
         try:
-            return merge_profile_request_options(self.profile, application_body)
+            return merge_profile_request_options(
+                self._effective_profile(request), application_body
+            )
         except RequestOptionsError as exc:
             raise LLMCallError(
                 str(exc),
@@ -240,9 +254,9 @@ class LLMAdapter(ABC):
                 retryable=False,
             ) from exc
 
-    def _validate_structured_output_compatibility(self) -> None:
+    def _validate_structured_output_compatibility(self, request: LLMRequest) -> None:
         try:
-            validate_structured_output_compatibility(self.profile)
+            validate_structured_output_compatibility(self._effective_profile(request))
         except RequestOptionsError as exc:
             raise LLMCallError(
                 str(exc),
@@ -354,7 +368,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 }
             else:
                 application_body["response_format"] = {"type": "json_object"}
-        final_body = self._merge_request_options(application_body)
+        final_body = self._merge_request_options(application_body, request)
         kwargs = {
             name: final_body.pop(name)
             for name in (
@@ -377,13 +391,21 @@ class OpenAICompatibleAdapter(LLMAdapter):
         finish_reason = _diagnostic_text(_read_attr(choice, "finish_reason"))
         response_status = _diagnostic_text(_read_attr(response, "status"))
         usage = _openai_chat_usage(response)
+        if is_output_limit_finish_reason(finish_reason):
+            raise LLMCallError(
+                "LLM provider reached the output limit before final content",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=True,
+                finish_reason=finish_reason,
+                response_status=response_status,
+                choice_count=len(choices),
+                usage=usage,
+            )
         if not isinstance(text, str) or not text.strip():
             refused = bool(_read_attr(message, "refusal")) if message is not None else False
             if refused:
                 error_message = "LLM provider refused the request"
                 response_status = response_status or "refusal"
-            elif finish_reason in {"length", "max_tokens", "max_output_tokens"}:
-                error_message = "LLM provider reached the output limit without final content"
             else:
                 error_message = "LLM provider returned empty content"
             raise LLMCallError(
@@ -425,7 +447,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
                     "schema": dict(request.response_schema),
                 }
             }
-        final_body = self._merge_request_options(application_body)
+        final_body = self._merge_request_options(application_body, request)
         kwargs = {
             name: final_body.pop(name)
             for name in ("model", "input", "stream", "background", "max_output_tokens")
@@ -500,7 +522,7 @@ class AnthropicMessagesAdapter(LLMAdapter):
 
     def complete(self, request: LLMRequest) -> LLMResult:
         if request.response_schema is not None:
-            self._validate_structured_output_compatibility()
+            self._validate_structured_output_compatibility(request)
         system_text = "\n\n".join(
             item.content for item in request.messages if item.role == "system"
         )
@@ -542,7 +564,7 @@ class AnthropicMessagesAdapter(LLMAdapter):
                 "type": "tool",
                 "name": "structured_response",
             }
-        payload = self._merge_request_options(application_body)
+        payload = self._merge_request_options(application_body, request)
         try:
             response = self.session.post(
                 _endpoint(self.profile.base_url, "/v1/messages"),
@@ -600,6 +622,16 @@ class AnthropicMessagesAdapter(LLMAdapter):
             ]
             if tool_inputs:
                 text = json.dumps(tool_inputs[0], ensure_ascii=False)
+        if is_output_limit_finish_reason(finish_reason):
+            raise LLMCallError(
+                "Anthropic reached the output limit before final content",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=True,
+                finish_reason=finish_reason,
+                response_status="truncated",
+                choice_count=len(content),
+                usage=usage,
+            )
         if not text:
             raise LLMCallError(
                 "Anthropic returned empty content",
@@ -733,7 +765,7 @@ class GeminiAdapter(LLMAdapter):
             payload["cachedContent"] = cached_content
         elif system_text:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-        payload = self._merge_request_options(payload)
+        payload = self._merge_request_options(payload, request)
         base = self.profile.base_url.rstrip("/")
         url = f"{base}/models/{quote(self.profile.model, safe='')}:generateContent"
         try:
@@ -810,6 +842,16 @@ class GeminiAdapter(LLMAdapter):
         text = "".join(
             str(item.get("text", "")) for item in parts if isinstance(item, Mapping)
         ).strip()
+        if is_output_limit_finish_reason(finish_reason):
+            raise LLMCallError(
+                "Gemini reached the output limit before final content",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=True,
+                finish_reason=finish_reason,
+                response_status="truncated",
+                choice_count=len(candidates),
+                usage=usage,
+            )
         if not text:
             raise LLMCallError(
                 "Gemini returned empty content",

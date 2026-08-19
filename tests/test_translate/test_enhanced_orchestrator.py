@@ -113,6 +113,16 @@ def _translations(*items):
     return {"translations": [{"id": cue_id, "text": text} for cue_id, text in items]}
 
 
+def _output_limit_error(*, attempts: int = 1):
+    return LLMCallError(
+        "generated output exhausted the configured limit",
+        category=LLMErrorCategory.INVALID_RESPONSE,
+        retryable=True,
+        attempts=attempts,
+        finish_reason="length",
+    )
+
+
 class ScriptedGateway:
     def __init__(self, **responses):
         self.responses = {stage: list(values) for stage, values in responses.items()}
@@ -242,9 +252,11 @@ def test_context_fallback_auto_recalculates_output_reserve_for_lower_context(mon
     ).run((SubtitleCue(1, "Source"),))
 
     assert observed_plans == [(65_536, 8_192), (32_768, 4_096)]
-    assert [
+    request_caps = [
         request.max_output_tokens for request in gateway.stage_calls["analysis_window"]
-    ] == [8_192, 4_096]
+    ]
+    assert request_caps[0] == 32_768
+    assert 1_024 <= request_caps[1] < 32_768
 
 
 def test_context_fallback_never_reduces_below_explicit_output_cap(monkeypatch):
@@ -278,8 +290,119 @@ def test_context_fallback_never_reduces_below_explicit_output_cap(monkeypatch):
     assert "max_output_tokens=20000 leaves no safe runtime context fallback" in str(
         raised.value
     )
-    assert observed_plans == [(65_536, 20_000), (32_768, 20_000)]
+    assert observed_plans == [(65_536, 8_192), (32_768, 4_096)]
     assert len(gateway.stage_calls["analysis_window"]) == 2
+    assert all(
+        request.max_output_tokens == 20_000
+        for request in gateway.stage_calls["analysis_window"]
+    )
+
+
+def test_256k_api_cap_is_not_used_as_the_planner_output_reserve():
+    role = TranslationRoleSnapshot(
+        "main",
+        _profile(
+            "main",
+            work_context_tokens=300_000,
+            max_output_tokens=256_000,
+        ),
+    )
+
+    assert (
+        EnhancedTranslationOrchestrator._planning_output_reserve(
+            role, 300_000, stage="translation"
+        )
+        == 8_192
+    )
+    assert (
+        EnhancedTranslationOrchestrator._planning_output_reserve(
+            role, 300_000, stage="audit"
+        )
+        == 4_096
+    )
+    assert EnhancedTranslationOrchestrator._request_output_caps(
+        role,
+        300_000,
+        1_000,
+        stage="translation",
+    ) == (256_000,)
+
+
+def test_main_output_limit_raises_cap_and_reduces_reasoning_together():
+    main_profile = _profile(
+        "main",
+        work_context_tokens=300_000,
+        request_options={"reasoning_effort": "high", "metadata": {"mode": "translate"}},
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_output_limit_error(), _translations((1, "译文"))],
+        audit=[{"issues": []}],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(main_profile=main_profile), gateway=gateway
+    ).run((SubtitleCue(1, "Source"),))
+
+    requests = gateway.stage_calls["translation"]
+    assert result.translations == {1: "译文"}
+    assert [request.max_output_tokens for request in requests] == [32_768, 65_536]
+    assert requests[0].request_options_override is None
+    assert requests[1].request_options_override["reasoning_effort"] == "low"
+    assert requests[1].request_options_override["metadata"]["mode"] == "translate"
+    assert main_profile.request_options["reasoning_effort"] == "high"
+
+
+def test_review_output_limit_reduces_reasoning_before_raising_cap():
+    review_profile = _profile(
+        "review",
+        work_context_tokens=300_000,
+        request_options={"reasoning": {"effort": "xhigh"}},
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[_output_limit_error(), _output_limit_error(), {"issues": []}],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(review_profile=review_profile), gateway=gateway
+    ).run((SubtitleCue(1, "Source"),))
+
+    requests = gateway.stage_calls["audit"]
+    assert result.translations == {1: "译文"}
+    assert [request.max_output_tokens for request in requests] == [
+        32_768,
+        32_768,
+        65_536,
+    ]
+    assert requests[0].request_options_override is None
+    assert requests[1].request_options_override["reasoning"]["effort"] == "low"
+    assert requests[2].request_options_override["reasoning"]["effort"] == "low"
+    assert review_profile.request_options["reasoning"]["effort"] == "xhigh"
+
+
+def test_adaptive_reasoning_reduces_known_numeric_thinking_budgets():
+    role = TranslationRoleSnapshot(
+        "main",
+        _profile(
+            "main",
+            request_options={
+                "generationConfig": {
+                    "thinkingConfig": {"thinkingBudget": 20_000},
+                    "topP": 0.9,
+                },
+                "extra_body": {"thinking_budget": 12_000},
+            },
+        ),
+    )
+
+    lowered = orchestrator_module._lower_reasoning_options(role, 32_768)
+
+    assert lowered["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 4_096
+    assert lowered["generationConfig"]["topP"] == 0.9
+    assert lowered["extra_body"]["thinking_budget"] == 4_096
+    assert role.profile.request_options["extra_body"]["thinking_budget"] == 12_000
 
 
 def test_automatic_full_chain_uses_directional_term_review_and_three_pass_roles():
@@ -780,6 +903,57 @@ def test_exact_glossary_still_analyzes_but_skips_all_term_calls():
     assert gateway.stages == ["analysis_window", "translation", "audit"]
     assert result.glossary is glossary
     assert '"translation":"水星"' in gateway.stage_calls["translation"][0].messages[1].content
+
+
+def test_translation_batch_splits_after_all_automatic_output_caps_are_exhausted():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 5))
+    main_profile = _profile("main", work_context_tokens=300_000)
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[
+            _output_limit_error(),
+            _output_limit_error(),
+            _output_limit_error(),
+            _translations((1, "译文 1"), (2, "译文 2")),
+            _translations((3, "译文 3"), (4, "译文 4")),
+        ],
+        audit=[{"issues": []}],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(batch_size=4, main_profile=main_profile), gateway=gateway
+    ).run(cues)
+
+    assert result.translations == {
+        1: "译文 1",
+        2: "译文 2",
+        3: "译文 3",
+        4: "译文 4",
+    }
+    assert [
+        request.max_output_tokens for request in gateway.stage_calls["translation"]
+    ] == [32_768, 65_536, 256_000, 32_768, 32_768]
+
+
+def test_audit_batch_splits_then_single_output_limit_degrades_safely():
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    review_profile = _profile("review", max_output_tokens=2_048)
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文 1"), (2, "译文 2"))],
+        audit=[_output_limit_error(), _output_limit_error(), {"issues": []}],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(batch_size=2, review_profile=review_profile), gateway=gateway
+    ).run(cues)
+
+    assert result.translations == {1: "译文 1", 2: "译文 2"}
+    assert len(gateway.stage_calls["audit"]) == 3
+    assert result.audit_report.warnings == (
+        "高级校对对字幕 1 的输出额度仍不足，已跳过该字幕模型审校；"
+        "译文和本地审计结果已保留。",
+    )
 
 
 def test_required_translation_failure_does_not_run_audit_or_return_partial_result():

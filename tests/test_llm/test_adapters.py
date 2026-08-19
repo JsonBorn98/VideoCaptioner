@@ -335,6 +335,37 @@ def test_openai_chat_empty_completion_preserves_safe_diagnostics():
     assert error.usage.reasoning_tokens == 8192
 
 
+def test_openai_chat_rejects_nonempty_truncated_content():
+    class TruncatedCompletions:
+        def create(self, **_kwargs):
+            return SimpleNamespace(
+                status="completed",
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(content='{"translation":', refusal=None),
+                    )
+                ],
+            )
+
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.OPENAI,
+            base_url="https://api.openai.test/v1",
+        ),
+        client=SimpleNamespace(
+            chat=SimpleNamespace(completions=TruncatedCompletions())
+        ),
+    )
+
+    with pytest.raises(LLMCallError, match="output limit") as caught:
+        adapter.complete(_request())
+
+    assert caught.value.finish_reason == "length"
+    assert caught.value.response_status == "completed"
+
+
 def test_openai_chat_accepts_legacy_temperature_omit_and_passes_unknown_options():
     completions = _OpenAICompletions()
     profile = _profile(
@@ -363,6 +394,42 @@ def test_openai_chat_accepts_legacy_temperature_omit_and_passes_unknown_options(
         "extra_body": {"enable_thinking": True},
         "metadata": {"model": "ordinary nested value"},
     }
+
+
+def test_request_options_override_is_request_scoped_and_preserves_profile():
+    completions = _OpenAICompletions()
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        base_url="https://api.openai.test/v1",
+        request_options={
+            "reasoning_effort": "high",
+            "metadata": {"mode": "profile"},
+        },
+    )
+    adapter = OpenAICompatibleAdapter(
+        profile,
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+    base_request = _request()
+    request = LLMRequest(
+        messages=base_request.messages,
+        max_output_tokens=base_request.max_output_tokens,
+        request_options_override={
+            "reasoning_effort": "low",
+            "metadata": {"mode": "adaptive-retry"},
+        },
+        response_schema=base_request.response_schema,
+    )
+
+    adapter.complete(request)
+
+    assert completions.kwargs["extra_body"]["reasoning_effort"] == "low"
+    assert completions.kwargs["extra_body"]["metadata"] == {
+        "mode": "adaptive-retry"
+    }
+    assert profile.request_options["reasoning_effort"] == "high"
+    assert profile.request_options["metadata"]["mode"] == "profile"
 
 
 def test_adapter_reports_protected_request_option_as_non_retryable_configuration():
@@ -540,16 +607,44 @@ def test_anthropic_empty_completion_preserves_stop_reason_and_usage():
         ),
     )
 
-    with pytest.raises(LLMCallError, match="empty content") as caught:
+    with pytest.raises(LLMCallError, match="output limit") as caught:
         adapter.complete(_request())
 
     error = caught.value
     assert error.retryable is True
     assert error.finish_reason == "max_tokens"
-    assert error.response_status == "empty"
+    assert error.response_status == "truncated"
     assert error.choice_count == 0
     assert error.usage.input_tokens == 3000
     assert error.usage.output_tokens == 8192
+
+
+def test_anthropic_rejects_nonempty_truncated_content():
+    session = _Session(
+        _Response(
+            {
+                "content": [{"type": "text", "text": '{"translation":'}],
+                "stop_reason": "max_tokens",
+                "usage": {"input_tokens": 100, "output_tokens": 200},
+            }
+        )
+    )
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+        ),
+        session=session,
+    )
+
+    with pytest.raises(LLMCallError, match="output limit") as caught:
+        adapter.complete(
+            LLMRequest(messages=_request().messages, max_output_tokens=321)
+        )
+
+    assert caught.value.finish_reason == "max_tokens"
+    assert caught.value.response_status == "truncated"
 
 
 def test_anthropic_applies_native_thinking_options_with_legacy_temperature_omit():
@@ -602,6 +697,34 @@ def test_anthropic_rejects_manual_thinking_with_forced_structured_tool_before_ht
 
     assert caught.value.category is LLMErrorCategory.CONFIGURATION
     assert caught.value.retryable is False
+    assert "force tool_choice" in str(caught.value)
+    assert session.calls == []
+
+
+def test_anthropic_request_override_cannot_bypass_structured_thinking_validation():
+    session = _Session(_Response({"content": [{"type": "text", "text": "unused"}]}))
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+        ),
+        session=session,
+    )
+    base_request = _request()
+    request = LLMRequest(
+        messages=base_request.messages,
+        max_output_tokens=base_request.max_output_tokens,
+        response_schema=base_request.response_schema,
+        request_options_override={
+            "thinking": {"type": "enabled", "budget_tokens": 2048}
+        },
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(request)
+
+    assert caught.value.category is LLMErrorCategory.CONFIGURATION
     assert "force tool_choice" in str(caught.value)
     assert session.calls == []
 
@@ -662,7 +785,7 @@ def test_gemini_maps_request_schema_and_usage():
 
 
 @pytest.mark.parametrize(
-    ("body", "retryable", "finish_reason", "response_status"),
+    ("body", "retryable", "finish_reason", "response_status", "message"),
     [
         (
             {
@@ -674,7 +797,8 @@ def test_gemini_maps_request_schema_and_usage():
             },
             True,
             "MAX_TOKENS",
-            "empty",
+            "truncated",
+            "output limit",
         ),
         (
             {
@@ -685,11 +809,12 @@ def test_gemini_maps_request_schema_and_usage():
             False,
             "SAFETY",
             "blocked",
+            "empty content",
         ),
     ],
 )
 def test_gemini_empty_completion_preserves_safe_diagnostics(
-    body, retryable, finish_reason, response_status
+    body, retryable, finish_reason, response_status, message
 ):
     adapter = GeminiAdapter(
         _profile(
@@ -700,7 +825,7 @@ def test_gemini_empty_completion_preserves_safe_diagnostics(
         session=_Session(_Response(body)),
     )
 
-    with pytest.raises(LLMCallError, match="empty content") as caught:
+    with pytest.raises(LLMCallError, match=message) as caught:
         adapter.complete(_request())
 
     error = caught.value
@@ -709,6 +834,32 @@ def test_gemini_empty_completion_preserves_safe_diagnostics(
     assert error.response_status == response_status
     assert error.choice_count == len(body["candidates"])
     assert error.usage.input_tokens == body["usageMetadata"]["promptTokenCount"]
+
+
+def test_gemini_rejects_nonempty_truncated_content():
+    body = {
+        "candidates": [
+            {
+                "finishReason": "MAX_TOKENS",
+                "content": {"parts": [{"text": '{"translation":'}]},
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200},
+    }
+    adapter = GeminiAdapter(
+        _profile(
+            LLMTransport.GEMINI,
+            ProviderDialect.GEMINI,
+            base_url="https://generativelanguage.test/v1beta",
+        ),
+        session=_Session(_Response(body)),
+    )
+
+    with pytest.raises(LLMCallError, match="output limit") as caught:
+        adapter.complete(_request())
+
+    assert caught.value.finish_reason == "MAX_TOKENS"
+    assert caught.value.response_status == "truncated"
 
 
 def test_gemini_shallow_options_restore_protected_generation_fields():
