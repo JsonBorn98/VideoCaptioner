@@ -1,0 +1,29 @@
+{
+  "name": "Nihon",
+  "description": "",
+  "mode": "ass",
+  "reference_width": 3840,
+  "reference_height": 2160,
+  "font_name": "Noto Serif CJK SC Black",
+  "font_size": 148,
+  "primary_color": "#e9edf0",
+  "outline_color": "#078080",
+  "outline_width": 10.0,
+  "bold": true,
+  "spacing": 6.4,
+  "margin_bottom": 64,
+  "shadow": 0.0,
+  "margin_l": 10,
+  "margin_r": 10,
+  "wrap_style": 1,
+  "secondary": {
+    "font_name": "Broadway",
+    "font_size": 74,
+    "color": "#e9edf0",
+    "outline_color": "#804a78",
+    "outline_width": 10.0,
+    "spacing": 1.6,
+    "shadow": 0.0,
+    "margin_bottom": null
+  }
+}

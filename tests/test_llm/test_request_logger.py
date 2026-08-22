@@ -190,6 +190,37 @@ def test_error_log_keeps_safe_finish_reason_and_usage_without_raw_content(
     assert "secret" not in serialized
 
 
+def test_gateway_logs_only_safe_responses_incomplete_diagnostics(tmp_path, monkeypatch):
+    class IncompleteAdapter(LLMAdapter):
+        def complete(self, request):
+            raise LLMCallError(
+                "provider response text must not be logged",
+                category=LLMErrorCategory.INVALID_RESPONSE,
+                retryable=False,
+                finish_reason="max_output_tokens",
+                response_status="incomplete",
+            )
+
+    log_path = tmp_path / "incomplete.jsonl"
+    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
+    profile = _profile()
+
+    with pytest.raises(LLMCallError):
+        LLMGateway(adapter_factory=lambda _profile: IncompleteAdapter(profile)).complete(
+            profile,
+            LLMRequest(messages=(LLMMessage("user", "private subtitle"),)),
+        )
+
+    entry = json.loads(log_path.read_text("utf-8"))
+    assert entry["error"]["diagnostics"] == {
+        "finish_reason": "max_output_tokens",
+        "response_status": "incomplete",
+    }
+    serialized = log_path.read_text("utf-8")
+    assert "provider response text" not in serialized
+    assert "private subtitle" not in serialized
+
+
 def test_content_logging_only_adds_prompts_and_normalized_final_text(
     tmp_path, monkeypatch
 ):
