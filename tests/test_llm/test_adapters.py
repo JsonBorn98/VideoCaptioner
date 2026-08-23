@@ -151,6 +151,178 @@ def test_generic_openai_compatible_preserves_deepseek_cache_hit_usage():
     assert result.usage.cache_write_tokens is None
 
 
+class _ToolCallCompletions:
+    """A provider that honours a forced function call, as GLM and Kimi do."""
+
+    def __init__(self, arguments):
+        self.arguments = arguments
+        self.kwargs = None
+
+    def create(self, **kwargs):
+        self.kwargs = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="structured_response",
+                                    arguments=self.arguments,
+                                )
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+        )
+
+
+def _chat_adapter(dialect: ProviderDialect, completions) -> OpenAICompatibleAdapter:
+    return OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            dialect,
+            base_url="https://gateway.test/v1",
+        ),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+
+
+@pytest.mark.parametrize(
+    "dialect",
+    [
+        ProviderDialect.GLM,
+        ProviderDialect.KIMI,
+        ProviderDialect.DEEPSEEK,
+        ProviderDialect.ANTHROPIC,
+    ],
+)
+def test_chat_dialects_without_native_schema_force_a_structured_tool_call(dialect):
+    completions = _ToolCallCompletions('{"translation":"ok"}')
+
+    result = _chat_adapter(dialect, completions).complete(_request())
+
+    assert "response_format" not in completions.kwargs
+    assert completions.kwargs["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "structured_response",
+                "description": "Return the requested structured response.",
+                "parameters": dict(_request().response_schema),
+            },
+        }
+    ]
+    assert completions.kwargs["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "structured_response"},
+    }
+    assert result.text == '{"translation":"ok"}'
+
+
+def test_structured_tool_call_accepts_proxy_decoded_arguments():
+    completions = _ToolCallCompletions({"translation": "ok"})
+
+    result = _chat_adapter(ProviderDialect.GLM, completions).complete(_request())
+
+    assert json.loads(result.text) == {"translation": "ok"}
+
+
+def test_ignored_tool_choice_degrades_to_message_content():
+    class IgnoresToolChoice:
+        def create(self, **_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=' {"translation":"ok"} ',
+                            tool_calls=None,
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+
+    result = _chat_adapter(ProviderDialect.GLM, IgnoresToolChoice()).complete(_request())
+
+    assert result.text == '{"translation":"ok"}'
+
+
+def test_chat_unidentified_dialect_keeps_portable_json_mode():
+    completions = _OpenAICompletions()
+
+    result = _chat_adapter(ProviderDialect.GENERIC, completions).complete(_request())
+
+    assert completions.kwargs["response_format"] == {"type": "json_object"}
+    assert "tools" not in completions.kwargs
+    assert "tool_choice" not in completions.kwargs
+    assert result.text == '{"translation":"ok"}'
+
+
+def test_chat_without_response_schema_sends_no_structured_controls():
+    completions = _OpenAICompletions()
+
+    _chat_adapter(ProviderDialect.GLM, completions).complete(
+        LLMRequest(messages=(LLMMessage("user", "Hi"),), max_output_tokens=32)
+    )
+
+    assert "response_format" not in completions.kwargs
+    assert "tools" not in completions.kwargs
+    assert "tool_choice" not in completions.kwargs
+
+
+class _RejectsForcedTool:
+    def __init__(self, message: str):
+        self.message = message
+        self.bodies = []
+
+    def create(self, **kwargs):
+        self.bodies.append(kwargs)
+        if "tools" in kwargs:
+            request = httpx.Request("POST", "https://gateway.test/v1/chat/completions")
+            raise openai.BadRequestError(
+                self.message,
+                response=httpx.Response(400, request=request),
+                body=None,
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"translation":"ok"}'),
+                    finish_reason="stop",
+                )
+            ],
+            usage=None,
+        )
+
+
+def test_forced_structured_tool_falls_back_to_json_mode_when_rejected():
+    completions = _RejectsForcedTool("tool_choice is not supported by this model")
+
+    result = _chat_adapter(ProviderDialect.DEEPSEEK, completions).complete(_request())
+
+    assert len(completions.bodies) == 2
+    assert "tools" in completions.bodies[0]
+    assert "tools" not in completions.bodies[1]
+    assert completions.bodies[1]["response_format"] == {"type": "json_object"}
+    assert result.text == '{"translation":"ok"}'
+
+
+def test_tool_capability_fallback_never_masks_context_overflow():
+    completions = _RejectsForcedTool("maximum context length exceeded")
+
+    with pytest.raises(LLMCallError) as excinfo:
+        _chat_adapter(ProviderDialect.GLM, completions).complete(_request())
+
+    assert excinfo.value.category is LLMErrorCategory.CONTEXT_LIMIT
+    assert len(completions.bodies) == 1
+
+
 class _OpenAIResponses:
     def __init__(self, response):
         self.response = response

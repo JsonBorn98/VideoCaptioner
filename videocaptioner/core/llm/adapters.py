@@ -7,11 +7,13 @@ import json
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import replace
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 from urllib.parse import quote, urlparse, urlunparse
 
 import openai
 import requests
+
+from videocaptioner.core.utils.logger import setup_logger
 
 from .models import (
     LLMCallError,
@@ -28,6 +30,40 @@ from .request_options import (
     RequestOptionsError,
     merge_profile_request_options,
     validate_structured_output_compatibility,
+)
+
+logger = setup_logger("llm_adapters")
+
+StructuredChatStrategy = Literal["json_schema", "tool", "json_object"]
+
+# Every transport labels the structured contract it sends, as a schema name or as
+# a tool name.  Anthropic also matches the label when reading the reply back, so
+# keep one identifier for all of them.
+_STRUCTURED_RESPONSE_NAME = "structured_response"
+
+# ``response_format={"type": "json_schema"}`` is only honoured by a subset of
+# OpenAI-compatible services.  Several gateways accept the field and then ignore
+# it, answering with unconstrained output and no HTTP error that would reveal the
+# downgrade.  A forced function call carries the same schema through a path those
+# providers do enforce, so route every dialect to the strongest contract it
+# actually implements.
+_NATIVE_SCHEMA_DIALECTS = frozenset(
+    {
+        ProviderDialect.OPENAI,
+        ProviderDialect.QWEN,
+        # Google's OpenAI compatibility layer implements response_format.
+        ProviderDialect.GEMINI,
+    }
+)
+_FORCED_TOOL_SCHEMA_DIALECTS = frozenset(
+    {
+        ProviderDialect.DEEPSEEK,
+        ProviderDialect.KIMI,
+        ProviderDialect.GLM,
+        # A proxy fronting Anthropic can only express a schema as a tool, which
+        # is exactly what AnthropicMessagesAdapter sends on the native transport.
+        ProviderDialect.ANTHROPIC,
+    }
 )
 
 
@@ -221,6 +257,45 @@ def _exception_text(exc: BaseException) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _structured_tool_arguments(message: Any) -> Optional[str]:
+    """Return the forced structured tool call's arguments as a JSON document.
+
+    Compliant services send ``arguments`` as a JSON string.  Proxies frequently
+    send the already-decoded object instead, so accept both and normalize to the
+    string shape the rest of the pipeline parses.
+    """
+
+    for call in _read_attr(message, "tool_calls", []) or []:
+        function = _read_attr(call, "function")
+        if _read_attr(function, "name") != _STRUCTURED_RESPONSE_NAME:
+            continue
+        arguments = _read_attr(function, "arguments")
+        if isinstance(arguments, str) and arguments.strip():
+            return arguments.strip()
+        if isinstance(arguments, Mapping):
+            try:
+                return json.dumps(arguments, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _rejects_forced_tool_request(exc: openai.APIStatusError) -> bool:
+    """Return whether a provider refused the request shape rather than its content.
+
+    Endpoints that do not implement function calling reject the whole request,
+    and the wording varies too much between gateways to match on reliably.  Treat
+    any client-side rejection as a possible tool-capability gap so the schema can
+    still be attempted through JSON mode, but never swallow input overflow, which
+    carries its own category and would recur identically.
+    """
+
+    status = getattr(exc, "status_code", None)
+    if status not in {400, 404, 422}:
+        return False
+    return not _is_context_limit_error(status, _exception_text(exc))
+
+
 class LLMAdapter(ABC):
     def __init__(self, profile: LLMModelProfile) -> None:
         self.profile = profile
@@ -342,7 +417,40 @@ class OpenAICompatibleAdapter(LLMAdapter):
             else request.max_output_tokens
         )
 
+    def _structured_chat_strategy(self) -> StructuredChatStrategy:
+        """Pick how to transmit ``response_schema`` on the chat completions API.
+
+        An unidentified endpoint keeps bare JSON mode: it is the one structured
+        control every OpenAI-compatible service accepts, and the pipeline already
+        restates the schema in the prompt for providers that enforce nothing.
+        """
+
+        if self.profile.dialect in _NATIVE_SCHEMA_DIALECTS:
+            return "json_schema"
+        if self.profile.dialect in _FORCED_TOOL_SCHEMA_DIALECTS:
+            return "tool"
+        return "json_object"
+
     def _complete_chat(self, request: LLMRequest) -> LLMResult:
+        strategy = (
+            self._structured_chat_strategy() if request.response_schema is not None else None
+        )
+        try:
+            return self._complete_chat_once(request, strategy)
+        except openai.APIStatusError as exc:
+            if strategy != "tool" or not _rejects_forced_tool_request(exc):
+                raise
+            logger.warning(
+                "Model %s rejected the forced structured tool call (HTTP %s); "
+                "retrying once in JSON mode",
+                self.profile.model,
+                getattr(exc, "status_code", None),
+            )
+        return self._complete_chat_once(request, "json_object")
+
+    def _complete_chat_once(
+        self, request: LLMRequest, strategy: Optional[StructuredChatStrategy]
+    ) -> LLMResult:
         application_body: dict[str, Any] = {
             "model": self.profile.model,
             "messages": [
@@ -356,18 +464,32 @@ class OpenAICompatibleAdapter(LLMAdapter):
         output_cap = self._effective_output_cap(request)
         if output_cap is not None:
             application_body["max_completion_tokens"] = output_cap
-        if request.response_schema is not None:
-            if self.profile.dialect in {ProviderDialect.OPENAI, ProviderDialect.QWEN}:
-                application_body["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "structured_response",
-                        "strict": True,
-                        "schema": dict(request.response_schema),
+        if strategy == "json_schema":
+            application_body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": _STRUCTURED_RESPONSE_NAME,
+                    "strict": True,
+                    "schema": dict(request.response_schema or {}),
+                },
+            }
+        elif strategy == "tool":
+            application_body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": _STRUCTURED_RESPONSE_NAME,
+                        "description": "Return the requested structured response.",
+                        "parameters": dict(request.response_schema or {}),
                     },
                 }
-            else:
-                application_body["response_format"] = {"type": "json_object"}
+            ]
+            application_body["tool_choice"] = {
+                "type": "function",
+                "function": {"name": _STRUCTURED_RESPONSE_NAME},
+            }
+        elif strategy == "json_object":
+            application_body["response_format"] = {"type": "json_object"}
         final_body = self._merge_request_options(application_body, request)
         kwargs = {
             name: final_body.pop(name)
@@ -378,6 +500,8 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 "n",
                 "max_completion_tokens",
                 "response_format",
+                "tools",
+                "tool_choice",
             )
             if name in final_body
         }
@@ -388,6 +512,12 @@ class OpenAICompatibleAdapter(LLMAdapter):
         choice = choices[0] if choices else None
         message = _read_attr(choice, "message") if choice is not None else None
         text = _read_attr(message, "content", "") if message is not None else ""
+        if strategy == "tool" and message is not None:
+            # A provider that ignores the forced tool choice still answers in
+            # content, which is no worse than what JSON mode would have returned.
+            arguments = _structured_tool_arguments(message)
+            if arguments is not None:
+                text = arguments
         finish_reason = _diagnostic_text(_read_attr(choice, "finish_reason"))
         response_status = _diagnostic_text(_read_attr(response, "status"))
         usage = _openai_chat_usage(response)
@@ -442,7 +572,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             application_body["text"] = {
                 "format": {
                     "type": "json_schema",
-                    "name": "structured_response",
+                    "name": _STRUCTURED_RESPONSE_NAME,
                     "strict": True,
                     "schema": dict(request.response_schema),
                 }
@@ -555,14 +685,14 @@ class AnthropicMessagesAdapter(LLMAdapter):
         if request.response_schema is not None:
             application_body["tools"] = [
                 {
-                    "name": "structured_response",
+                    "name": _STRUCTURED_RESPONSE_NAME,
                     "description": "Return the requested structured response.",
                     "input_schema": dict(request.response_schema),
                 }
             ]
             application_body["tool_choice"] = {
                 "type": "tool",
-                "name": "structured_response",
+                "name": _STRUCTURED_RESPONSE_NAME,
             }
         payload = self._merge_request_options(application_body, request)
         try:
@@ -618,7 +748,7 @@ class AnthropicMessagesAdapter(LLMAdapter):
                 for item in content
                 if isinstance(item, Mapping)
                 and item.get("type") == "tool_use"
-                and item.get("name") == "structured_response"
+                and item.get("name") == _STRUCTURED_RESPONSE_NAME
             ]
             if tool_inputs:
                 text = json.dumps(tool_inputs[0], ensure_ascii=False)

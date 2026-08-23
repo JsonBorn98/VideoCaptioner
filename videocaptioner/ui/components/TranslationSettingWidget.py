@@ -219,6 +219,13 @@ class _ProfileDialog(MessageBoxBase):
             self.tr("OpenAI 接口选项同样适用于实现对应协议的兼容服务")
         )
         self.dialectCombo.addItems([item.value for item in ProviderDialect])
+        self.dialectCombo.setToolTip(
+            self.tr(
+                "决定结构化输出如何下发：openai/qwen/gemini 用 json_schema，"
+                "deepseek/kimi/glm/anthropic 用强制函数调用，generic 仅用 JSON 模式。\n"
+                "选错通常不会报错，但服务端可能不强制 schema；请以能力测试结果为准。"
+            )
+        )
         self.outputModeCombo.addItem(self.tr("自动"), userData="auto")
         self.outputModeCombo.addItem(self.tr("自定义"), userData="custom")
         self.contextSpin.setRange(16_384, 2_000_000)

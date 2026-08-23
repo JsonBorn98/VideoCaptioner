@@ -38,6 +38,26 @@ GUI 可以为主翻译和高级校对分别绑定方案，也可以让两个角�
 不同服务对 response schema、Prompt cache、reasoning token 和 usage 字段的支持并不相同。
 VideoCaptioner 会通过对应 adapter 统一请求和 usage 记录，但不会伪造服务端未返回的统计。
 
+## Dialect 与结构化输出
+
+OpenAI-compatible 服务表面协议一致，但强制 JSON schema 的方式不同。不少网关会接受
+`response_format` 的 `json_schema` 再静默忽略它，返回不受约束的 JSON 且不报任何错误。
+Dialect 决定 Chat Completions 请求用哪种方式传递 schema：
+
+| Dialect | 传递方式 |
+|---|---|
+| `openai`、`qwen`、`gemini` | `response_format` 的 `json_schema`，`strict: true` |
+| `deepseek`、`kimi`、`glm`、`anthropic` | 强制函数调用，schema 作为工具参数 |
+| `generic` | 仅 `json_object`（JSON 模式） |
+
+若服务端拒绝强制函数调用，请求会自动降级为一次 JSON 模式重试，因此不支持函数调用的模型
+仍可使用。`generic` 面向未识别的端点，只发所有兼容服务都接受的 JSON 模式；此时 schema 仅
+通过提示词约束，不做强制。能力测试的“结构化输出”一项会区分这两种情况：它故意下发与
+schema 冲突的指令，只有真正强制 schema 的组合才能通过。
+
+Responses endpoint 与 Anthropic Messages、Gemini 原生 Transport 各有唯一的 schema 表达
+方式，不受 dialect 影响。
+
 ## GUI 配置步骤
 
 1. 打开 **设置 → 翻译设置**。
