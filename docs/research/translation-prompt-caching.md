@@ -136,12 +136,16 @@
 
 ## 当前代码缺口
 
-- `videocaptioner/core/llm/client.py` 只使用 OpenAI SDK 的 Chat Completions，无法表达 Claude 原生缓存或 Gemini 缓存生命周期。
-- `call_llm` 的一小时本地 memoize 只会命中完整参数完全相同的请求，不会复用“相同前缀、不同字幕块”的模型前缀计算。
-- `BaseTranslator` 会立即并发提交全部字幕块，没有“预热完成后再 fan-out”的阶段。
-- 当前翻译缓存键只包含字幕块、目标语言和模型，遗漏自定义提示词、反思模式、模型端点及未来的上下文简报和确认术语表，会造成错误复用。
-- 当前全局 LLM client 是单例，不能安全承载两个独立供应商配置的主翻译模型与高级校对模型。
-- 请求日志的完整 response dump 可能已经保留供应商 usage 扩展，但业务层和 UI 尚未统一解析缓存写入、读取、命中率和成本依据。
+> 注：本文写作时旧 `client.py`/`call_llm` 路径尚在；现已整文件退役，所有请求统一经
+> `LLMGateway` + adapter（`core/llm/gateway.py`、`adapters.py`）。下列各条的“缺口”中，
+> adapter 分档、缓存键 allowlist、双方案并发已由 gateway 体系解决，其余仍成立的见各条标注。
+
+- ~~`videocaptioner/core/llm/client.py` 只使用 OpenAI SDK 的 Chat Completions~~（已由 gateway 的 ANTHROPIC_MESSAGES/GEMINI transport 解决）。
+- ~~`call_llm` 的一小时本地 memoize 只会命中完整参数完全相同的请求~~（已由 `GatewayResponseCache` 的显式 allowlist 键解决）。
+- `BaseTranslator` 会立即并发提交全部字幕块，没有“预热完成后再 fan-out”的阶段。（仍成立）
+- ~~当前翻译缓存键只包含字幕块、目标语言和模型~~（已由 response_cache 的方案+请求两级 allowlist 键解决）。
+- ~~当前全局 LLM client 是单例，不能安全承载两个独立供应商配置~~（已由 gateway 按 profile 缓存 adapter/信号量解决）。
+- 请求日志的完整 response dump 可能已经保留供应商 usage 扩展，但业务层和 UI 尚未统一解析缓存写入、读取、命中率和成本依据。（仍成立）
 
 ## 运行时能力探测
 

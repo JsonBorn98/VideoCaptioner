@@ -24,9 +24,10 @@ uv run pytest tests/test_translate/test_google_translator.py tests/test_translat
 ### 完整测试（需要 API 密钥）
 
 ```bash
-# 1. 配置环境变量
+# 1. 配置环境变量（reflect 模式集成用例）
 export OPENAI_BASE_URL=https://api.openai.com/v1
 export OPENAI_API_KEY=sk-your-key
+export OPENAI_MODEL=gpt-4o-mini
 
 # 2. 运行所有测试
 uv run pytest tests/test_translate/ -v
@@ -49,7 +50,7 @@ uv run pytest tests/test_translate/ -m "not integration" -v
 创建 `.env` 文件（已在 .gitignore 中）：
 
 ```bash
-# LLM 翻译器测试（必需）
+# LLM 翻译器 reflect 模式集成测试（可选；mock 用例无需配置）
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=sk-your-api-key
 
@@ -90,6 +91,8 @@ GitHub Actions 中通过 **Settings → Secrets** 配置：
 export OPENAI_BASE_URL=...
 export OPENAI_API_KEY=...
 ```
+
+（断句/优化/LLM 翻译的 mock 用例走 fake gateway，无需任何环境变量；只有集成标记的 reflect 模式等真请求用例需要。）
 
 ### ImportError
 

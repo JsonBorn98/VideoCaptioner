@@ -1,9 +1,7 @@
 """Subtitle optimizer tests.
 
-Requires environment variables:
-    OPENAI_BASE_URL: OpenAI-compatible API endpoint
-    OPENAI_API_KEY: API key for authentication
-    OPENAI_MODEL: Model name (optional, defaults to gpt-4o-mini)
+Mock-based cases run the profile+gateway seam with a fake gateway; the
+integration-marked cases skip cleanly without OPENAI_* credentials.
 """
 
 from typing import Callable
@@ -11,7 +9,25 @@ from typing import Callable
 import pytest
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+from videocaptioner.core.llm.models import (
+    LLMModelProfile,
+    LLMTransport,
+    ProviderDialect,
+)
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
+
+
+def _test_profile() -> LLMModelProfile:
+    """Build the utility-role profile used by optimizer tests."""
+    return LLMModelProfile(
+        profile_id="optimizer-test",
+        name="Optimizer test",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url="https://mock.local/v1",
+        api_key="test-api-key",
+        model="gpt-4o-mini",
+    )
 
 
 @pytest.mark.integration
@@ -27,6 +43,7 @@ class TestSubtitleOptimizer:
             batch_num=5,
             model=model,
             custom_prompt="",
+            profile=_test_profile(),
         )
 
     @pytest.fixture

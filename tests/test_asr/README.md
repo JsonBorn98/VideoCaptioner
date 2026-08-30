@@ -22,16 +22,16 @@ tests/
 
 Required environment variables:
 
-- `OPENAI_BASE_URL`: OpenAI API base URL (e.g., `https://api.openai.com/v1`)
-- `OPENAI_API_KEY`: OpenAI API key
-- `OPENAI_MODEL`: (Optional) Model name, defaults to `whisper-1`
+- `WHISPER_BASE_URL`: OpenAI-compatible API base URL (e.g., `https://api.openai.com/v1`)
+- `WHISPER_API_KEY`: API key
+- `WHISPER_MODEL`: (Optional) Model name, defaults to `whisper-1`
 
 Example `.env`:
 
 ```bash
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=whisper-1
+WHISPER_BASE_URL=https://api.openai.com/v1
+WHISPER_API_KEY=sk-...
+WHISPER_MODEL=whisper-1
 ```
 
 ### Public API Tests (Bcut, JianYing)

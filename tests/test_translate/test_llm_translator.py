@@ -161,6 +161,7 @@ class TestLLMTranslator:
             custom_prompt="",
             is_reflect=True,
             update_callback=None,
+            profile=_mock_profile(),
         )
 
         result = translator.translate_subtitle(sample_asr_data)
