@@ -29,11 +29,9 @@ from videocaptioner.core.constant import (
 )
 from videocaptioner.core.entities import (
     LANGUAGES,
-    LLMServiceEnum,
     TranscribeModelEnum,
 )
 from videocaptioner.core.llm import check_whisper_connection
-from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
 from videocaptioner.core.llm.check_mimo_asr import check_mimo_asr_connection
 from videocaptioner.core.postprocess import PostprocessProfileStore
 from videocaptioner.core.utils.cache import disable_cache, enable_cache
@@ -72,10 +70,8 @@ class SettingInterface(ScrollArea):
         """初始化所有设置组"""
         # 转录配置组
         self.transcribeGroup = SettingCardGroup(self.tr("转录配置"), self.scrollWidget)
-        # 旧通用 LLM 工具仍服务于断句、校正；翻译角色在独立分页中配置。
-        self.llmGroup = SettingCardGroup(
-            self.tr("通用 LLM 工具配置"), self.scrollWidget
-        )
+        # 旧「通用 LLM 工具配置」组已随服务槽退役：工具角色统一走模型配置方案
+        # 体系，入口在翻译设置页的工具模型卡（ADR-0014）。
         # 翻译与优化组
         self.translateGroup = SettingCardGroup(self.tr("翻译与优化"), self.scrollWidget)
         # 字幕后处理组
@@ -98,9 +94,6 @@ class SettingInterface(ScrollArea):
 
         # ASR 服务配置卡片
         self.__createASRServiceCards()
-
-        # LLM配置卡片
-        self.__createLLMServiceCards()
 
         # 三种平行翻译方式的独立配置入口
         self.translationSettingsWidget = TranslationSettingWidget(
@@ -289,162 +282,6 @@ class SettingInterface(ScrollArea):
         self.aboutGroup.addSettingCard(self.helpCard)
         self.aboutGroup.addSettingCard(self.feedbackCard)
         self.aboutGroup.addSettingCard(self.aboutCard)
-
-    def __createLLMServiceCards(self):
-        """创建LLM服务相关的配置卡片"""
-        # 服务选择卡片
-        self.llmServiceCard = ComboBoxSettingCard(
-            cfg.llm_service,
-            FIF.ROBOT,
-            self.tr("LLM 提供商"),
-            self.tr("用于字幕断句、字幕校正等通用工具，不决定翻译模式"),
-            texts=[service.value for service in cfg.llm_service.validator.options],  # type: ignore
-            parent=self.llmGroup,
-        )
-        self.llmServiceCard.comboBox.setMinimumWidth(150)
-
-        # 定义每个服务的配置
-        service_configs = {
-            LLMServiceEnum.OPENAI: {
-                "prefix": "openai",
-                "api_key_cfg": cfg.openai_api_key,
-                "api_base_cfg": cfg.openai_api_base,
-                "model_cfg": cfg.openai_model,
-                "default_base": "https://api.openai.com/v1",
-                "default_models": [
-                    "gemini-2.5-pro",
-                    "gpt-5",
-                    "claude-sonnet-4-5-20250929",
-                    "gemini-2.5-flash",
-                    "claude-haiku-4-5-20251001",
-                ],
-            },
-            LLMServiceEnum.SILICON_CLOUD: {
-                "prefix": "silicon_cloud",
-                "api_key_cfg": cfg.silicon_cloud_api_key,
-                "api_base_cfg": cfg.silicon_cloud_api_base,
-                "model_cfg": cfg.silicon_cloud_model,
-                "default_base": "https://api.siliconflow.cn/v1",
-                "default_models": [
-                    "moonshotai/Kimi-K2-Instruct-0905",
-                    "deepseek-ai/DeepSeek-V3",
-                ],
-            },
-            LLMServiceEnum.DEEPSEEK: {
-                "prefix": "deepseek",
-                "api_key_cfg": cfg.deepseek_api_key,
-                "api_base_cfg": cfg.deepseek_api_base,
-                "model_cfg": cfg.deepseek_model,
-                "default_base": "https://api.deepseek.com/v1",
-                "default_models": ["deepseek-chat", "deepseek-reasoner"],
-            },
-            LLMServiceEnum.OLLAMA: {
-                "prefix": "ollama",
-                "api_key_cfg": cfg.ollama_api_key,
-                "api_base_cfg": cfg.ollama_api_base,
-                "model_cfg": cfg.ollama_model,
-                "default_base": "http://localhost:11434/v1",
-                "default_models": ["qwen3:8b"],
-            },
-            LLMServiceEnum.LM_STUDIO: {
-                "prefix": "LM Studio",
-                "api_key_cfg": cfg.lm_studio_api_key,
-                "api_base_cfg": cfg.lm_studio_api_base,
-                "model_cfg": cfg.lm_studio_model,
-                "default_base": "http://localhost:1234/v1",
-                "default_models": ["qwen3:8b"],
-            },
-            LLMServiceEnum.GEMINI: {
-                "prefix": "gemini",
-                "api_key_cfg": cfg.gemini_api_key,
-                "api_base_cfg": cfg.gemini_api_base,
-                "model_cfg": cfg.gemini_model,
-                "default_base": "https://generativelanguage.googleapis.com/v1beta/openai/",
-                "default_models": [
-                    "gemini-2.5-pro",
-                    "gemini-2.5-flash",
-                    "gemini-2.0-flash-lite",
-                ],
-            },
-            LLMServiceEnum.CHATGLM: {
-                "prefix": "chatglm",
-                "api_key_cfg": cfg.chatglm_api_key,
-                "api_base_cfg": cfg.chatglm_api_base,
-                "model_cfg": cfg.chatglm_model,
-                "default_base": "https://open.bigmodel.cn/api/paas/v4",
-                "default_models": ["glm-4-plus", "glm-4-air-250414", "glm-4-flash"],
-            },
-        }
-
-        # 创建服务配置映射
-        self.llm_service_configs = {}
-
-        # 为每个服务创建配置卡片
-        for service, config in service_configs.items():
-            prefix = config["prefix"]
-
-            # 创建API Key卡片
-            api_key_card = LineEditSettingCard(
-                config["api_key_cfg"],
-                FIF.FINGERPRINT,
-                self.tr("API Key"),
-                self.tr(f"输入您的 {service.value} API Key"),
-                "sk-" if service != LLMServiceEnum.OLLAMA else "",
-                self.llmGroup,
-            )
-            setattr(self, f"{prefix}_api_key_card", api_key_card)
-
-            # 创建Base URL卡片
-            api_base_card = LineEditSettingCard(
-                config["api_base_cfg"],
-                FIF.LINK,
-                self.tr("Base URL"),
-                self.tr(f"输入 {service.value} Base URL"),
-                config["default_base"],
-                self.llmGroup,
-            )
-            setattr(self, f"{prefix}_api_base_card", api_base_card)
-
-            # 设置只读状态：只有 OpenAI、Ollama、LM Studio 可以编辑 Base URL
-            if service not in [
-                LLMServiceEnum.OPENAI,
-                LLMServiceEnum.OLLAMA,
-                LLMServiceEnum.LM_STUDIO,
-            ]:
-                api_base_card.lineEdit.setReadOnly(True)
-
-            # 创建模型选择卡片
-            model_card = EditComboBoxSettingCard(
-                config["model_cfg"],
-                FIF.ROBOT,  # type: ignore
-                self.tr("模型"),
-                self.tr(f"选择 {service.value} 模型"),
-                config["default_models"],
-                self.llmGroup,
-            )
-            setattr(self, f"{prefix}_model_card", model_card)
-
-            # 存储服务配置
-            cards = [api_key_card, api_base_card, model_card]
-
-            self.llm_service_configs[service] = {
-                "cards": cards,
-                "api_base": api_base_card,
-                "api_key": api_key_card,
-                "model": model_card,
-            }
-
-        # 创建检查连接卡片
-        self.checkLLMConnectionCard = PushSettingCard(
-            self.tr("检查连接"),
-            FIF.LINK,
-            self.tr("检查 LLM 连接"),
-            self.tr("点击检查 API 连接是否正常，并获取模型列表"),
-            self.llmGroup,
-        )
-
-        # 初始化显示状态
-        self.__onLLMServiceChanged(self.llmServiceCard.comboBox.currentText())
 
     def __createASRServiceCards(self):
         """创建 Whisper API 配置卡片"""
@@ -713,18 +550,10 @@ class SettingInterface(ScrollArea):
         self.transcribeGroup.addSettingCard(self.qwenCompileAlignerCard)
         self.transcribeGroup.addSettingCard(self.manageQwenModelCard)
 
-        # 添加LLM配置卡片
-        self.llmGroup.addSettingCard(self.llmServiceCard)
-        for config in self.llm_service_configs.values():
-            for card in config["cards"]:
-                self.llmGroup.addSettingCard(card)
-        self.llmGroup.addSettingCard(self.checkLLMConnectionCard)
-
         # 将所有组添加到布局
         self.expandLayout.setSpacing(28)
         self.expandLayout.setContentsMargins(36, 10, 36, 0)
         self.expandLayout.addWidget(self.transcribeGroup)
-        self.expandLayout.addWidget(self.llmGroup)
         self.expandLayout.addWidget(self.translationSettingsWidget)
         self.expandLayout.addWidget(self.translateGroup)
         self.expandLayout.addWidget(self.postprocessGroup)
@@ -737,18 +566,10 @@ class SettingInterface(ScrollArea):
         """连接信号与槽"""
         cfg.appRestartSig.connect(self.__showRestartTooltip)
 
-        # LLM服务切换
-        self.llmServiceCard.comboBox.currentTextChanged.connect(
-            self.__onLLMServiceChanged
-        )
-
         # 转录模型切换
         self.transcribeModelCard.comboBox.currentTextChanged.connect(
             self.__onTranscribeModelChanged
         )
-
-        # 检查 LLM 连接
-        self.checkLLMConnectionCard.clicked.connect(self.checkLLMConnection)
 
         # 检查 Whisper 连接
         self.checkWhisperConnectionCard.clicked.connect(self.checkWhisperConnection)
@@ -867,130 +688,8 @@ class SettingInterface(ScrollArea):
                 parent=self,
             )
 
-    def checkLLMConnection(self):
-        """检查 LLM 连接"""
-        # 保存当前滚动位置
-        scroll_position = self.verticalScrollBar().value()
-
-        # 获取当前选中的服务
-        current_service = LLMServiceEnum(self.llmServiceCard.comboBox.currentText())
-
-        # 获取服务配置
-        service_config = self.llm_service_configs.get(current_service)
-        if not service_config:
-            return
-
-        api_base = (
-            service_config["api_base"].lineEdit.text()
-            if service_config["api_base"]
-            else ""
-        )
-        api_key = (
-            service_config["api_key"].lineEdit.text()
-            if service_config["api_key"]
-            else ""
-        )
-        model = (
-            service_config["model"].comboBox.currentText()
-            if service_config["model"]
-            else ""
-        )
-
-        # 禁用检查按钮，显示加载状态
-        self.checkLLMConnectionCard.button.setEnabled(False)
-        self.checkLLMConnectionCard.button.setText(self.tr("正在检查..."))
-
-        # 立即恢复滚动位置（防止按钮状态改变导致的自动滚动）
-        self.verticalScrollBar().setValue(scroll_position)
-
-        # 创建并启动线程
-        self.connection_thread = LLMConnectionThread(api_base, api_key, model)
-        self.connection_thread.finished.connect(self.onConnectionCheckFinished)
-        self.connection_thread.error.connect(self.onConnectionCheckError)
-        self.connection_thread.start()
-
-    def onConnectionCheckError(self, message):
-        """处理连接检查错误事件"""
-        self.checkLLMConnectionCard.button.setEnabled(True)
-        self.checkLLMConnectionCard.button.setText(self.tr("检查连接"))
-        InfoBar.error(
-            self.tr("LLM 连接测试错误"),
-            message,
-            duration=INFOBAR_DURATION_ERROR,
-            parent=self,
-        )
-
-    def onConnectionCheckFinished(self, is_success, message, models):
-        """处理连接检查完成事件"""
-        self.checkLLMConnectionCard.button.setEnabled(True)
-        self.checkLLMConnectionCard.button.setText(self.tr("检查连接"))
-
-        # 获取当前服务
-        current_service = LLMServiceEnum(self.llmServiceCard.comboBox.currentText())
-
-        if models:
-            # 更新当前服务的模型列表
-            service_config = self.llm_service_configs.get(current_service)
-            if service_config and service_config["model"]:
-                temp = service_config["model"].comboBox.currentText()
-                service_config["model"].setItems(models)
-                service_config["model"].comboBox.setCurrentText(temp)
-
-            InfoBar.success(
-                self.tr("获取模型列表成功:"),
-                self.tr("一共") + str(len(models)) + self.tr("个模型"),
-                duration=INFOBAR_DURATION_SUCCESS,
-                parent=self,
-            )
-        if not is_success:
-            InfoBar.error(
-                self.tr("LLM 连接测试错误"),
-                message,
-                duration=INFOBAR_DURATION_ERROR,
-                parent=self,
-            )
-        else:
-            InfoBar.success(
-                self.tr("LLM 连接测试成功"),
-                message,
-                duration=INFOBAR_DURATION_SUCCESS,
-                parent=self,
-            )
-
     def checkUpdate(self):
         webbrowser.open(RELEASE_URL)
-
-    def __onLLMServiceChanged(self, service):
-        """处理LLM服务切换事件"""
-        current_service = LLMServiceEnum(service)
-
-        # 隐藏所有卡片
-        for config in self.llm_service_configs.values():
-            for card in config["cards"]:
-                card.setVisible(False)
-
-        # 显示选中服务的卡片
-        if current_service in self.llm_service_configs:
-            for card in self.llm_service_configs[current_service]["cards"]:
-                card.setVisible(True)
-
-            # 为OLLAMA和LM_STUDIO设置默认API Key
-            service_config = self.llm_service_configs[current_service]
-            if current_service == LLMServiceEnum.OLLAMA and service_config["api_key"]:
-                # 如果API Key为空，设置默认值"ollama"
-                if not service_config["api_key"].lineEdit.text():
-                    service_config["api_key"].lineEdit.setText("ollama")
-            if (
-                current_service == LLMServiceEnum.LM_STUDIO
-                and service_config["api_key"]
-            ):
-                # 如果API Key为空，设置默认值 "lm-studio"
-                if not service_config["api_key"].lineEdit.text():
-                    service_config["api_key"].lineEdit.setText("lm-studio")
-
-        # 更新布局
-        self.llmGroup.adjustSize()
-        self.expandLayout.update()
 
     def __onTranscribeModelChanged(self, model_name):
         """处理转录模型切换事件"""
@@ -1249,27 +948,5 @@ class WhisperConnectionThread(QThread):
                 self.base_url, self.api_key, self.model
             )
             self.finished.emit(success, result)
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class LLMConnectionThread(QThread):
-    finished = pyqtSignal(bool, str, list)
-    error = pyqtSignal(str)
-
-    def __init__(self, api_base, api_key, model):
-        super().__init__()
-        self.api_base = api_base
-        self.api_key = api_key
-        self.model = model
-
-    def run(self):
-        """检查 LLM 连接并获取模型列表"""
-        try:
-            is_success, message = check_llm_connection(
-                self.api_base, self.api_key, self.model
-            )
-            models = get_available_models(self.api_base, self.api_key)
-            self.finished.emit(is_success, message, models)
         except Exception as e:
             self.error.emit(str(e))
