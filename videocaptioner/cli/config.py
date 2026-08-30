@@ -7,9 +7,9 @@ Config priority (highest to lowest):
   4. Built-in defaults
 """
 
-import json
 import os
 import sys
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -27,26 +27,32 @@ else:
 APP_NAME = "videocaptioner"
 
 
-class _BuiltConfig(dict):
-    """Runtime config with source-presence metadata kept out of TOML keys."""
-
-    _legacy_llm_api_key_explicit: bool
-
 # Default config directory
 CONFIG_DIR = Path(user_config_dir(APP_NAME))
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
-# Environment variable mappings: env var name → config dotted key
-# Supports both OpenAI standard names and VIDEOCAPTIONER_ prefixed names
+# Credential-only environment override (ADR-0015). Unlike the keys in ENV_MAP
+# it never writes into the TOML tree: it swaps the api_key of an already
+# resolved profile so CI can inject a key without persisting it. It is also
+# deliberately NOT the OpenAI standard name — a key exported for another tool
+# in the host shell must not be silently adopted here.
+LLM_API_KEY_ENV_OVERRIDE = "VIDEOCAPTIONER_LLM_API_KEY"
+
+# Sentinel distinguishing "key absent" from a falsy stored value.
+_MISSING = object()
+
+# Environment variable mappings: env var name → config dotted key.
+#
+# LLM model selection is profile-based (ADR-0015): the three profile-id keys
+# below select entries from the model profile store. Credentials live in the
+# store itself; VIDEOCAPTIONER_LLM_API_KEY is deliberately NOT mapped here —
+# it is a narrow credential-only override applied after a profile resolves
+# (see apply_env_api_key_override). OPENAI_* standard names are not recognized
+# so keys set for other tools in the host shell are never silently adopted.
 ENV_MAP: Dict[str, str] = {
-    # OpenAI standard (most tools recognize these)
-    "OPENAI_API_KEY": "llm.api_key",
-    "OPENAI_BASE_URL": "llm.api_base",
-    "OPENAI_MODEL": "llm.model",
-    # VIDEOCAPTIONER_ prefixed (take precedence over standard)
-    "VIDEOCAPTIONER_LLM_API_KEY": "llm.api_key",
-    "VIDEOCAPTIONER_LLM_API_BASE": "llm.api_base",
-    "VIDEOCAPTIONER_LLM_MODEL": "llm.model",
+    "VIDEOCAPTIONER_LLM_PROFILE_ID": "llm.profile_id",
+    "VIDEOCAPTIONER_LLM_REVIEW_PROFILE_ID": "llm.review_profile_id",
+    "VIDEOCAPTIONER_LLM_UTILITY_PROFILE_ID": "llm.utility_profile_id",
     "VIDEOCAPTIONER_WHISPER_API_KEY": "whisper_api.api_key",
     "VIDEOCAPTIONER_WHISPER_API_BASE": "whisper_api.api_base",
     "VIDEOCAPTIONER_DEEPLX_ENDPOINT": "translate.deeplx_endpoint",
@@ -83,42 +89,17 @@ ENV_MAP: Dict[str, str] = {
     "VIDEOCAPTIONER_QWEN_COMPILE_ALIGNER": "transcribe.qwen.compile_aligner",
 }
 
-# Translation profiles deliberately live outside ``[llm]``.  The global
-# variables above keep their established meaning for subtitle optimization,
-# splitting and other legacy LLM features; these role-specific variables only
-# affect LLM translation.  The shorter ``VIDEOCAPTIONER_LLM_<ROLE>_*`` names
-# are retained as aliases, while the explicit TRANSLATE_LLM form wins when
-# both are present because it is inserted last.
-_TRANSLATION_LLM_ENV_FIELDS = {
-    "API_KEY": "api_key",
-    "API_BASE": "api_base",
-    "BASE_URL": "api_base",
-    "MODEL": "model",
-    "TRANSPORT": "transport",
-    "DIALECT": "dialect",
-    "WORK_CONTEXT_TOKENS": "work_context_tokens",
-    "MAX_CONCURRENCY": "max_concurrency",
-    "OPENAI_ENDPOINT": "openai_endpoint",
-    "ENDPOINT": "openai_endpoint",
-    "MAX_OUTPUT_TOKENS": "max_output_tokens",
-    "REQUEST_OPTIONS_JSON": "request_options_json",
-}
-for _role in ("main", "review"):
-    for _env_suffix, _field in _TRANSLATION_LLM_ENV_FIELDS.items():
-        ENV_MAP[f"VIDEOCAPTIONER_LLM_{_role.upper()}_{_env_suffix}"] = (
-            f"translate.llm.{_role}.{_field}"
-        )
-        ENV_MAP[f"VIDEOCAPTIONER_TRANSLATE_LLM_{_role.upper()}_{_env_suffix}"] = (
-            f"translate.llm.{_role}.{_field}"
-        )
-
 DEFAULTS: Dict[str, Any] = {
+    # LLM model selection is profile-based: every LLM consumer resolves its
+    # connection from the model profile store (the same file the GUI edits).
+    #   profile_id        — main translation; also the derivation source for
+    #                       utility roles (split/optimize/postprocess/dub rewrite)
+    #   review_profile_id — enhanced-LLM review; must be set for enhanced mode
+    #   utility_profile_id — independent utility binding; empty = derive from main
     "llm": {
-        "api_key": "",
-        "api_base": "https://api.openai.com/v1",
-        "model": "gpt-4o-mini",
-        "work_context_tokens": 65536,
-        "max_concurrency": 4,
+        "profile_id": "",
+        "review_profile_id": "",
+        "utility_profile_id": "",
     },
     "whisper_api": {
         "api_key": "",
@@ -241,7 +222,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _set_nested(d: dict, dotted_key: str, value: Any) -> None:
-    """Set a value in a nested dict using dotted key notation (e.g. 'llm.api_key')."""
+    """Set a value in a nested dict using dotted key notation (e.g. 'llm.profile_id')."""
     keys = dotted_key.split(".")
     for key in keys[:-1]:
         d = d.setdefault(key, {})
@@ -279,8 +260,8 @@ def load_config_file(path: Optional[Path] = None) -> dict:
 def load_env_overrides() -> dict:
     """Read environment variables and map them to config keys.
 
-    Supports both OpenAI standard names (OPENAI_API_KEY) and
-    VIDEOCAPTIONER_ prefixed names. Prefixed names take precedence.
+    Only VIDEOCAPTIONER_ prefixed names are recognized; OPENAI_* standard
+    names are deliberately not (see ENV_MAP).
     """
     overrides: Dict[str, Any] = {}
     for env_var, dotted_key in ENV_MAP.items():
@@ -295,33 +276,6 @@ def load_env_overrides() -> dict:
     return overrides
 
 
-def _normalize_translation_llm_aliases(config: dict, *, source: str) -> dict:
-    """Normalize role aliases inside one priority layer before layers are merged."""
-
-    normalized = deepcopy(config)
-    translate = normalized.get("translate")
-    llm = translate.get("llm") if isinstance(translate, dict) else None
-    if not isinstance(llm, dict):
-        return normalized
-    for role in ("main", "review"):
-        role_config = llm.get(role)
-        if not isinstance(role_config, dict):
-            continue
-        for alias, canonical in (
-            ("base_url", "api_base"),
-            ("endpoint", "openai_endpoint"),
-        ):
-            if alias not in role_config:
-                continue
-            if canonical in role_config and role_config[canonical] != role_config[alias]:
-                raise ValueError(
-                    f"{source} translate.llm.{role}.{alias} conflicts with "
-                    f"translate.llm.{role}.{canonical}"
-                )
-            role_config[canonical] = role_config.pop(alias)
-    return normalized
-
-
 def build_config(
     cli_overrides: Optional[dict] = None,
     config_path: Optional[Path] = None,
@@ -329,9 +283,7 @@ def build_config(
     """Build final config by merging all sources (priority: cli > env > file > defaults)."""
     config = deepcopy(DEFAULTS)
     # Layer 1: config file
-    file_config = _normalize_translation_llm_aliases(
-        load_config_file(config_path), source="config file"
-    )
+    file_config = load_config_file(config_path)
     # Configurations written before the three-mode CLI used ``service`` as the
     # workflow selector.  Classify those files before merging defaults so an
     # existing Bing/Google/DeepLX user is not silently moved to an LLM mode.
@@ -346,23 +298,122 @@ def build_config(
         )
     config = _deep_merge(config, file_config)
     # Layer 2: environment variables
-    env_config = _normalize_translation_llm_aliases(
-        load_env_overrides(), source="environment"
-    )
+    env_config = load_env_overrides()
     config = _deep_merge(config, env_config)
     # Layer 3: CLI argument overrides
     if cli_overrides:
-        cli_config = _normalize_translation_llm_aliases(
-            cli_overrides, source="command line"
-        )
-        config = _deep_merge(config, cli_config)
-    result = _BuiltConfig(config)
-    missing = object()
-    result._legacy_llm_api_key_explicit = any(
-        _get_nested(layer, "llm.api_key", missing) is not missing
-        for layer in (file_config, env_config, cli_overrides or {})
+        config = _deep_merge(config, cli_overrides)
+    # The CLI is agent-facing: silently ignored LLM keys are a debugging hell,
+    # so leftover pre-profile keys get a one-time stderr warning plus migration
+    # guidance. The data itself is tolerated, not migrated (dead data, no fail).
+    _warn_legacy_llm_keys(file_config, env_config, cli_overrides or {})
+    return config
+
+
+_LEGACY_LLM_FILE_KEYS = (
+    "llm.api_key",
+    "llm.api_base",
+    "llm.model",
+    "llm.work_context_tokens",
+    "llm.max_concurrency",
+    "translate.llm.main",
+    "translate.llm.review",
+)
+
+# Environment variables whose mappings were removed with the [llm] table and
+# the translate.llm.* inline tables (ADR-0015). Checked by exact prefix/name.
+_LEGACY_LLM_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "VIDEOCAPTIONER_LLM_API_BASE",
+    "VIDEOCAPTIONER_LLM_MODEL",
+)
+
+_LEGACY_LLM_ENV_PREFIXES = (
+    "VIDEOCAPTIONER_LLM_MAIN_",
+    "VIDEOCAPTIONER_LLM_REVIEW_",
+    "VIDEOCAPTIONER_TRANSLATE_LLM_",
+)
+
+
+def _legacy_llm_key_hits(env: Mapping[str, str]) -> list[str]:
+    """Return the legacy LLM environment variables actually set right now."""
+
+    hits = [name for name in _LEGACY_LLM_ENV_VARS if env.get(name)]
+    hits.extend(
+        name
+        for name in env
+        if any(name.startswith(prefix) for prefix in _LEGACY_LLM_ENV_PREFIXES)
     )
-    return result
+    return sorted(set(hits))
+
+
+def _warn_legacy_llm_keys(file_config: dict, env_config: dict, cli_overrides: dict) -> None:
+    """Warn once when pre-profile LLM keys are still present in any layer."""
+
+    layers = (
+        ("config file", file_config, _LEGACY_LLM_FILE_KEYS, False),
+        # Env layer: report what is actually set, not what ENV_MAP mapped.
+        ("environment", env_config, _LEGACY_LLM_FILE_KEYS, True),
+        ("command line", cli_overrides, _LEGACY_LLM_FILE_KEYS, False),
+    )
+    keys: list[tuple[str, list[str]]] = []
+    for source, layer, file_keys, is_env in layers:
+        if is_env:
+            hits = _legacy_llm_key_hits(os.environ)
+            if hits:
+                keys.append((source, hits))
+            continue
+        hits = [
+            key
+            for key in file_keys
+            if _get_nested(layer, key, _MISSING) is not _MISSING
+        ]
+        if hits:
+            keys.append((source, hits))
+    if not keys:
+        return
+
+    print("! Warning: obsolete LLM config keys were ignored:", file=sys.stderr)
+    for source, hits in keys:
+        print(f"    {source}: {', '.join(hits)}", file=sys.stderr)
+    _print_llm_migration_hint()
+
+
+def _print_llm_migration_hint() -> None:
+    """Print where the agent should put LLM config now (store path + profile ids)."""
+
+    from videocaptioner.core.llm.profiles import DEFAULT_LLM_PROFILES_PATH
+
+    print("  LLM model config now comes from the model profile store:", file=sys.stderr)
+    print(f"    {DEFAULT_LLM_PROFILES_PATH}", file=sys.stderr)
+    print(
+        "  Reference a profile in config.toml with: llm.profile_id, "
+        "llm.review_profile_id, llm.utility_profile_id",
+        file=sys.stderr,
+    )
+    print(
+        "  Select one per run with --llm-profile / --review-profile / --utility-profile, "
+        "or VIDEOCAPTIONER_LLM_PROFILE_ID and its _REVIEW/_UTILITY variants.",
+        file=sys.stderr,
+    )
+    available = list_llm_profile_ids()
+    if available:
+        print(f"  Available profile ids: {', '.join(available)}", file=sys.stderr)
+    else:
+        print("  No profiles exist yet; create one in the GUI profile editor.", file=sys.stderr)
+
+
+def list_llm_profile_ids() -> list[str]:
+    """Best-effort list of profile ids for guidance text; never raises."""
+
+    from videocaptioner.core.llm.profiles import LLMModelProfileStore
+
+    try:
+        return [profile.profile_id for profile in LLMModelProfileStore().list()]
+    except Exception:
+        return []
 
 
 def get(config: dict, key: str, default: Any = None) -> Any:
@@ -370,257 +421,163 @@ def get(config: dict, key: str, default: Any = None) -> Any:
     return _get_nested(config, key, default)
 
 
-def build_legacy_llm_profile(config: dict):
-    """Build an immutable model profile from the CLI's legacy ``[llm]`` table.
+def llm_profile_ids(config: dict) -> dict[str, str]:
+    """Return the three LLM profile-id selections from the merged config."""
 
-    The CLI intentionally keeps accepting the established flat configuration.
-    Both enhanced roles receive snapshots of this profile; they still use
-    separate role prompts and independent calls.
-    """
-    from videocaptioner.core.llm import (
-        LLMModelProfile,
-        LLMTransport,
-        ProviderDialect,
-    )
-
-    return LLMModelProfile(
-        profile_id="cli-legacy",
-        name="CLI legacy model",
-        transport=LLMTransport.OPENAI_COMPATIBLE,
-        dialect=ProviderDialect.GENERIC,
-        base_url=str(get(config, "llm.api_base", "https://api.openai.com/v1")),
-        api_key=str(get(config, "llm.api_key", "")),
-        model=str(get(config, "llm.model", "")),
-        work_context_tokens=int(get(config, "llm.work_context_tokens", 65536)),
-        max_concurrency=int(get(config, "llm.max_concurrency", 4)),
-    )
-
-
-_TRANSLATION_LLM_PROFILE_FIELDS = frozenset(
-    {
-        "api_key",
-        "api_base",
-        "base_url",
-        "model",
-        "transport",
-        "dialect",
-        "work_context_tokens",
-        "max_concurrency",
-        "openai_endpoint",
-        "endpoint",
-        "max_output_tokens",
-        "request_options_json",
+    return {
+        "main": str(get(config, "llm.profile_id", "") or "").strip(),
+        "review": str(get(config, "llm.review_profile_id", "") or "").strip(),
+        "utility": str(get(config, "llm.utility_profile_id", "") or "").strip(),
     }
-)
 
 
-def _translation_llm_role_config(config: dict, role: str) -> dict[str, Any]:
-    """Return a role's explicit config fields without applying inheritance."""
-    if role not in {"main", "review"}:
-        raise ValueError("translation LLM role must be 'main' or 'review'")
-    raw = get(config, f"translate.llm.{role}", {})
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"translate.llm.{role} must be a TOML table")
-    unknown = set(raw) - _TRANSLATION_LLM_PROFILE_FIELDS
-    if unknown:
-        fields = ", ".join(sorted(unknown))
-        raise ValueError(f"unknown translate.llm.{role} field(s): {fields}")
+def apply_env_api_key_override(profile):
+    """Swap only the credential of a resolved profile from the environment.
 
-    normalized = dict(raw)
-    for alias, canonical in (("base_url", "api_base"), ("endpoint", "openai_endpoint")):
-        if alias not in normalized:
-            continue
-        if canonical in normalized and normalized[canonical] != normalized[alias]:
-            raise ValueError(
-                f"translate.llm.{role}.{alias} conflicts with "
-                f"translate.llm.{role}.{canonical}"
+    VIDEOCAPTIONER_LLM_API_KEY is a narrow CI-oriented override: it replaces
+    the api_key of an already resolved profile and leaves base_url and model
+    untouched, so a key can be injected without writing it to disk. The
+    resulting profile's api_key also feeds the gateway cache key, so an
+    overridden key never reuses another key's cached responses. Returns the
+    profile unchanged when the variable is unset or blank.
+    """
+    from dataclasses import replace
+
+    key = os.environ.get(LLM_API_KEY_ENV_OVERRIDE, "").strip()
+    return replace(profile, api_key=key) if key else profile
+
+
+def _profile_store():
+    """Construct the model profile store lazily (keeps config import cheap)."""
+
+    from videocaptioner.core.llm.profiles import LLMModelProfileStore
+
+    return LLMModelProfileStore()
+
+
+def _lookup_profile(store, profile_id: str, *, description: str):
+    """Fetch one profile by id; an empty id or a missing id both fail fast."""
+
+    from videocaptioner.core.llm.profiles import LLMProfileNotFoundError
+
+    try:
+        return store.get(profile_id)
+    except LLMProfileNotFoundError:
+        available = ", ".join(item.profile_id for item in store.list()) or "(none)"
+        raise ValueError(
+            f"{description} model profile '{profile_id}' does not exist in the "
+            f"profile store. Available profile ids: {available}"
+        ) from None
+
+
+def resolve_main_llm_profile(config: dict, store=None):
+    """Resolve the main translation profile, failing fast with guidance.
+
+    The profile store is the only source of LLM connections; a blank or missing
+    profile_id is an error pointing at the store file and the three TOML keys
+    (never a silent read of ambient environment variables).
+    """
+
+    profile_id = llm_profile_ids(config)["main"]
+    if not profile_id:
+        raise ValueError(
+            _llm_profile_guidance(
+                "llm.profile_id is not set; LLM translation needs a main model "
+                "profile (the GUI wording for the same condition: 未配置主翻译"
+                "模型配置方案，无法使用 LLM 翻译)."
             )
-        normalized[canonical] = normalized.pop(alias)
-    return normalized
-
-
-def _parse_translation_request_options(raw: Any, *, role: str) -> dict[str, Any]:
-    if not isinstance(raw, str):
-        raise ValueError(f"translate.llm.{role}.request_options_json must be a JSON string")
-    try:
-        value = json.loads(raw)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f"translate.llm.{role}.request_options_json is invalid JSON: {exc}"
-        ) from exc
-    if not isinstance(value, dict):
-        raise ValueError(
-            f"translate.llm.{role}.request_options_json must decode to a JSON object"
         )
-    return value
+    store = _profile_store() if store is None else store
+    profile = _lookup_profile(store, profile_id, description="main translation")
+    return apply_env_api_key_override(profile)
 
 
-def _parse_translation_max_output_tokens(raw: Any, *, role: str) -> int | None:
-    if raw is None or (isinstance(raw, str) and raw.strip().lower() == "auto"):
-        return None
-    if isinstance(raw, (bool, float)):
-        raise ValueError(
-            f"translate.llm.{role}.max_output_tokens must be 'auto' or a positive integer"
-        )
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"translate.llm.{role}.max_output_tokens must be 'auto' or a positive integer"
-        ) from exc
-    if isinstance(raw, str) and raw.strip() != str(value):
-        raise ValueError(
-            f"translate.llm.{role}.max_output_tokens must be 'auto' or a positive integer"
-        )
-    if value < 1:
-        raise ValueError(f"translate.llm.{role}.max_output_tokens must be at least 1")
-    return value
+def resolve_review_llm_profile(config: dict, store=None):
+    """Resolve the enhanced-mode review profile; a blank id fails fast.
 
-
-def _parse_translation_integer(raw: Any, *, role: str, field: str) -> int:
-    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
-        raise ValueError(f"translate.llm.{role}.{field} must be an integer")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"translate.llm.{role}.{field} must be an integer") from exc
-    if isinstance(raw, str) and raw.strip() != str(value):
-        raise ValueError(f"translate.llm.{role}.{field} must be an integer")
-    return value
-
-
-def _enum_config_value(raw: Any) -> str:
-    value = getattr(raw, "value", raw)
-    return value if isinstance(value, str) else str(value)
-
-
-def _build_translation_llm_profile(
-    values: dict[str, Any],
-    *,
-    role: str,
-):
-    from videocaptioner.core.llm import (
-        LLMModelProfile,
-        LLMTransport,
-        OpenAIEndpoint,
-        ProviderDialect,
-    )
-
-    request_options = _parse_translation_request_options(
-        values.get("request_options_json", "{}"), role=role
-    )
-    max_output_tokens = _parse_translation_max_output_tokens(
-        values.get("max_output_tokens", "auto"), role=role
-    )
-    try:
-        profile = LLMModelProfile(
-            profile_id=f"cli-{role}",
-            name=f"CLI {role} translation model",
-            transport=LLMTransport(_enum_config_value(values["transport"])),
-            dialect=ProviderDialect(_enum_config_value(values["dialect"])),
-            base_url=values["api_base"],
-            api_key=values["api_key"],
-            model=values["model"],
-            work_context_tokens=_parse_translation_integer(
-                values["work_context_tokens"], role=role, field="work_context_tokens"
-            ),
-            max_concurrency=_parse_translation_integer(
-                values["max_concurrency"], role=role, field="max_concurrency"
-            ),
-            openai_endpoint=OpenAIEndpoint(
-                _enum_config_value(values["openai_endpoint"])
-            ),
-            request_options=request_options,
-            max_output_tokens=max_output_tokens,
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"invalid translate.llm.{role} profile: {exc}") from exc
-
-    # Request-body protection depends on the final transport and endpoint, so
-    # it is deliberately checked after all role inheritance has been applied.
-    try:
-        from videocaptioner.core.llm.request_options import validate_profile_request_options
-
-        validate_profile_request_options(profile)
-    except ValueError as exc:
-        raise ValueError(f"invalid translate.llm.{role} request options: {exc}") from exc
-    return profile
-
-
-def _resolve_translation_llm_main(config: dict):
-    legacy_profile = build_legacy_llm_profile(config)
-    base_values: dict[str, Any] = {
-        "api_key": legacy_profile.api_key,
-        "api_base": legacy_profile.base_url,
-        "model": legacy_profile.model,
-        "transport": legacy_profile.transport.value,
-        "dialect": legacy_profile.dialect.value,
-        "work_context_tokens": legacy_profile.work_context_tokens,
-        "max_concurrency": legacy_profile.max_concurrency,
-        "openai_endpoint": "chat_completions",
-        "request_options_json": "{}",
-        "max_output_tokens": "auto",
-    }
-
-    main_overrides = _translation_llm_role_config(config, "main")
-    main_values = {**base_values, **main_overrides}
-    main_profile = (
-        _build_translation_llm_profile(main_values, role="main")
-        if main_overrides
-        else legacy_profile
-    )
-    return main_profile, main_values
-
-
-def build_translation_llm_profiles(config: dict):
-    """Build immutable main/review profiles with field-presence inheritance.
-
-    Resolution is ``[llm] -> main -> review``.  Missing role tables return the
-    exact inherited profile object, which preserves the historical
-    ``cli-legacy`` profile when no new translation configuration is present.
+    Enhanced translation requires a dedicated review profile and never falls
+    back to the main profile (matching the GUI's missing_translation_roles
+    precedent). Single-LLM mode does not call this at all.
     """
-    main_profile, main_values = _resolve_translation_llm_main(config)
 
-    review_overrides = _translation_llm_role_config(config, "review")
-    review_values = {**main_values, **review_overrides}
-    review_profile = (
-        _build_translation_llm_profile(review_values, role="review")
-        if review_overrides
-        else main_profile
+    profile_id = llm_profile_ids(config)["review"]
+    if not profile_id:
+        raise ValueError(
+            _llm_profile_guidance(
+                "llm.review_profile_id is not set; enhanced_llm translation "
+                "requires a dedicated review profile and never falls back to the "
+                "main profile."
+            )
+        )
+    store = _profile_store() if store is None else store
+    profile = _lookup_profile(store, profile_id, description="review translation")
+    return apply_env_api_key_override(profile)
+
+
+def resolve_cli_utility_profile(config: dict, store=None):
+    """Resolve the utility-role profile for CLI consumers.
+
+    Wraps the shared resolver (core/llm/utility.py) so the CLI never surfaces
+    the GUI card wording to an agent: the failure is restated from the config
+    ids (which the resolver already validated) with the store path, the TOML
+    keys, and the available profile ids. Resolution semantics are unchanged —
+    an independent utility binding wins, then the main profile derives, and a
+    lost binding is an error rather than a silent fallback.
+    """
+
+    from videocaptioner.core.llm.utility import UtilityProfileError, resolve_utility_profile
+
+    ids = llm_profile_ids(config)
+    store = _profile_store() if store is None else store
+    try:
+        return resolve_utility_profile(store, ids["main"], ids["utility"])
+    except UtilityProfileError:
+        if ids["utility"]:
+            reason = (
+                f"llm.utility_profile_id = '{ids['utility']}' does not exist in "
+                "the profile store; utility roles never silently fall back to "
+                "the main profile when a binding is set."
+            )
+        elif ids["main"]:
+            reason = (
+                f"llm.profile_id = '{ids['main']}' does not exist in the profile "
+                "store, so the utility role cannot be derived from it."
+            )
+        else:
+            reason = (
+                "llm.profile_id and llm.utility_profile_id are both unset; utility "
+                "roles (split/optimize/postprocess/dub rewrite) have no model "
+                "profile to resolve."
+            )
+        raise ValueError(_llm_profile_guidance(reason)) from None
+
+
+def _llm_profile_guidance(reason: str) -> str:
+    """Point an agent at the profile store file, keys, and field shape."""
+
+    from videocaptioner.core.llm.profiles import DEFAULT_LLM_PROFILES_PATH
+
+    available = list_llm_profile_ids()
+    available_text = (
+        f"Available profile ids: {', '.join(available)}"
+        if available
+        else "No profiles exist yet; create one in the GUI profile editor "
+        "(翻译设置 → 方案 → 新建), or write a profile object directly."
     )
-    return main_profile, review_profile
-
-
-def build_translation_llm_profile(config: dict, role: str):
-    """Build one resolved translation role profile, ignoring unused later roles."""
-    if role not in {"main", "review"}:
-        raise ValueError("translation LLM role must be 'main' or 'review'")
-    main_profile, main_values = _resolve_translation_llm_main(config)
-    if role == "main":
-        return main_profile
-    review_overrides = _translation_llm_role_config(config, "review")
-    if not review_overrides:
-        return main_profile
-    return _build_translation_llm_profile(
-        {**main_values, **review_overrides}, role="review"
+    return (
+        f"{reason}\n"
+        f"  Model profile store: {DEFAULT_LLM_PROFILES_PATH}\n"
+        "  Reference one with llm.profile_id / llm.review_profile_id / "
+        "llm.utility_profile_id in config.toml, or --llm-profile / --review-profile "
+        "/ --utility-profile on the command line.\n"
+        "  A profile object looks like: "
+        '{"id": "...", "name": "...", "transport": "openai-compatible", '
+        '"dialect": "generic", "base_url": "...", "api_key": "...", '
+        '"model": "...", "work_context_tokens": 65536, "max_concurrency": 4, '
+        '"openai_endpoint": "chat_completions", "request_options": {}, '
+        '"max_output_tokens": null}\n'
+        f"  {available_text}"
     )
-
-
-def translation_llm_role_allows_empty_api_key(config: dict, role: str) -> bool:
-    """Whether an empty key was explicitly selected in a role inheritance chain."""
-    main = _translation_llm_role_config(config, "main")
-    legacy_explicit = getattr(config, "_legacy_llm_api_key_explicit", None)
-    if legacy_explicit is None:
-        legacy = config.get("llm")
-        legacy_explicit = isinstance(legacy, dict) and "api_key" in legacy
-    if role == "main":
-        return "api_key" in main or bool(legacy_explicit)
-    if role == "review":
-        review = _translation_llm_role_config(config, "review")
-        return "api_key" in review or "api_key" in main or bool(legacy_explicit)
-    raise ValueError("translation LLM role must be 'main' or 'review'")
 
 
 def ensure_config_dir() -> Path:

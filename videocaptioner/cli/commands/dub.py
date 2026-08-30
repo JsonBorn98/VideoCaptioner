@@ -6,7 +6,7 @@ from typing import Optional
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import build_legacy_llm_profile, get
+from videocaptioner.cli.config import get
 from videocaptioner.cli.validators import (
     validate_dubbing,
     validate_subtitle_input,
@@ -132,7 +132,7 @@ def _build_dubbing_config(config: dict, speaker_profiles: dict[str, SpeakerProfi
         target_padding_ms=int(get(config, "dubbing.target_padding_ms", 80)),
         rewrite_too_long=bool(get(config, "dubbing.rewrite_too_long", False)),
         rewrite_threshold=float(get(config, "dubbing.rewrite_threshold", 1.15)),
-        llm_profile=_legacy_rewrite_profile(config),
+        llm_profile=_resolve_rewrite_profile(config),
         mix_original_audio=mix_original_audio,
         original_audio_volume=original_audio_volume,
         dubbed_audio_volume=float(get(config, "dubbing.dubbed_audio_volume", 1.0)),
@@ -140,24 +140,22 @@ def _build_dubbing_config(config: dict, speaker_profiles: dict[str, SpeakerProfi
     )
 
 
-def _legacy_rewrite_profile(config: dict) -> Optional[LLMModelProfile]:
-    """Bridge the legacy ``[llm]`` table into the rewrite profile.
+def _resolve_rewrite_profile(config: dict) -> Optional[LLMModelProfile]:
+    """Resolve the dub-rewrite utility profile from the model profile store.
 
-    TODO(ticket-14): the legacy [llm] table is removed wholesale there; this
-    bridge (and the validate_llm gate) goes with it. A blank api_key/model
-    yields no profile, so a disabled rewrite stays a silent no-op — matching
-    the pre-migration behavior where missing scalars only errored when the
-    rewrite actually ran. api_base is required the same way: the old rewriter
-    errored on any of the three missing, and without it the profile would
-    silently fall back to api.openai.com, so a rewrite that runs with no
-    profile fails fast with guidance instead of hitting the wrong endpoint.
+    A disabled rewrite (dubbing.rewrite_too_long = false, the default) stays a
+    silent no-op with no profile, matching the pre-migration behavior where
+    missing LLM config only errored when the rewrite actually ran. An enabled
+    rewrite resolves the utility role (independent utility binding first, then
+    derived from the main translation profile); validate_dubbing has already
+    failed fast with guidance by the time this runs, so an unexpected miss
+    simply propagates.
     """
-    api_key = str(get(config, "llm.api_key", ""))
-    api_base = str(get(config, "llm.api_base", ""))
-    model = str(get(config, "llm.model", ""))
-    if not api_key or not api_base or not model:
+    if not bool(get(config, "dubbing.rewrite_too_long", False)):
         return None
-    return build_legacy_llm_profile(config)
+    from videocaptioner.cli.config import resolve_cli_utility_profile
+
+    return resolve_cli_utility_profile(config)
 
 
 def _resolve_dubbing_settings(config: dict) -> dict[str, str]:

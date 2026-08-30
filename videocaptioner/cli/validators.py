@@ -81,70 +81,69 @@ def validate_output_format(path: Path) -> int | None:
 
 
 def validate_llm(config: dict) -> bool:
-    """Validate LLM configuration (required for optimize, LLM translate, split)."""
-    api_key = get(config, "llm.api_key")
-    model = get(config, "llm.model")
+    """Validate LLM configuration (required for optimize, LLM translate, split).
 
-    if not api_key:
-        output.config_missing_error(
-            "LLM API key",
-            "llm.api_key",
-            "OPENAI_API_KEY",
-            "--api-key",
-        )
-        return False
-    if not model:
-        output.config_missing_error(
-            "LLM model",
-            "llm.model",
-            "OPENAI_MODEL",
-            "--model",
-        )
-        return False
+    LLM connections come from the model profile store: this checks the store
+    resolves a profile from llm.profile_id, and that a utility profile is
+    derivable from it (an empty llm.utility_profile_id means "derive", which
+    is valid). api_key emptiness is not checked here — the store holds the
+    field value and a keyless local service legitimately stores "".
+    """
+    from videocaptioner.cli.config import resolve_cli_utility_profile
+
     try:
-        from videocaptioner.cli.config import build_legacy_llm_profile
+        profile = resolve_cli_utility_profile(config)
+    except ValueError as exc:
+        output.error(str(exc))
+        return False
+    from videocaptioner.core.llm.utility import validate_utility_profile
 
-        build_legacy_llm_profile(config)
-    except (TypeError, ValueError) as exc:
-        output.error(f"Invalid LLM profile configuration: {exc}")
-        output.hint("Check llm.work_context_tokens and llm.max_concurrency")
+    try:
+        validate_utility_profile(profile)
+    except ValueError as exc:
+        output.error(f"Invalid utility model profile: {exc}")
         return False
     return True
 
 
 def validate_translation_llm(config: dict, mode: str) -> bool:
-    """Validate the resolved profiles used by an LLM translation workflow."""
-    try:
-        from videocaptioner.cli.config import (
-            build_translation_llm_profile,
-            translation_llm_role_allows_empty_api_key,
-        )
+    """Validate the profiles used by an LLM translation workflow.
 
-        main_profile = build_translation_llm_profile(config, "main")
-        review_profile = (
-            build_translation_llm_profile(config, "review")
-            if mode == "enhanced_llm"
-            else None
-        )
-    except (TypeError, ValueError) as exc:
-        output.error(f"Invalid translation LLM profile configuration: {exc}")
-        output.hint("Check [translate.llm.main] and [translate.llm.review]")
+    enhanced_llm requires a dedicated review profile and never silently falls
+    back to the main profile; single_llm does not consult review at all.
+    """
+    from videocaptioner.cli.config import (
+        resolve_main_llm_profile,
+        resolve_review_llm_profile,
+    )
+
+    try:
+        main_profile = resolve_main_llm_profile(config)
+    except ValueError as exc:
+        output.error(str(exc))
         return False
+    review_profile = None
+    if mode == "enhanced_llm":
+        try:
+            review_profile = resolve_review_llm_profile(config)
+        except ValueError as exc:
+            output.error(str(exc))
+            output.hint(
+                "Enhanced translation needs a separate review model profile; "
+                "single_llm mode needs only llm.profile_id."
+            )
+            return False
+    from videocaptioner.core.llm.request_options import validate_profile_request_options
 
     profiles = [("main", main_profile)]
-    if mode == "enhanced_llm":
-        assert review_profile is not None
+    if review_profile is not None:
         profiles.append(("review", review_profile))
     for role, profile in profiles:
-        if profile.api_key or translation_llm_role_allows_empty_api_key(config, role):
-            continue
-        output.error(f"Translation {role} LLM API key is not configured")
-        output.hint(
-            f"Set translate.llm.{role}.api_key in TOML or "
-            f"VIDEOCAPTIONER_TRANSLATE_LLM_{role.upper()}_API_KEY"
-        )
-        output.hint('For a keyless local service, explicitly configure api_key = ""')
-        return False
+        try:
+            validate_profile_request_options(profile)
+        except ValueError as exc:
+            output.error(f"Invalid {role} model profile request options: {exc}")
+            return False
     return True
 
 

@@ -122,7 +122,7 @@ def _error_entry(error: Optional[BaseException]) -> dict[str, Any]:
 def _base_entry(profile: LLMModelProfile, request: LLMRequest) -> dict[str, Any]:
     """Return the entry skeleton shared by every gateway log shape."""
 
-    return {
+    entry: dict[str, Any] = {
         "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "request_id": uuid.uuid4().hex,
         "stage": str(request.metadata.get("stage", "")),
@@ -132,6 +132,12 @@ def _base_entry(profile: LLMModelProfile, request: LLMRequest) -> dict[str, Any]
             "model": profile.model,
         },
     }
+    # Only emitted when set, so existing entries keep their shape (e.g. the CLI
+    # marks CI-injected credentials with key_source="env_override").
+    key_source = request.metadata.get("key_source")
+    if key_source:
+        entry["key_source"] = str(key_source)
+    return entry
 
 
 def begin_gateway_request(

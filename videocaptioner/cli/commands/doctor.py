@@ -183,10 +183,11 @@ def _check_subtitle(config: dict) -> list[Check]:
     checks: list[Check] = []
     optimize = bool(get(config, "subtitle.optimize", True))
     split = bool(get(config, "subtitle.split", True))
+    compress = bool(get(config, "subtitle.compress_fast_subtitles", False))
     translate = bool(get(config, "subtitle.translate", False))
     translator = get(config, "translate.service", "bing")
     translation_mode = get(config, "translate.mode", "enhanced_llm")
-    needs_llm = optimize or split or (
+    needs_llm = optimize or split or compress or (
         translate and translation_mode in {"single_llm", "enhanced_llm"}
     )
     checks.append(
@@ -197,10 +198,86 @@ def _check_subtitle(config: dict) -> list[Check]:
             f"translation_mode={translation_mode}, translator={translator}",
         )
     )
-    if needs_llm and not get(config, "llm.api_key", ""):
-        checks.append(Check("llm.api_key", "warn", "LLM API key is missing; AI polish/split/LLM translation will fail", "Run 'videocaptioner config set llm.api_key <key>' or disable AI polish/split"))
-    if needs_llm and not get(config, "llm.model", ""):
-        checks.append(Check("llm.model", "error", "LLM model is missing", "Run 'videocaptioner config set llm.model <model>'"))
+    if not needs_llm:
+        return checks
+
+    from videocaptioner.cli.config import list_llm_profile_ids, llm_profile_ids
+
+    profile_ids = llm_profile_ids(config)
+    available = list_llm_profile_ids()
+    if not available:
+        checks.append(
+            Check(
+                "llm.profile_id",
+                "error",
+                "The model profile store is empty; LLM consumers have nothing to resolve",
+                "Create a model profile in the GUI (翻译设置 → 方案 → 新建), "
+                "then set llm.profile_id with 'videocaptioner config set llm.profile_id <id>'",
+            )
+        )
+        return checks
+    if not profile_ids["main"]:
+        checks.append(
+            Check(
+                "llm.profile_id",
+                "error",
+                "llm.profile_id is not set",
+                "Run 'videocaptioner profile list' to see ids, then "
+                "'videocaptioner config set llm.profile_id <id>'",
+            )
+        )
+    elif profile_ids["main"] not in available:
+        checks.append(
+            Check(
+                "llm.profile_id",
+                "error",
+                f"Profile '{profile_ids['main']}' does not exist in the store",
+                "Run 'videocaptioner profile list' to see available ids, then "
+                "'videocaptioner config set llm.profile_id <id>'",
+            )
+        )
+    # An empty utility binding is valid: it derives from the main profile. Only
+    # a bound-but-missing id is an error, so the resolver never silently falls
+    # back to derivation when the user explicitly bound something.
+    if profile_ids["utility"] and profile_ids["utility"] not in available:
+        checks.append(
+            Check(
+                "llm.utility_profile_id",
+                "error",
+                f"Profile '{profile_ids['utility']}' does not exist in the store",
+                "Run 'videocaptioner profile list' to see available ids, then "
+                "'videocaptioner config set llm.utility_profile_id <id>'",
+            )
+        )
+    if (
+        translate
+        and translation_mode == "enhanced_llm"
+        and not profile_ids["review"]
+    ):
+        checks.append(
+            Check(
+                "llm.review_profile_id",
+                "warn",
+                "enhanced_llm translation requires a review profile and none is set",
+                "Run 'videocaptioner profile list' to see ids, then "
+                "'videocaptioner config set llm.review_profile_id <id>' "
+                "(or use single_llm mode)",
+            )
+        )
+    elif (
+        translate
+        and translation_mode == "enhanced_llm"
+        and profile_ids["review"] not in available
+    ):
+        checks.append(
+            Check(
+                "llm.review_profile_id",
+                "error",
+                f"Profile '{profile_ids['review']}' does not exist in the store",
+                "Run 'videocaptioner profile list' to see available ids, then "
+                "'videocaptioner config set llm.review_profile_id <id>'",
+            )
+        )
     return checks
 
 

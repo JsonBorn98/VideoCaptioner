@@ -2,17 +2,57 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli.commands import subtitle as subtitle_command
 from videocaptioner.cli.config import build_config
 from videocaptioner.cli.main import _build_cli_overrides
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.llm import LLMTransport, ProviderDialect
+from videocaptioner.core.llm.models import LLMModelProfile
+from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.translate.enhanced.models import (
     TermConfirmationMode,
     TranslationAuditMode,
     TranslationExecutionMode,
 )
+
+
+@pytest.fixture
+def profile_store(tmp_path, monkeypatch):
+    """Seed a temporary model profile store and point the default path at it."""
+
+    store_path = tmp_path / "llm_model_profiles.json"
+    store = LLMModelProfileStore(store_path)
+    store.save(
+        LLMModelProfile(
+            profile_id="main-profile",
+            name="Main Profile",
+            transport=LLMTransport.OPENAI_COMPATIBLE,
+            dialect=ProviderDialect.GENERIC,
+            base_url="https://main.test/v1",
+            api_key="main-secret",
+            model="main-model",
+            work_context_tokens=16_384,
+        )
+    )
+    store.save(
+        LLMModelProfile(
+            profile_id="review-profile",
+            name="Review Profile",
+            transport=LLMTransport.OPENAI_COMPATIBLE,
+            dialect=ProviderDialect.GENERIC,
+            base_url="https://review.test/v1",
+            api_key="review-secret",
+            model="review-model",
+            work_context_tokens=16_384,
+        )
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.llm.profiles.DEFAULT_LLM_PROFILES_PATH", store_path
+    )
+    return store
 
 
 def _args(input_path: Path, output_path: Path, **overrides) -> Namespace:
@@ -67,7 +107,7 @@ def test_old_non_llm_config_is_classified_without_changing_service(tmp_path: Pat
 
 
 def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, profile_store
 ) -> None:
     source = tmp_path / "source.srt"
     destination = tmp_path / "initial.srt"
@@ -93,7 +133,10 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
     monkeypatch.setattr(enhanced_package, "run_enhanced_translation", fake_run)
     config = build_config(
         {
-            "llm": {"api_key": "test-key", "model": "test-model"},
+            "llm": {
+                "profile_id": "main-profile",
+                "review_profile_id": "main-profile",
+            },
             "subtitle": {"optimize": False, "split": False, "translate": True},
             "translate": {
                 "mode": "enhanced_llm",
@@ -113,7 +156,8 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
     assert enhanced_config.audit_mode is TranslationAuditMode.AUTO_APPLY_REVIEW
     assert enhanced_config.execution_mode is TranslationExecutionMode.CLI
     assert enhanced_config.source_language == "English"
-    assert enhanced_config.main_role.profile == enhanced_config.review_role.profile
+    assert enhanced_config.main_role.profile.model == "main-model"
+    assert enhanced_config.review_role.profile.model == "main-model"
     assert enhanced_config.main_role.profile.transport is LLMTransport.OPENAI_COMPATIBLE
     assert enhanced_config.main_role.profile.dialect is ProviderDialect.GENERIC
     assert enhanced_config.main_role.user_prompt == "main role"
@@ -123,7 +167,7 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
 
 
 def test_enhanced_translation_uses_independent_profiles_and_warns_once_for_store(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch, capsys, profile_store
 ) -> None:
     source = tmp_path / "source.srt"
     destination = tmp_path / "initial.srt"
@@ -146,27 +190,42 @@ def test_enhanced_translation_uses_independent_profiles_and_warns_once_for_store
     import videocaptioner.core.translate.enhanced as enhanced_package
 
     monkeypatch.setattr(enhanced_package, "run_enhanced_translation", fake_run)
+
+    # Two independent store profiles, both asking the provider to retain content.
+    profile_store.save(
+        LLMModelProfile(
+            profile_id="store-main",
+            name="Store Main",
+            transport=LLMTransport.OPENAI_COMPATIBLE,
+            dialect=ProviderDialect.GENERIC,
+            base_url="https://store-main.test/v1",
+            api_key="store-main-secret",
+            model="store-main-model",
+            work_context_tokens=16_384,
+            request_options={"store": True},
+        )
+    )
+    profile_store.save(
+        LLMModelProfile(
+            profile_id="store-review",
+            name="Store Review",
+            transport=LLMTransport.OPENAI_COMPATIBLE,
+            dialect=ProviderDialect.GENERIC,
+            base_url="https://store-review.test/v1",
+            api_key="store-review-secret",
+            model="store-review-model",
+            work_context_tokens=16_384,
+            request_options={"store": True},
+        )
+    )
     config = build_config(
         {
-            "llm": {"api_key": "legacy-key", "model": "legacy-model"},
-            "subtitle": {"optimize": False, "split": False, "translate": True},
-            "translate": {
-                "mode": "enhanced_llm",
-                "llm": {
-                    "main": {
-                        "model": "main-model",
-                        "openai_endpoint": "responses",
-                        "max_output_tokens": 2048,
-                        "request_options_json": '{"store":true}',
-                    },
-                    "review": {
-                        "model": "review-model",
-                        "openai_endpoint": "chat_completions",
-                        "max_output_tokens": "auto",
-                        "request_options_json": '{"store":true}',
-                    },
-                },
+            "llm": {
+                "profile_id": "store-main",
+                "review_profile_id": "store-review",
             },
+            "subtitle": {"optimize": False, "split": False, "translate": True},
+            "translate": {"mode": "enhanced_llm"},
         }
     )
 
@@ -174,12 +233,10 @@ def test_enhanced_translation_uses_independent_profiles_and_warns_once_for_store
 
     enhanced_config = captured["config"]
     assert result == EXIT.SUCCESS
-    assert enhanced_config.main_role.profile.model == "main-model"
-    assert enhanced_config.main_role.profile.openai_endpoint.value == "responses"
-    assert enhanced_config.main_role.profile.max_output_tokens == 2048
-    assert enhanced_config.review_role.profile.model == "review-model"
-    assert enhanced_config.review_role.profile.openai_endpoint.value == "chat_completions"
-    assert enhanced_config.review_role.profile.max_output_tokens is None
+    assert enhanced_config.main_role.profile.model == "store-main-model"
+    assert enhanced_config.main_role.profile.request_options["store"] is True
+    assert enhanced_config.review_role.profile.model == "store-review-model"
+    assert enhanced_config.review_role.profile.request_options["store"] is True
     assert capsys.readouterr().err.count("store=true") == 1
 
 
@@ -223,7 +280,9 @@ def test_non_llm_deeplx_is_mapped_explicitly(tmp_path: Path, monkeypatch) -> Non
     assert captured["source_language"] == "auto"
 
 
-def test_single_llm_keeps_reflection_and_uses_profile(tmp_path: Path, monkeypatch) -> None:
+def test_single_llm_keeps_reflection_and_uses_profile(
+    tmp_path: Path, monkeypatch, profile_store
+) -> None:
     source = tmp_path / "source.srt"
     destination = tmp_path / "initial.srt"
     captured = {}
@@ -242,18 +301,19 @@ def test_single_llm_keeps_reflection_and_uses_profile(tmp_path: Path, monkeypatc
         return FakeTranslator()
 
     monkeypatch.setattr(factory_module.TranslatorFactory, "create_translator", fake_create)
+    # single_llm never consults the review binding, so an unknown review id is
+    # not an error here (unlike enhanced_llm, which fails fast on it).
     config = build_config(
         {
-            "llm": {"api_key": "test-key", "model": "test-model"},
+            "llm": {
+                "profile_id": "main-profile",
+                "review_profile_id": "unused-review-profile",
+            },
             "subtitle": {"optimize": False, "split": False, "translate": True},
             "translate": {
                 "mode": "single_llm",
                 "source_language": "Japanese",
                 "reflect": True,
-                "llm": {
-                    "main": {"model": "main-model"},
-                    "review": {"model": "unused-review-model"},
-                },
             },
         }
     )

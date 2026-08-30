@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import build_legacy_llm_profile, get
+from videocaptioner.cli.config import get
 
 _LAYOUT_MODES = {
     "auto": "auto",
@@ -156,16 +155,21 @@ def run(args: Namespace, config: dict) -> int:
         for key, field_name in _CONFIG_OVERRIDE_FIELDS.items()
         if key in section
     }
-    # TODO(ticket-14): temporary bridge — the compress/semantic-repair consumers
-    # now take a utility model profile instead of a model-name string, so the
-    # legacy [llm] scalars are bridged into a profile here until [llm] collapses
-    # to profile-id keys.
-    llm_model = get(config, "llm.model", "")
-    if llm_model and resolved.utility_llm_profile is None:
-        resolved = replace(
-            resolved, utility_llm_profile=build_legacy_llm_profile(config)
-        )
     resolved = replace(resolved, **overrides)
+    # Compress re-translation and semantic repair resolve their model from the
+    # profile store (utility binding first, then derived from main). Only a
+    # config that actually issues utility LLM requests needs a profile, and it
+    # fails fast with guidance when none can be resolved — matching the GUI.
+    if resolved.needs_utility_llm() and resolved.utility_llm_profile is None:
+        from videocaptioner.cli.config import resolve_cli_utility_profile
+
+        try:
+            resolved = replace(
+                resolved, utility_llm_profile=resolve_cli_utility_profile(config)
+            )
+        except ValueError as exc:
+            output.error(str(exc))
+            return EXIT.USAGE_ERROR
 
     if media_missing:
         # Drop the unusable path so the core takes the clean 对齐降级
@@ -173,13 +177,6 @@ def run(args: Namespace, config: dict) -> int:
         if getattr(resolved, "precise_timing", False) and not getattr(args, "quiet", False):
             output.warn(f"关联媒体不存在，媒体增强对齐已降级（对齐降级）: {media_value}")
         media_value = None
-
-    api_key = get(config, "llm.api_key", "")
-    api_base = get(config, "llm.api_base", "")
-    if api_key:
-        os.environ["OPENAI_API_KEY"] = api_key
-    if api_base:
-        os.environ["OPENAI_BASE_URL"] = api_base
 
     layout_value = getattr(args, "layout", "auto") or "auto"
     requested_output = getattr(args, "output", None)
