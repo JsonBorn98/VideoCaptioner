@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import json_repair
 
-from ..llm import call_llm
+from ..llm import LLMGateway, LLMMessage, LLMRequest
 from ..prompts import get_prompt
 from ..utils.logger import setup_logger
 from ..utils.text_utils import is_mainly_cjk
@@ -24,6 +24,7 @@ from .report import QualityReport
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData, ASRDataSeg
+    from ..llm import LLMModelProfile
 
 logger = setup_logger("postprocess.compress")
 
@@ -110,7 +111,12 @@ def _validate(
     return True, ""
 
 
-def _agent_loop(candidates: list, cfg: PostprocessConfig) -> dict:
+def _agent_loop(
+    candidates: list,
+    cfg: PostprocessConfig,
+    profile: "LLMModelProfile",
+    gateway: Optional[LLMGateway] = None,
+) -> dict:
     """LLM → 校验 → 反馈 → 重试（≤MAX_STEPS）。返回 {index: compressed}。"""
     payload = {
         str(i + 1): {
@@ -122,18 +128,27 @@ def _agent_loop(candidates: list, cfg: PostprocessConfig) -> dict:
         for i, cand in enumerate(candidates)
     }
     system_prompt = get_prompt("optimize/compress", max_cps_cjk=cfg.max_cps_cjk)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": f"Compress the following subtitles:\n<input>{json.dumps(payload, ensure_ascii=False)}</input>",
-        },
+    messages: list[LLMMessage] = [
+        LLMMessage("system", system_prompt),
+        LLMMessage(
+            "user",
+            f"Compress the following subtitles:\n<input>{json.dumps(payload, ensure_ascii=False)}</input>",
+        ),
     ]
 
     last_result: dict = {}
     for step in range(MAX_STEPS):
-        response = call_llm(messages=messages, model=cfg.llm_model or "")
-        text = response.choices[0].message.content
+        # 无 timeout：落 adapter 构造默认 120 秒（与旧 SDK 默认 600 秒相比是有意的收紧，
+        # gateway 四次重试兜底，见 spec「请求语义」）。
+        response = gateway.complete(
+            profile,
+            LLMRequest(
+                messages=tuple(messages),
+                max_output_tokens=profile.max_output_tokens,
+                metadata={"stage": "llm_compress", "role": "utility"},
+            ),
+        )
+        text = response.text
         parsed = json_repair.loads(text)
         if not isinstance(parsed, dict):
             raise ValueError(f"LLM 返回类型错误，期望 dict，实际 {type(parsed)}")
@@ -143,12 +158,12 @@ def _agent_loop(candidates: list, cfg: PostprocessConfig) -> dict:
         if ok:
             return last_result
         logger.warning("压缩校验失败(第%d次): %s", step + 1, error)
-        messages.append({"role": "assistant", "content": text})
+        messages.append(LLMMessage("assistant", text))
         messages.append(
-            {
-                "role": "user",
-                "content": f"Validation failed: {error}\nFix and output ONLY a valid JSON object with all keys.",
-            }
+            LLMMessage(
+                "user",
+                f"Validation failed: {error}\nFix and output ONLY a valid JSON object with all keys.",
+            )
         )
     return last_result
 
@@ -157,11 +172,12 @@ def compress_fast_subtitles(
     asr_data: "ASRData",
     cfg: PostprocessConfig,
     report: QualityReport,
-    llm_ctx: Optional[dict] = None,
+    gateway: Optional[LLMGateway] = None,
 ) -> Tuple["ASRData", QualityReport]:
     """压缩超速中文行。校验失败的条目保留原文并记入 QA 报告。"""
-    if not cfg.llm_model:
-        logger.warning("未配置 LLM 模型，跳过快速字幕压缩")
+    profile = cfg.utility_llm_profile
+    if profile is None:
+        logger.warning("未配置工具角色模型配置方案，跳过快速字幕压缩")
         return asr_data, report
 
     candidates = _build_candidates(asr_data, cfg)
@@ -169,8 +185,9 @@ def compress_fast_subtitles(
         return asr_data, report
 
     stage = report.stage("compress")
+    runtime = gateway or LLMGateway()
     try:
-        result = _agent_loop(candidates, cfg)
+        result = _agent_loop(candidates, cfg, profile, runtime)
     except Exception as exc:  # noqa: BLE001 —— 单点失败不阻断
         logger.warning("压缩重译调用失败，全部保留原文: %s", exc)
         for cand in candidates:

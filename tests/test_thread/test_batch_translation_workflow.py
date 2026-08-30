@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from videocaptioner.core.entities import (
     BatchTaskStatus,
     BatchTaskType,
@@ -7,15 +9,44 @@ from videocaptioner.core.entities import (
     SubtitleConfig,
     TranslatorServiceEnum,
 )
+from videocaptioner.core.llm.models import LLMModelProfile, LLMTransport, ProviderDialect
+from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.translate.enhanced.models import (
     TermConfirmationMode,
     TranslationAuditMode,
     TranslationExecutionMode,
 )
 from videocaptioner.core.translate.types import TranslationMode
+from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.batch_process_thread import BatchProcessThread, BatchTask
 from videocaptioner.ui.thread.subtitle_pipeline_thread import SubtitlePipelineThread
+
+
+@pytest.fixture(autouse=True)
+def _seed_utility_profiles(tmp_path, monkeypatch):
+    """种子一个主翻译方案：启用的后处理任务需要为语义修复派生工具方案。"""
+
+    store_path = tmp_path / "profiles.json"
+    LLMModelProfileStore(store_path).save(
+        LLMModelProfile(
+            profile_id="main-profile",
+            name="Main Profile",
+            transport=LLMTransport.OPENAI_COMPATIBLE,
+            dialect=ProviderDialect.GENERIC,
+            base_url="https://main.test/v1",
+            api_key="secret",
+            model="main-model",
+            work_context_tokens=16_384,
+        )
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.llm.profiles.DEFAULT_LLM_PROFILES_PATH", store_path
+    )
+    original = cfg.get(cfg.main_llm_profile_id)
+    cfg.set(cfg.main_llm_profile_id, "main-profile")
+    yield
+    cfg.set(cfg.main_llm_profile_id, original)
 
 
 def _manual_config() -> SubtitleConfig:

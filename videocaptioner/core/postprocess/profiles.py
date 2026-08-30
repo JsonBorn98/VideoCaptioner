@@ -8,14 +8,14 @@ import re
 import tempfile
 import uuid
 from copy import deepcopy
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
 from videocaptioner.config import APPDATA_PATH
 
-from .config import PostprocessConfig
+from .config import RUNTIME_INJECTED_FIELDS, PostprocessConfig, config_payload
 
 PROFILE_SCHEMA = "videocaptioner.postprocess-profile-collection"
 PROFILE_SCHEMA_VERSION = 1
@@ -78,7 +78,7 @@ def _deep_thaw(value: Any) -> Any:
 # Recursively frozen snapshots make accidental baseline mutation impossible.
 FACTORY_BASELINES: Mapping[str, Mapping[str, Any]] = MappingProxyType(
     {
-        template_id: _deep_freeze(asdict(_factory_config(template_id)))
+        template_id: _deep_freeze(config_payload(_factory_config(template_id)))
         for template_id in TEMPLATE_IDS
     }
 )
@@ -149,12 +149,15 @@ def _config_from_dict(data: Any) -> PostprocessConfig:
     if not isinstance(data, Mapping):
         raise PostprocessProfileError("profile config must be an object")
     migrated = _migrate_legacy_config(data)
+    # 运行期注入字段（utility_llm_profile 等）不是持久化状态；读到一律按未注入处理。
+    for field_name in RUNTIME_INJECTED_FIELDS:
+        migrated.pop(field_name, None)
     unknown = sorted(set(migrated) - _CONFIG_FIELDS)
     if unknown:
         raise PostprocessProfileError(f"Unknown config field: {unknown[0]}")
     # 向前兼容：新增后处理选项后，老版本持久化的 profile 会缺少这些字段。
     # 用权威默认值补齐缺失字段，而非报错，避免既有 profile 集合无法加载。
-    defaults = asdict(PostprocessConfig())
+    defaults = config_payload(PostprocessConfig())
     merged = {**defaults, **deepcopy(dict(migrated))}
     try:
         return PostprocessConfig(**merged)
@@ -186,7 +189,7 @@ class PostprocessProfile:
         if self.is_template and self.profile_id != self.base_template_id:
             raise PostprocessProfileError("template profile id must equal base_template_id")
         # Copy mutable list/dict fields so callers cannot mutate persisted state by alias.
-        object.__setattr__(self, "config", _config_from_dict(asdict(self.config)))
+        object.__setattr__(self, "config", _config_from_dict(config_payload(self.config)))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -194,7 +197,7 @@ class PostprocessProfile:
             "name": self.name,
             "base_template_id": self.base_template_id,
             "is_template": self.is_template,
-            "config": asdict(self.config),
+            "config": config_payload(self.config),
         }
 
     @classmethod
@@ -332,7 +335,7 @@ class PostprocessProfileStore:
         return PostprocessProfile.from_dict(profile.to_dict())
 
     def resolve_config(self, profile_id: str) -> PostprocessConfig:
-        return _config_from_dict(asdict(self.get(profile_id).config))
+        return _config_from_dict(config_payload(self.get(profile_id).config))
 
     def copy_template(
         self, template_id: str, name: str, *, profile_id: str | None = None

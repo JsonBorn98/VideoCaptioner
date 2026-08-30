@@ -10,6 +10,7 @@ import regex
 
 from ..asr.asr_data import ASRData, ASRDataSeg
 from ..entities import SubtitleLayoutEnum
+from ..llm import LLMGateway, LLMModelProfile
 from ..utils.logger import setup_logger
 from .deterministic import (
     TimingChange,
@@ -339,13 +340,14 @@ def _apply_semantic_repairs(
     policy: SpeedPolicy,
     layout: SubtitleLayoutEnum,
     primary_side: PrimarySide,
-    model: str,
-    reviewer_model: str | None,
+    semantic_profile: LLMModelProfile,
+    semantic_reviewer_profile: LLMModelProfile | None,
     window_size: int,
     uncertain_review: bool,
     cache: RewriteCache,
     rewriter: SemanticRewriter | None,
     reviewer: SemanticReviewer | None,
+    gateway: LLMGateway | None,
 ) -> tuple[
     ASRData,
     SpeedMetrics,
@@ -399,10 +401,11 @@ def _apply_semantic_repairs(
         )
     result = repair_semantic_windows(
         repair_cues,
-        model=model,
-        reviewer_model=reviewer_model,
+        profile=semantic_profile,
+        reviewer_profile=semantic_reviewer_profile,
         rewriter=rewriter,
         reviewer=selected_reviewer,
+        gateway=gateway,
         cache=cache,
         window_size=window_size,
     )
@@ -469,13 +472,14 @@ def optimize_speed(
     reference_audit: bool = False,
     optimize_both_sides: bool = False,
     semantic_repair: bool = False,
-    semantic_model: str | None = None,
-    semantic_reviewer_model: str | None = None,
+    semantic_profile: LLMModelProfile | None = None,
+    semantic_reviewer_profile: LLMModelProfile | None = None,
     semantic_window_size: int = 5,
     semantic_uncertain_review: bool = True,
     semantic_cache: RewriteCache | None = None,
     semantic_rewriter: SemanticRewriter | None = None,
     semantic_reviewer: SemanticReviewer | None = None,
+    semantic_gateway: LLMGateway | None = None,
 ) -> tuple[ASRData, SpeedOptimizationResult]:
     """Analyze or apply the validated timing, structure, and semantic pipeline."""
 
@@ -527,20 +531,21 @@ def optimize_speed(
             )
         )
         changes.extend(structural_timing_changes)
-        if semantic_repair and semantic_model:
+        if semantic_repair and semantic_profile is not None:
             output, after, semantic_records, semantic_timing_changes = _apply_semantic_repairs(
                 output,
                 after,
                 policy=selected_policy,
                 layout=layout,
                 primary_side=primary_side,
-                model=semantic_model,
-                reviewer_model=semantic_reviewer_model,
+                semantic_profile=semantic_profile,
+                semantic_reviewer_profile=semantic_reviewer_profile,
                 window_size=semantic_window_size,
                 uncertain_review=semantic_uncertain_review,
                 cache=semantic_cache if semantic_cache is not None else _SEMANTIC_CACHE,
                 rewriter=semantic_rewriter,
                 reviewer=semantic_reviewer,
+                gateway=semantic_gateway,
             )
             changes.extend(semantic_timing_changes)
     measured_output = output if mode == "apply" else _clone_with_timings(data, optimized)
@@ -574,13 +579,14 @@ def optimize_speed(
             reference_audit=False,
             optimize_both_sides=False,
             semantic_repair=semantic_repair,
-            semantic_model=semantic_model,
-            semantic_reviewer_model=semantic_reviewer_model,
+            semantic_profile=semantic_profile,
+            semantic_reviewer_profile=semantic_reviewer_profile,
             semantic_window_size=semantic_window_size,
             semantic_uncertain_review=semantic_uncertain_review,
             semantic_cache=semantic_cache,
             semantic_rewriter=semantic_rewriter,
             semantic_reviewer=semantic_reviewer,
+            semantic_gateway=semantic_gateway,
         )
         primary_candidate = measure(
             _to_timing_cues(

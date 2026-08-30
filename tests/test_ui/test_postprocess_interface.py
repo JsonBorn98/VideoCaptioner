@@ -17,6 +17,38 @@ def _run_qt_script(script: str) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _seed_main_profile_script(profiles_path: str) -> str:
+    """子进程脚本前奏：种子主翻译方案并绑定，供后处理任务的工具方案派生。"""
+    return f"""
+from pathlib import Path
+
+import videocaptioner.core.llm.profiles as llm_profiles
+from videocaptioner.core.llm.models import (
+    LLMModelProfile,
+    LLMTransport,
+    ProviderDialect,
+)
+from videocaptioner.core.llm.profiles import LLMModelProfileStore
+
+llm_profiles.DEFAULT_LLM_PROFILES_PATH = Path({profiles_path!r})
+LLMModelProfileStore(Path({profiles_path!r})).save(
+    LLMModelProfile(
+        profile_id="main-profile",
+        name="Main Profile",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url="https://main.test/v1",
+        api_key="secret",
+        model="main-model",
+        work_context_tokens=16384,
+    )
+)
+from videocaptioner.ui.common.config import cfg
+
+cfg.set(cfg.main_llm_profile_id, "main-profile")
+"""
+
+
 def test_home_workflow_places_postprocess_between_translation_and_synthesis():
     _run_qt_script(
         """
@@ -65,6 +97,8 @@ widget.close()
 
 def test_postprocess_run_reloads_latest_saved_profile(tmp_path):
     profile_path = repr(str(tmp_path / "profiles.json"))
+    # LLM 方案库存独立文件：后处理方案库用 profiles.json，两者 schema 不同。
+    seed = _seed_main_profile_script(str(tmp_path / "llm_profiles.json"))
     srt = tmp_path / "in.srt"
     srt.write_text(
         "1\n00:00:00,000 --> 00:00:02,000\nhello world\n", encoding="utf-8"
@@ -72,6 +106,7 @@ def test_postprocess_run_reloads_latest_saved_profile(tmp_path):
     srt_path = repr(str(srt))
     _run_qt_script(
         f"""
+{seed}
 from PyQt5.QtWidgets import QApplication
 from videocaptioner.core.postprocess import PostprocessProfileStore
 from videocaptioner.ui.view.postprocess_interface import PostprocessInterface
@@ -409,8 +444,10 @@ widget.close()
 
 def test_home_workflow_passes_subtitle_snapshots_in_memory(tmp_path):
     video_path = repr(str(tmp_path / "episode.mp4"))
+    seed = _seed_main_profile_script(str(tmp_path / "profiles.json"))
     _run_qt_script(
         f"""
+{seed}
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from PyQt5.QtWidgets import QApplication
 from videocaptioner.ui.view.home_interface import HomeInterface
