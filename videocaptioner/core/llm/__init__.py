@@ -22,6 +22,11 @@ from .models import (
     thaw_json_object,
 )
 from .profiles import LLMModelProfileStore
+from .utility import (
+    UtilityProfileError,
+    resolve_utility_profile,
+    validate_utility_profile,
+)
 
 __all__ = [
     "call_llm",
@@ -42,5 +47,8 @@ __all__ = [
     "LLMUsage",
     "OpenAIEndpoint",
     "ProviderDialect",
+    "UtilityProfileError",
+    "resolve_utility_profile",
     "thaw_json_object",
+    "validate_utility_profile",
 ]
