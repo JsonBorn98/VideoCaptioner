@@ -118,17 +118,22 @@ _LEGACY_DROP_FIELDS = frozenset(
         "tail_dwell_long_gap_ms",
         "tail_dwell_scene_cut_ms",
         "tail_dwell_min_blank_ms",
+        # 票 12 退役的模型名字段：无对应新字段，直接丢弃——模型与连接由
+        # utility_llm_profile 运行期注入（模型配置方案库），不来自持久化存档。
+        "llm_model",
     }
 )
 
 
 def _migrate_legacy_config(data: Mapping[str, Any]) -> dict[str, Any]:
-    """把旧版 tail_dwell 分档字段迁移到尾部补偿曲线字段（见 docs/adr/0005）。
+    """把旧版持久化字段迁移/丢弃，保证旧存档始终可加载（向前兼容契约）。
 
-    - ``tail_dwell`` → ``tail_compensation``（保留启用状态）
-    - ``tail_dwell_long_ms`` → ``max_compensation_ms``
-    - ``tail_dwell_long_gap_ms`` → ``max_compensation_gap_ms``
-    - short / scene_cut / min_blank 无对应项，丢弃（最小补偿取默认）
+    - ``tail_dwell`` 分档字段 → 尾部补偿曲线字段（见 docs/adr/0005）：
+      ``tail_dwell`` → ``tail_compensation``（保留启用状态）、
+      ``tail_dwell_long_ms`` → ``max_compensation_ms``、
+      ``tail_dwell_long_gap_ms`` → ``max_compensation_gap_ms``；
+      short / scene_cut / min_blank 无对应项，丢弃（最小补偿取默认）
+    - ``llm_model``（票 12 退役）无对应新字段，丢弃——方案由运行期注入
 
     迁移值若与新约束冲突，由 :func:`_config_from_dict` 回退到默认补偿参数。
     """

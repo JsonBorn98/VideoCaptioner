@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from videocaptioner.core.postprocess.profiles import (
@@ -64,3 +66,26 @@ def test_reload_picks_up_edits_from_another_store_instance(tmp_path):
     page_store.reload()
     assert page_store.get("balanced").config.tail_compensation is True
     assert page_store.resolve_config("balanced").max_gap_ms == 501
+
+
+def test_archived_llm_model_key_is_dropped_not_rejected(tmp_path):
+    """票 12 退役 llm_model 后，老存档带着该键仍可加载（向前兼容契约）。
+
+    旧档的 llm_model 无对应新字段：直接丢弃、方案取默认 None——模型与
+    连接由 utility_llm_profile 运行期注入，不来自持久化存档。
+    """
+    path = tmp_path / "profiles.json"
+    store = PostprocessProfileStore(path)
+    store.copy_template("balanced", "Legacy", profile_id="legacy")
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for profile in document["profiles"]:
+        if profile["id"] == "legacy":
+            profile["config"]["llm_model"] = "gpt-4o-mini"
+    path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+
+    loaded = PostprocessProfileStore(path).get("legacy")
+
+    assert loaded.config.utility_llm_profile is None
+    # 其余持久化字段不受丢弃影响
+    assert loaded.config.speed_profile == "balanced"

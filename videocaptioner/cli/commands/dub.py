@@ -147,11 +147,15 @@ def _legacy_rewrite_profile(config: dict) -> Optional[LLMModelProfile]:
     bridge (and the validate_llm gate) goes with it. A blank api_key/model
     yields no profile, so a disabled rewrite stays a silent no-op — matching
     the pre-migration behavior where missing scalars only errored when the
-    rewrite actually ran.
+    rewrite actually ran. api_base is required the same way: the old rewriter
+    errored on any of the three missing, and without it the profile would
+    silently fall back to api.openai.com, so a rewrite that runs with no
+    profile fails fast with guidance instead of hitting the wrong endpoint.
     """
     api_key = str(get(config, "llm.api_key", ""))
+    api_base = str(get(config, "llm.api_base", ""))
     model = str(get(config, "llm.model", ""))
-    if not api_key or not model:
+    if not api_key or not api_base or not model:
         return None
     return build_legacy_llm_profile(config)
 
