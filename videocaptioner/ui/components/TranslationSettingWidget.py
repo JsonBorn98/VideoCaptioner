@@ -20,6 +20,7 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     ComboBoxSettingCard,
+    EditableComboBox,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -40,7 +41,10 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.core.entities import TranslatorServiceEnum
-from videocaptioner.core.llm.check_llm import probe_model_profile_capabilities
+from videocaptioner.core.llm.check_llm import (
+    get_available_models,
+    probe_model_profile_capabilities,
+)
 from videocaptioner.core.llm.models import (
     LLMModelProfile,
     LLMTransport,
@@ -183,6 +187,7 @@ class PromptSettingCard(SettingCard):
 
 class _ProfileDialog(MessageBoxBase):
     probeRequested = pyqtSignal(object)
+    modelsRequested = pyqtSignal(str, str)
 
     def __init__(
         self,
@@ -199,7 +204,9 @@ class _ProfileDialog(MessageBoxBase):
         self.dialectCombo = ComboBox(self)
         self.baseUrlEdit = LineEdit(self)
         self.apiKeyEdit = PasswordLineEdit(self)
-        self.modelEdit = LineEdit(self)
+        # 可编辑下拉：既可手填模型名，也可从「获取模型列表」拉取的结果里选。
+        self.modelEdit = EditableComboBox(self)
+        self.fetchModelsButton = PushButton(self.tr("获取模型列表"), self)
         self.contextSpin = SpinBox(self)
         self.concurrencySpin = SpinBox(self)
         self.outputModeCombo = ComboBox(self)
@@ -290,6 +297,13 @@ class _ProfileDialog(MessageBoxBase):
         outputLayout.addWidget(self.outputModeCombo)
         outputLayout.addWidget(self.outputTokensSpin, 1)
 
+        modelRow = QWidget(self)
+        modelLayout = QHBoxLayout(modelRow)
+        modelLayout.setContentsMargins(0, 0, 0, 0)
+        modelLayout.setSpacing(8)
+        modelLayout.addWidget(self.modelEdit, 1)
+        modelLayout.addWidget(self.fetchModelsButton)
+
         self.advancedWidget = QWidget(self)
         advancedLayout = QVBoxLayout(self.advancedWidget)
         advancedLayout.setContentsMargins(0, 0, 0, 0)
@@ -329,7 +343,7 @@ class _ProfileDialog(MessageBoxBase):
         form.addRow(BodyLabel(self.tr("供应商方言"), formWidget), self.dialectCombo)
         form.addRow(BodyLabel(self.tr("Base URL"), formWidget), self.baseUrlEdit)
         form.addRow(BodyLabel(self.tr("API Key"), formWidget), self.apiKeyEdit)
-        form.addRow(BodyLabel(self.tr("模型"), formWidget), self.modelEdit)
+        form.addRow(BodyLabel(self.tr("模型"), formWidget), modelRow)
         form.addRow(BodyLabel(self.tr("工作上下文"), formWidget), self.contextSpin)
         form.addRow(BodyLabel(self.tr("最大输出 token"), formWidget), outputRow)
         form.addRow(BodyLabel(self.tr("最大并发"), formWidget), self.concurrencySpin)
@@ -353,6 +367,7 @@ class _ProfileDialog(MessageBoxBase):
         self.yesButton.setText(self.tr("保存"))
         self.cancelButton.setText(self.tr("取消"))
         self.probeButton.clicked.connect(self._requestProbe)
+        self.fetchModelsButton.clicked.connect(self._requestModels)
         self.outputModeCombo.currentIndexChanged.connect(self._onOutputModeChanged)
         self.contextSpin.valueChanged.connect(self._onContextChanged)
         self.advancedButton.clicked.connect(self._toggleAdvanced)
@@ -578,6 +593,43 @@ class _ProfileDialog(MessageBoxBase):
         self.probeResultLabel.setText(self.tr("测试中…"))
         self.probeRequested.emit(profile)
 
+    def _requestModels(self) -> None:
+        base_url = self.baseUrlEdit.text().strip()
+        if not base_url:
+            InfoBar.warning(
+                self.tr("无法获取模型列表"),
+                self.tr("请先填写 Base URL"),
+                duration=4000,
+                parent=self,
+            )
+            return
+        self.fetchModelsButton.setEnabled(False)
+        self.fetchModelsButton.setText(self.tr("获取中…"))
+        self.modelsRequested.emit(base_url, self.apiKeyEdit.text())
+
+    def showFetchedModels(self, models: list) -> None:
+        """Fill the editable model dropdown with fetched models, keeping typed text."""
+        self.fetchModelsButton.setEnabled(True)
+        self.fetchModelsButton.setText(self.tr("获取模型列表"))
+        current = self.modelEdit.currentText().strip()
+        self.modelEdit.clear()
+        for model in models:
+            self.modelEdit.addItem(model)
+        if current:
+            # setText（而非 setCurrentText）：手填的模型名不在拉取结果里时也要保住。
+            self.modelEdit.setText(current)
+
+    def showFetchedModelsFailure(self, message: str) -> None:
+        """Reset the fetch button and surface the failure without blocking saving."""
+        self.fetchModelsButton.setEnabled(True)
+        self.fetchModelsButton.setText(self.tr("获取模型列表"))
+        InfoBar.warning(
+            self.tr("获取模型列表失败"),
+            message,
+            duration=5000,
+            parent=self,
+        )
+
     def showProbeResult(self, result) -> None:
         text_status = self.tr("通过") if result.text.success else self.tr("失败")
         structured_status = (
@@ -613,15 +665,44 @@ class ModelContextProbeThread(QThread):
             self.failed.emit(str(exc))
 
 
+class ModelListFetchThread(QThread):
+    """Fetch the provider's model list off the UI thread."""
+
+    completed = pyqtSignal(list)
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_url: str, api_key: str, parent=None):
+        super().__init__(parent)
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def run(self) -> None:
+        try:
+            self.completed.emit(get_available_models(self.base_url, self.api_key))
+        except Exception as exc:  # pragma: no cover - defensive thread boundary
+            self.failed.emit(str(exc))
+
+
 class ProfileSelectionCard(SettingCard):
     createRequested = pyqtSignal(object)
     editRequested = pyqtSignal(object)
     deleteRequested = pyqtSignal(object)
 
-    def __init__(self, config_item, title: str, content: str, parent=None):
+    def __init__(
+        self,
+        config_item,
+        title: str,
+        content: str,
+        parent=None,
+        *,
+        unbound_label: str = "未配置",
+        unbound_content: str = "未配置，相关 LLM 翻译模式不可用",
+    ):
         super().__init__(FIF.ROBOT, title, content, parent)
         self.configItem = config_item
         self.configuredContent = content
+        self.unboundLabel = unbound_label
+        self.unboundContent = unbound_content
         self.comboBox = ComboBox(self)
         self.comboBox.setMinimumWidth(170)
         self.createButton = PushButton(self.tr("新增"), self)
@@ -657,7 +738,7 @@ class ProfileSelectionCard(SettingCard):
         self.comboBox.blockSignals(True)
         try:
             self.comboBox.clear()
-            self.comboBox.addItem(self.tr("未配置"), userData="")
+            self.comboBox.addItem(self.tr(self.unboundLabel), userData="")
             for profile in profiles:
                 self.comboBox.addItem(profile.name, userData=profile.profile_id)
             selected_index = self.comboBox.findData(selected_id)
@@ -671,9 +752,7 @@ class ProfileSelectionCard(SettingCard):
         self.editButton.setEnabled(configured)
         self.deleteButton.setEnabled(configured)
         self.contentLabel.setText(
-            self.configuredContent
-            if configured
-            else self.tr("未配置，相关 LLM 翻译模式不可用")
+            self.configuredContent if configured else self.tr(self.unboundContent)
         )
 
     def selectedProfileId(self) -> str:
@@ -755,6 +834,18 @@ class TranslationSettingWidget(QWidget):
         self.pages: dict[str, QWidget] = {}
         self.profileCards: list[ProfileSelectionCard] = []
         self._probeThreads: set[ModelContextProbeThread] = set()
+        self._fetchThreads: set[ModelListFetchThread] = set()
+        # 工具模型卡是页签区上方的顶层共享卡：断句、字幕优化、后处理与配音改写在
+        # 三种翻译方式下都会运行，所以不嵌进任何页签；空绑定即跟随主翻译方案派生
+        # （ADR-0014），选独立方案即覆盖。
+        self.utilityProfileCard = self._profileCard(
+            cfg.utility_llm_profile_id,
+            self.tr("工具模型"),
+            self.tr("断句、字幕优化、后处理与配音改写使用绑定的独立方案"),
+            self,
+            unbound_label="跟随主翻译模型",
+            unbound_content=self.tr("跟随主翻译模型；主翻译方案未配置时相关功能不可用"),
+        )
         self._buildPages()
 
         self.rootLayout = QVBoxLayout(self)
@@ -762,6 +853,7 @@ class TranslationSettingWidget(QWidget):
         self.rootLayout.setSpacing(8)
         self.rootLayout.addWidget(self.titleLabel)
         self.rootLayout.addWidget(self.subtitleLabel)
+        self.rootLayout.addWidget(self.utilityProfileCard)
         self.rootLayout.addWidget(self.pivot, 0, Qt.AlignLeft)  # type: ignore
         self.rootLayout.addWidget(self.stackedWidget)
         self.stackedWidget.currentChanged.connect(self._onPageChanged)
@@ -913,13 +1005,22 @@ class TranslationSettingWidget(QWidget):
         enhanced_layout.addWidget(group)
 
     def _profileCard(
-        self, config_item, title: str, content: str, parent
+        self,
+        config_item,
+        title: str,
+        content: str,
+        parent,
+        *,
+        unbound_label: str = "未配置",
+        unbound_content: str = "未配置，相关 LLM 翻译模式不可用",
     ) -> ProfileSelectionCard:
         card = ProfileSelectionCard(
             config_item,
             title,
             content,
             parent,
+            unbound_label=unbound_label,
+            unbound_content=unbound_content,
         )
         card.createRequested.connect(self._createProfile)
         card.editRequested.connect(self._editProfile)
@@ -1017,7 +1118,11 @@ class TranslationSettingWidget(QWidget):
         except Exception as exc:
             self._showError(self.tr("无法删除方案"), exc)
             return
-        for item in (cfg.main_llm_profile_id, cfg.review_llm_profile_id):
+        for item in (
+            cfg.main_llm_profile_id,
+            cfg.review_llm_profile_id,
+            cfg.utility_llm_profile_id,
+        ):
             if cfg.get(item) == profile_id:
                 cfg.set(item, "")
         self.profilesChanged.emit()
@@ -1026,6 +1131,45 @@ class TranslationSettingWidget(QWidget):
         dialog.probeRequested.connect(
             lambda profile, dialog=dialog: self._startProbe(dialog, profile)
         )
+        dialog.modelsRequested.connect(
+            lambda base_url, api_key, dialog=dialog: self._startModelFetch(
+                dialog, base_url, api_key
+            )
+        )
+
+    def _startModelFetch(
+        self, dialog: _ProfileDialog, base_url: str, api_key: str
+    ) -> None:
+        thread = ModelListFetchThread(base_url, api_key, self)
+        self._fetchThreads.add(thread)
+
+        def cleanup() -> None:
+            self._fetchThreads.discard(thread)
+            thread.deleteLater()
+
+        def completed(models: list) -> None:
+            if models:
+                dialog.showFetchedModels(models)
+                InfoBar.success(
+                    self.tr("获取模型列表成功"),
+                    self.tr("共 {count} 个模型，可在模型下拉中选择").format(
+                        count=len(models)
+                    ),
+                    duration=5000,
+                    parent=dialog,
+                )
+            else:
+                # get_available_models 对一切失败返回空列表；只提示，不阻塞保存。
+                dialog.showFetchedModelsFailure(self.tr("未获取到任何模型"))
+            cleanup()
+
+        def failed(message: str) -> None:
+            dialog.showFetchedModelsFailure(message)
+            cleanup()
+
+        thread.completed.connect(completed)
+        thread.failed.connect(failed)
+        thread.start()
 
     def _startProbe(self, dialog: _ProfileDialog, profile: LLMModelProfile) -> None:
         thread = ModelContextProbeThread(profile, self)
@@ -1072,6 +1216,7 @@ class TranslationSettingWidget(QWidget):
 
 __all__ = [
     "ModelContextProbeThread",
+    "ModelListFetchThread",
     "ProfileSelectionCard",
     "PromptSettingCard",
     "TranslationSettingWidget",
