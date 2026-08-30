@@ -87,6 +87,7 @@ def test_connection_probe_uses_gateway_for_every_native_transport():
             == CONNECTION_PROBE_MAX_OUTPUT_TOKENS
         )
         assert gateway.calls[0][2]["max_attempts"] == 1
+        assert gateway.calls[0][2]["use_cache"] is False
 
 
 def test_connection_probe_preserves_structured_error_category():
@@ -155,6 +156,7 @@ def test_dual_probe_reports_text_and_structured_results_independently():
     )
     assert all(call[1].max_output_tokens == 4096 for call in gateway.calls)
     assert all(call[2]["max_attempts"] == 1 for call in gateway.calls)
+    assert all(call[2]["use_cache"] is False for call in gateway.calls)
 
 
 def test_dual_probe_locally_rejects_inexact_results_without_blocking_other_probe():

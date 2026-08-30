@@ -181,6 +181,30 @@ def finish_gateway_request(
     _write_log(entry)
 
 
+def log_gateway_cache_hit(
+    profile: LLMModelProfile,
+    request: LLMRequest,
+    result: LLMResult,
+) -> None:
+    """Write one cache-hit entry shaped like a success entry minus attempt/usage."""
+
+    entry: dict[str, Any] = {
+        "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "request_id": uuid.uuid4().hex,
+        "stage": str(request.metadata.get("stage", "")),
+        "role": str(request.metadata.get("role", "")),
+        "status": "cache_hit",
+        "profile": {
+            "id": profile.profile_id,
+            "model": profile.model,
+        },
+        "duration_ms": 0,
+    }
+    if is_llm_content_logging_enabled():
+        entry["response"] = {"text": result.text}
+    _write_log(entry)
+
+
 # ==================== Legacy HTTPX hooks ====================
 
 
@@ -379,6 +403,7 @@ __all__ = [
     "discard_pending_legacy_request",
     "finish_gateway_request",
     "is_llm_content_logging_enabled",
+    "log_gateway_cache_hit",
     "log_llm_response",
     "set_llm_content_logging",
 ]

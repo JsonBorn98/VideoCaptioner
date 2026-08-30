@@ -25,9 +25,18 @@ from .models import (
     LLMTransport,
     is_output_limit_finish_reason,
 )
-from .request_logger import begin_gateway_request, finish_gateway_request
+from .request_logger import (
+    begin_gateway_request,
+    finish_gateway_request,
+    log_gateway_cache_hit,
+)
+from .response_cache import GatewayResponseCache
 
 logger = setup_logger("llm_gateway")
+
+# Shared module-level cache so separate gateway instances (one per consumer)
+# still deduplicate across runs through the same disk directory.
+_shared_response_cache = GatewayResponseCache()
 
 
 class LLMGateway:
@@ -36,10 +45,12 @@ class LLMGateway:
         adapter_factory: Optional[Callable[[LLMModelProfile], LLMAdapter]] = None,
         sleep: Callable[[float], None] = time.sleep,
         random_source: Callable[[], float] = random.random,
+        response_cache: Optional[GatewayResponseCache] = None,
     ) -> None:
         self._adapter_factory = adapter_factory or self._default_adapter
         self._sleep = sleep
         self._random = random_source
+        self._response_cache = response_cache if response_cache is not None else _shared_response_cache
         self._adapters: dict[str, LLMAdapter] = {}
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
         self._lock = threading.Lock()
@@ -86,9 +97,15 @@ class LLMGateway:
         *,
         max_attempts: int = 4,
         cancelled: Optional[Callable[[], bool]] = None,
+        use_cache: bool = True,
     ) -> LLMResult:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
+        if use_cache:
+            cached = self._response_cache.lookup(profile, request)
+            if cached is not None:
+                log_gateway_cache_hit(profile, request, cached)
+                return cached
         adapter, semaphore = self._resources(profile)
         last_error: Optional[LLMCallError] = None
         for attempt in range(1, max_attempts + 1):
@@ -105,6 +122,8 @@ class LLMGateway:
                         finish_gateway_request(log_handle, error=exc)
                         raise
                     finish_gateway_request(log_handle, result=result)
+                    if use_cache:
+                        self._response_cache.store(profile, request, result)
                     return result
             except LLMCallError as exc:
                 exc.attempts = attempt

@@ -139,6 +139,7 @@ def _run_capability_probe(
                 metadata={"stage": stage, "role": "utility"},
             ),
             max_attempts=1,
+            use_cache=False,
         )
         if structured:
             try:
@@ -229,6 +230,7 @@ def check_model_profile_connection(
                 metadata={"stage": "connection_probe", "role": "utility"},
             ),
             max_attempts=1,
+            use_cache=False,
         )
         return True, result.text
     except LLMCallError as exc:

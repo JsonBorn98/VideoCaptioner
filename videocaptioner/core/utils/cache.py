@@ -37,6 +37,7 @@ def is_cache_enabled() -> bool:
 
 # Predefined cache instances for common use cases
 _llm_cache = Cache(str(CACHE_PATH / "llm_translation"))
+_gateway_cache = Cache(str(CACHE_PATH / "llm_gateway"))
 _asr_cache = Cache(str(CACHE_PATH / "asr_results"), tag_index=True)
 _tts_cache = Cache(str(CACHE_PATH / "tts_audio"))
 _translate_cache = Cache(str(CACHE_PATH / "translate_results"))
@@ -46,6 +47,11 @@ _timing_cache = Cache(str(CACHE_PATH / "timing_evidence"))
 def get_llm_cache() -> Cache:
     """Get LLM translation cache instance."""
     return _llm_cache
+
+
+def get_gateway_cache() -> Cache:
+    """Get LLM gateway response cache instance."""
+    return _gateway_cache
 
 
 def get_asr_cache() -> Cache:

@@ -33,6 +33,7 @@ def pytest_unconfigure(config):
     del config
     for getter in (
         cache.get_llm_cache,
+        cache.get_gateway_cache,
         cache.get_asr_cache,
         cache.get_translate_cache,
         cache.get_tts_cache,
