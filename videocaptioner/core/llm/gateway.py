@@ -50,7 +50,9 @@ class LLMGateway:
         self._adapter_factory = adapter_factory or self._default_adapter
         self._sleep = sleep
         self._random = random_source
-        self._response_cache = response_cache if response_cache is not None else _shared_response_cache
+        self._response_cache = (
+            _shared_response_cache if response_cache is None else response_cache
+        )
         self._adapters: dict[str, LLMAdapter] = {}
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
         self._lock = threading.Lock()

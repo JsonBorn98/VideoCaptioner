@@ -119,6 +119,21 @@ def _error_entry(error: Optional[BaseException]) -> dict[str, Any]:
     return entry
 
 
+def _base_entry(profile: LLMModelProfile, request: LLMRequest) -> dict[str, Any]:
+    """Return the entry skeleton shared by every gateway log shape."""
+
+    return {
+        "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "request_id": uuid.uuid4().hex,
+        "stage": str(request.metadata.get("stage", "")),
+        "role": str(request.metadata.get("role", "")),
+        "profile": {
+            "id": profile.profile_id,
+            "model": profile.model,
+        },
+    }
+
+
 def begin_gateway_request(
     profile: LLMModelProfile,
     request: LLMRequest,
@@ -128,19 +143,10 @@ def begin_gateway_request(
     """Create correlation data without retaining captions unless opted in."""
 
     include_content = is_llm_content_logging_enabled()
-    entry: dict[str, Any] = {
-        "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "request_id": uuid.uuid4().hex,
-        "stage": str(request.metadata.get("stage", "")),
-        "role": str(request.metadata.get("role", "")),
-        "attempt": attempt,
-        "max_output_tokens": request.max_output_tokens,
-        "adaptive_reasoning": request.request_options_override is not None,
-        "profile": {
-            "id": profile.profile_id,
-            "model": profile.model,
-        },
-    }
+    entry = _base_entry(profile, request)
+    entry["attempt"] = attempt
+    entry["max_output_tokens"] = request.max_output_tokens
+    entry["adaptive_reasoning"] = request.request_options_override is not None
     if include_content:
         entry["request"] = {
             "messages": [
@@ -188,18 +194,9 @@ def log_gateway_cache_hit(
 ) -> None:
     """Write one cache-hit entry shaped like a success entry minus attempt/usage."""
 
-    entry: dict[str, Any] = {
-        "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "request_id": uuid.uuid4().hex,
-        "stage": str(request.metadata.get("stage", "")),
-        "role": str(request.metadata.get("role", "")),
-        "status": "cache_hit",
-        "profile": {
-            "id": profile.profile_id,
-            "model": profile.model,
-        },
-        "duration_ms": 0,
-    }
+    entry = _base_entry(profile, request)
+    entry["status"] = "cache_hit"
+    entry["duration_ms"] = 0
     if is_llm_content_logging_enabled():
         entry["response"] = {"text": result.text}
     _write_log(entry)

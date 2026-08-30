@@ -74,15 +74,16 @@ class _CountingAdapter(LLMAdapter):
 
 
 class _FailingAdapter(LLMAdapter):
-    def __init__(self, profile):
+    def __init__(self, profile, category=LLMErrorCategory.TRANSIENT):
         super().__init__(profile)
         self.calls = 0
+        self.category = category
 
     def complete(self, request):
         self.calls += 1
         raise LLMCallError(
             "provider failed",
-            category=LLMErrorCategory.TRANSIENT,
+            category=self.category,
             retryable=True,
         )
 
@@ -129,9 +130,7 @@ def test_profiles_differing_only_in_api_key_do_not_cross_hit(disk_cache, cache_e
     assert second_adapter.calls == 1
 
 
-def test_disabled_global_switch_means_no_read_and_no_write(
-    disk_cache, monkeypatch
-):
+def test_disabled_global_switch_means_no_read_and_no_write(disk_cache):
     cache_utils.disable_cache()
     profile = _profile()
     adapter = _CountingAdapter(profile)
@@ -230,16 +229,12 @@ def test_cache_hit_log_includes_text_when_content_logging_enabled(
 def test_corrupt_payload_is_treated_as_miss(disk_cache, cache_enabled):
     profile = _profile()
     adapter = _CountingAdapter(profile)
-    response_cache = GatewayResponseCache(cache=disk_cache)
     gateway = _gateway(adapter, disk_cache)
 
     gateway.complete(profile, REQUEST)
-    key = response_cache._cache  # reach into disk to corrupt the stored value
-    stored_keys = []
-    for entry_key in key.iterkeys():
-        stored_keys.append(entry_key)
+    stored_keys = list(disk_cache.iterkeys())
     assert len(stored_keys) == 1
-    key.set(stored_keys[0], {"schema": "gateway-cache-v1", "text": 42})
+    disk_cache.set(stored_keys[0], {"schema": "gateway-cache-v1", "text": 42})
 
     result = gateway.complete(profile, REQUEST)
 
@@ -279,7 +274,9 @@ def test_cache_lookup_failure_fails_open_as_miss(cache_enabled):
     assert adapter.calls == 2
 
 
-def test_key_version_bump_invalidates_old_entries(disk_cache, cache_enabled):
+def test_key_version_bump_invalidates_old_entries(
+    disk_cache, cache_enabled, monkeypatch
+):
     profile = _profile()
     adapter = _CountingAdapter(profile)
     gateway = _gateway(adapter, disk_cache)
@@ -288,13 +285,8 @@ def test_key_version_bump_invalidates_old_entries(disk_cache, cache_enabled):
 
     from videocaptioner.core.llm import response_cache as response_cache_module
 
-    monkeypatched_version = "gateway-cache-v2"
-    original = response_cache_module.KEY_VERSION
-    response_cache_module.KEY_VERSION = monkeypatched_version
-    try:
-        result = gateway.complete(profile, REQUEST)
-    finally:
-        response_cache_module.KEY_VERSION = original
+    monkeypatch.setattr(response_cache_module, "KEY_VERSION", "gateway-cache-v2")
+    result = gateway.complete(profile, REQUEST)
 
     assert result.text == "answer-2"
     assert adapter.calls == 2
@@ -312,21 +304,8 @@ def test_failures_are_never_cached(disk_cache, cache_enabled):
 
 
 def test_invalid_response_is_not_cached(disk_cache, cache_enabled):
-    class _InvalidResponseAdapter(LLMAdapter):
-        def __init__(self, profile):
-            super().__init__(profile)
-            self.calls = 0
-
-        def complete(self, request):
-            self.calls += 1
-            raise LLMCallError(
-                "empty completion",
-                category=LLMErrorCategory.INVALID_RESPONSE,
-                retryable=True,
-            )
-
     profile = _profile()
-    adapter = _InvalidResponseAdapter(profile)
+    adapter = _FailingAdapter(profile, category=LLMErrorCategory.INVALID_RESPONSE)
     gateway = _gateway(adapter, disk_cache)
 
     with pytest.raises(LLMCallError):
@@ -351,6 +330,26 @@ def test_editing_request_shaping_profile_field_changes_the_key(
 
     assert result.text == "answer-1"
     assert other_adapter.calls == 1
+
+
+def test_profiles_differing_only_in_profile_level_output_cap_do_not_cross_hit(
+    disk_cache, cache_enabled
+):
+    """The adapter lets a profile-level cap override the request-level cap."""
+
+    first_profile = _profile(profile_id="first")
+    second_profile = _profile(profile_id="second", max_output_tokens=2048)
+    first_adapter = _CountingAdapter(first_profile)
+    second_adapter = _CountingAdapter(second_profile)
+    first_gateway = _gateway(first_adapter, disk_cache)
+    second_gateway = _gateway(second_adapter, disk_cache)
+
+    first_gateway.complete(first_profile, REQUEST)
+    result = second_gateway.complete(second_profile, REQUEST)
+
+    assert result.text == "answer-1"
+    assert first_adapter.calls == 1
+    assert second_adapter.calls == 1
 
 
 def test_non_shaping_profile_fields_do_not_change_the_key(

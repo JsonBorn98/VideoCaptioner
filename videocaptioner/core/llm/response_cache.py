@@ -73,6 +73,9 @@ def _cache_key(profile: LLMModelProfile, request: LLMRequest) -> str:
             "model": profile.model,
             "openai_endpoint": profile.openai_endpoint.value,
             "request_options": thaw_json_object(profile.request_options),
+            # The adapter lets a profile-level cap override the request-level
+            # cap, so both enter the key (see adapters._effective_output_cap).
+            "max_output_tokens": profile.max_output_tokens,
         },
         "request": {
             "messages": _message_entries(request),
