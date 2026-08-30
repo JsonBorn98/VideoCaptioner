@@ -405,10 +405,8 @@ def _print_llm_migration_hint() -> None:
 def list_llm_profile_ids() -> list[str]:
     """Best-effort list of profile ids for guidance text; never raises."""
 
-    from videocaptioner.core.llm.profiles import LLMModelProfileStore
-
     try:
-        return [profile.profile_id for profile in LLMModelProfileStore().list()]
+        return [profile.profile_id for profile in profile_store().list()]
     except Exception:
         return []
 
@@ -457,8 +455,12 @@ def apply_env_api_key_override(profile):
     return replace(profile, api_key=key) if key else profile
 
 
-def _profile_store():
-    """Construct the model profile store lazily (keeps config import cheap)."""
+def profile_store():
+    """Construct the model profile store lazily (keeps config import cheap).
+
+    Public so command modules share one construction point instead of
+    reaching into a private helper.
+    """
 
     from videocaptioner.core.llm.profiles import LLMModelProfileStore
 
@@ -480,6 +482,24 @@ def _lookup_profile(store, profile_id: str, *, description: str):
         ) from None
 
 
+def _resolve_bound_profile(config: dict, role: str, store, empty_reason: str, description: str):
+    """Shared skeleton for resolving an explicitly bound role profile.
+
+    A blank id and an unknown id both fail fast with guidance (never a silent
+    fallback or a read of ambient environment variables), and the resolved
+    profile passes through the env credential override. The utility role wraps
+    the core resolver instead (a blank binding derives from the main profile),
+    so it does not share this skeleton.
+    """
+
+    profile_id = llm_profile_ids(config)[role]
+    if not profile_id:
+        raise ValueError(_llm_profile_guidance(empty_reason))
+    store = profile_store() if store is None else store
+    profile = _lookup_profile(store, profile_id, description=description)
+    return apply_env_api_key_override(profile)
+
+
 def resolve_main_llm_profile(config: dict, store=None):
     """Resolve the main translation profile, failing fast with guidance.
 
@@ -488,18 +508,17 @@ def resolve_main_llm_profile(config: dict, store=None):
     (never a silent read of ambient environment variables).
     """
 
-    profile_id = llm_profile_ids(config)["main"]
-    if not profile_id:
-        raise ValueError(
-            _llm_profile_guidance(
-                "llm.profile_id is not set; LLM translation needs a main model "
-                "profile (the GUI wording for the same condition: 未配置主翻译"
-                "模型配置方案，无法使用 LLM 翻译)."
-            )
-        )
-    store = _profile_store() if store is None else store
-    profile = _lookup_profile(store, profile_id, description="main translation")
-    return apply_env_api_key_override(profile)
+    return _resolve_bound_profile(
+        config,
+        "main",
+        store,
+        empty_reason=(
+            "llm.profile_id is not set; LLM translation needs a main model "
+            "profile (the GUI wording for the same condition: 未配置主翻译"
+            "模型配置方案，无法使用 LLM 翻译)."
+        ),
+        description="main translation",
+    )
 
 
 def resolve_review_llm_profile(config: dict, store=None):
@@ -510,18 +529,17 @@ def resolve_review_llm_profile(config: dict, store=None):
     precedent). Single-LLM mode does not call this at all.
     """
 
-    profile_id = llm_profile_ids(config)["review"]
-    if not profile_id:
-        raise ValueError(
-            _llm_profile_guidance(
-                "llm.review_profile_id is not set; enhanced_llm translation "
-                "requires a dedicated review profile and never falls back to the "
-                "main profile."
-            )
-        )
-    store = _profile_store() if store is None else store
-    profile = _lookup_profile(store, profile_id, description="review translation")
-    return apply_env_api_key_override(profile)
+    return _resolve_bound_profile(
+        config,
+        "review",
+        store,
+        empty_reason=(
+            "llm.review_profile_id is not set; enhanced_llm translation "
+            "requires a dedicated review profile and never falls back to the "
+            "main profile."
+        ),
+        description="review translation",
+    )
 
 
 def resolve_cli_utility_profile(config: dict, store=None):
@@ -540,7 +558,7 @@ def resolve_cli_utility_profile(config: dict, store=None):
     from videocaptioner.core.llm.utility import UtilityProfileError, resolve_utility_profile
 
     ids = llm_profile_ids(config)
-    store = _profile_store() if store is None else store
+    store = profile_store() if store is None else store
     try:
         profile = resolve_utility_profile(store, ids["main"], ids["utility"])
     except UtilityProfileError:

@@ -9,7 +9,7 @@ from argparse import Namespace
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import _profile_store, mask_credential, save_config_value
+from videocaptioner.cli.config import mask_credential, profile_store, save_config_value
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -28,7 +28,7 @@ def run(args: Namespace, config: dict) -> int:
 
 
 def _list() -> int:
-    profiles = _profile_store().list()
+    profiles = profile_store().list()
     if not profiles:
         from videocaptioner.core.llm.profiles import DEFAULT_LLM_PROFILES_PATH
 
@@ -57,7 +57,7 @@ def _show(profile_id: str) -> int:
     )
 
     try:
-        profile = _profile_store().get(profile_id)
+        profile = profile_store().get(profile_id)
     except LLMProfileNotFoundError:
         output.error(f"Model profile '{profile_id}' does not exist.")
         _hint_available_ids()
@@ -78,7 +78,7 @@ def _set_default(profile_id: str) -> int:
     from videocaptioner.core.llm.profiles import LLMProfileNotFoundError
 
     try:
-        _profile_store().get(profile_id)
+        profile_store().get(profile_id)
     except LLMProfileNotFoundError:
         output.error(f"Model profile '{profile_id}' does not exist.")
         _hint_available_ids()
@@ -95,7 +95,7 @@ def _set_default(profile_id: str) -> int:
 
 
 def _hint_available_ids() -> None:
-    profiles = _profile_store().list()
+    profiles = profile_store().list()
     if profiles:
         output.hint(
             "Available profile ids: " + ", ".join(item.profile_id for item in profiles)

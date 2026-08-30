@@ -35,6 +35,24 @@ def _profile_id_fix(key: str, suffix: str = "") -> str:
     return f"{_PROFILE_LIST_HINT}'videocaptioner config set {key} <id>'{suffix}"
 
 
+def _bound_missing_check(key: str, profile_id: str, available: list[str]):
+    """Error check for a bound profile id absent from the store (None otherwise).
+
+    A blank binding is valid for the utility role (it derives from the main
+    profile) and reported separately for the review role, so only the
+    bound-but-missing case is shared here.
+    """
+
+    if not profile_id or profile_id in available:
+        return None
+    return Check(
+        key,
+        "error",
+        f"Profile '{profile_id}' does not exist in the store",
+        _profile_id_fix(key),
+    )
+
+
 def run(args: Namespace, config: dict) -> int:
     checks = _run_checks(
         config,
@@ -235,56 +253,37 @@ def _check_subtitle(config: dict) -> list[Check]:
                 _profile_id_fix("llm.profile_id"),
             )
         )
-    elif profile_ids["main"] not in available:
-        checks.append(
-            Check(
-                "llm.profile_id",
-                "error",
-                f"Profile '{profile_ids['main']}' does not exist in the store",
-                _profile_id_fix("llm.profile_id"),
-            )
-        )
+    else:
+        main_check = _bound_missing_check("llm.profile_id", profile_ids["main"], available)
+        if main_check:
+            checks.append(main_check)
     # An empty utility binding is valid: it derives from the main profile. Only
     # a bound-but-missing id is an error, so the resolver never silently falls
     # back to derivation when the user explicitly bound something.
-    if profile_ids["utility"] and profile_ids["utility"] not in available:
-        checks.append(
-            Check(
-                "llm.utility_profile_id",
-                "error",
-                f"Profile '{profile_ids['utility']}' does not exist in the store",
-                _profile_id_fix("llm.utility_profile_id"),
-            )
-        )
+    utility_check = _bound_missing_check(
+        "llm.utility_profile_id", profile_ids["utility"], available
+    )
+    if utility_check:
+        checks.append(utility_check)
     # enhanced_llm + a blank review id is a hard runtime failure (the resolver
     # fail-fasts instead of falling back to the main profile), so it is an
     # error with binding guidance, not a soft warning.
-    if (
-        translate
-        and translation_mode == "enhanced_llm"
-        and not profile_ids["review"]
-    ):
-        checks.append(
-            Check(
-                "llm.review_profile_id",
-                "error",
-                "enhanced_llm translation requires a review profile and none is set",
-                _profile_id_fix("llm.review_profile_id", " (or use single_llm mode)"),
+    if translate and translation_mode == "enhanced_llm":
+        if not profile_ids["review"]:
+            checks.append(
+                Check(
+                    "llm.review_profile_id",
+                    "error",
+                    "enhanced_llm translation requires a review profile and none is set",
+                    _profile_id_fix("llm.review_profile_id", " (or use single_llm mode)"),
+                )
             )
-        )
-    elif (
-        translate
-        and translation_mode == "enhanced_llm"
-        and profile_ids["review"] not in available
-    ):
-        checks.append(
-            Check(
-                "llm.review_profile_id",
-                "error",
-                f"Profile '{profile_ids['review']}' does not exist in the store",
-                _profile_id_fix("llm.review_profile_id"),
+        else:
+            review_check = _bound_missing_check(
+                "llm.review_profile_id", profile_ids["review"], available
             )
-        )
+            if review_check:
+                checks.append(review_check)
     return checks
 
 
