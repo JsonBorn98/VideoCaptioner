@@ -12,6 +12,7 @@ Commands:
     process      Full pipeline (transcribe → optimize → translate → synthesize)
     download     Download online video (YouTube, Bilibili, etc.)
     config       Manage configuration
+    profile      Inspect the LLM model profile store
 """
 
 import argparse
@@ -44,44 +45,47 @@ def _configure_stdio() -> None:
 
 
 def _add_llm_options(parser: argparse.ArgumentParser) -> None:
-    """Add LLM-related options shared across commands."""
+    """Add the LLM model-profile selectors shared across LLM-consuming commands.
+
+    The main-translation flag is ``--llm-profile`` rather than the shorter
+    ``--profile`` because ``postprocess`` and ``process`` already use
+    ``--profile`` for the postprocessing template id (dest ``speed_profile``);
+    argparse rejects one option string bound to two destinations.
+    """
     group = parser.add_argument_group("LLM options")
+    _add_llm_profile_flags(group)
+
+
+def _add_llm_profile_flags(group, *, hidden: bool = False) -> None:
+    """Add the three model-profile selection flags to one argument group."""
+    help_text = argparse.SUPPRESS if hidden else None
+
     group.add_argument(
-        "--api-key", metavar="KEY", help="LLM API key (or set OPENAI_API_KEY env var)"
+        "--llm-profile",
+        dest="llm_profile",
+        metavar="ID",
+        help=help_text
+        or "Model profile id for the main translation model (see 'videocaptioner profile list')",
     )
     group.add_argument(
-        "--api-base", metavar="URL", help="LLM API base URL (or set OPENAI_BASE_URL env var)"
+        "--review-profile",
+        dest="review_profile",
+        metavar="ID",
+        help=help_text or "Model profile id for the enhanced-LLM review model",
     )
-    group.add_argument("--model", metavar="NAME", help="LLM model name (e.g. gpt-4o-mini)")
+    group.add_argument(
+        "--utility-profile",
+        dest="utility_profile",
+        metavar="ID",
+        help=help_text
+        or "Model profile id for utility roles (split/optimize/postprocess/dub rewrite); "
+        "default derives from the main profile",
+    )
 
 
 def _add_hidden_llm_options(parser: argparse.ArgumentParser) -> None:
-    """Keep script-compatible LLM overrides without showing them in task-first help."""
-    parser.add_argument("--api-key", metavar="KEY", help=argparse.SUPPRESS)
-    parser.add_argument("--api-base", metavar="URL", help=argparse.SUPPRESS)
-    parser.add_argument("--model", metavar="NAME", help=argparse.SUPPRESS)
-
-
-def _add_translation_llm_profile_options(group) -> None:
-    """Add the non-secret CLI overrides for main/review translation profiles."""
-    for role, label in (("main", "main translation"), ("review", "review")):
-        group.add_argument(
-            f"--{role}-llm-endpoint",
-            choices=["chat_completions", "responses"],
-            help=f"OpenAI endpoint for the {label} profile",
-        )
-        group.add_argument(
-            f"--{role}-llm-max-output-tokens",
-            metavar="AUTO|N",
-            help=f"Maximum output tokens for the {label} profile (default: auto)",
-        )
-        group.add_argument(
-            f"--{role}-llm-request-options-json",
-            f"--{role}-llm-options",
-            dest=f"{role}_llm_request_options_json",
-            metavar="JSON",
-            help=f"Provider-native request body options for the {label} profile",
-        )
+    """Keep the model-profile selectors available without task-first help noise."""
+    _add_llm_profile_flags(parser.add_argument_group("LLM options"), hidden=True)
 
 
 def _add_output_options(parser: argparse.ArgumentParser) -> None:
@@ -412,11 +416,7 @@ def _build_subtitle_parser(subparsers) -> None:
     _add_common_options(p)
 
     llm = p.add_argument_group("LLM options")
-    llm.add_argument("--api-key", metavar="KEY", help="LLM API key (or set OPENAI_API_KEY env var)")
-    llm.add_argument(
-        "--api-base", metavar="URL", help="LLM API base URL (or set OPENAI_BASE_URL env var)"
-    )
-    llm.add_argument("--model", metavar="NAME", help="LLM model name (e.g. gpt-4o-mini)")
+    _add_llm_profile_flags(llm)
 
     _add_canonical_srt_output(p)
 
@@ -474,7 +474,6 @@ def _build_subtitle_parser(subparsers) -> None:
         metavar="TEXT",
         help="Custom senior-reviewer prompt (enhanced_llm only)",
     )
-    _add_translation_llm_profile_options(trans)
 
     sub = p.add_argument_group("Subtitle options")
     sub.add_argument(
@@ -804,7 +803,6 @@ def _build_process_parser(subparsers) -> None:
     pipe.add_argument(
         "--review-prompt", metavar="TEXT", help="Custom reviewer prompt (enhanced_llm only)"
     )
-    _add_translation_llm_profile_options(pipe)
     pipe.add_argument(
         "--quality",
         choices=["ultra", "high", "medium", "low"],
@@ -961,9 +959,9 @@ def _build_config_parser(subparsers) -> None:
     init_p.add_argument(
         "--profile", choices=["basic", "dubbing"], default="basic", help="Configuration profile"
     )
-    init_p.add_argument("--llm-api-key", metavar="KEY", help="LLM API key")
-    init_p.add_argument("--llm-api-base", metavar="URL", help="LLM API base URL")
-    init_p.add_argument("--llm-model", metavar="NAME", help="LLM model")
+    init_p.add_argument(
+        "--llm-profile", metavar="ID", help="LLM model profile id (main translation)"
+    )
     init_p.add_argument("--asr", choices=ASR_ENGINE_CHOICES, help="Default ASR engine")
     init_p.add_argument(
         "--translator",
@@ -1007,7 +1005,7 @@ def _build_config_parser(subparsers) -> None:
     config_sub.add_parser("edit", help="Open config file in $EDITOR")
 
     set_p = config_sub.add_parser("set", help="Set a configuration value")
-    set_p.add_argument("key", help="Config key in dotted notation (e.g. llm.api_key)")
+    set_p.add_argument("key", help="Config key in dotted notation (e.g. llm.profile_id)")
     set_p.add_argument("value", help="Value to set")
 
     get_p = config_sub.add_parser("get", help="Get a configuration value")
@@ -1036,6 +1034,32 @@ def _build_doctor_parser(subparsers) -> None:
     p.set_defaults(func=_run_doctor)
 
 
+def _build_profile_parser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "profile",
+        help="Inspect the LLM model profile store",
+        description=(
+            "List, show, and set the default LLM model profile. Profiles live in "
+            "their own store file (shared with the GUI); the config.toml "
+            "[llm] section references profiles by id."
+        ),
+    )
+    profile_sub = p.add_subparsers(dest="profile_action", metavar="action")
+
+    profile_sub.add_parser("list", help="List available model profile ids")
+
+    show_p = profile_sub.add_parser("show", help="Show one profile (key is masked)")
+    show_p.add_argument("id", help="Profile id (see 'videocaptioner profile list')")
+
+    set_default_p = profile_sub.add_parser(
+        "set-default",
+        help="Set the default main-translation profile (llm.profile_id)",
+    )
+    set_default_p.add_argument("id", help="Profile id to make the default")
+
+    p.set_defaults(func=_run_profile)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="videocaptioner",
@@ -1058,6 +1082,7 @@ def build_parser() -> argparse.ArgumentParser:
     _build_config_parser(subparsers)
     _build_doctor_parser(subparsers)
     _build_style_parser(subparsers)
+    _build_profile_parser(subparsers)
 
     return parser
 
@@ -1085,23 +1110,10 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
 
             _set_nested(overrides, key, value)
 
-    # LLM
-    _set("llm.api_key", getattr(args, "api_key", None))
-    _set("llm.api_base", getattr(args, "api_base", None))
-    _set("llm.model", getattr(args, "model", None))
-    for role in ("main", "review"):
-        _set(
-            f"translate.llm.{role}.openai_endpoint",
-            getattr(args, f"{role}_llm_endpoint", None),
-        )
-        _set(
-            f"translate.llm.{role}.max_output_tokens",
-            getattr(args, f"{role}_llm_max_output_tokens", None),
-        )
-        _set(
-            f"translate.llm.{role}.request_options_json",
-            getattr(args, f"{role}_llm_request_options_json", None),
-        )
+    # LLM model profiles. Priority falls out of the layer merge: cli > env > file.
+    _set("llm.profile_id", getattr(args, "llm_profile", None))
+    _set("llm.review_profile_id", getattr(args, "review_profile", None))
+    _set("llm.utility_profile_id", getattr(args, "utility_profile", None))
 
     # Whisper API
     _set("whisper_api.api_key", getattr(args, "whisper_api_key", None))
@@ -1348,6 +1360,13 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
 def _run_style(args: argparse.Namespace) -> int:
     from videocaptioner.cli.commands.style_cmd import run
+
+    config = _load_config(args)
+    return run(args, config)
+
+
+def _run_profile(args: argparse.Namespace) -> int:
+    from videocaptioner.cli.commands.profile_cmd import run
 
     config = _load_config(args)
     return run(args, config)

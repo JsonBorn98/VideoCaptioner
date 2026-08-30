@@ -22,6 +22,7 @@ from videocaptioner.core.llm.models import (
     thaw_json_object,
 )
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
+from videocaptioner.core.llm.utility import UTILITY_PROFILE_CARD
 from videocaptioner.core.translate.types import TranslationMode
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.TranslationSettingWidget import (
@@ -499,7 +500,10 @@ def test_setting_interface_embeds_translation_widget_and_relabels_legacy_llm(tmp
     )
 
     assert widget.translationSettingsWidget is not None
-    assert widget.llmGroup.titleLabel.text() == "通用 LLM 工具配置"
+    # 旧「通用 LLM 工具配置」服务页整组退役，方案体系是唯一的 LLM 配置面。
+    assert not hasattr(widget, "llmGroup")
+    assert not hasattr(widget, "llmServiceCard")
+    assert not hasattr(widget, "checkLLMConnectionCard")
     assert widget.translationSettingsWidget.stackedWidget.count() == 3
     assert widget.llmContentLoggingCard is not None
     assert widget.translationSettingsWidget.height() > 200
@@ -508,3 +512,119 @@ def test_setting_interface_embeds_translation_widget_and_relabels_legacy_llm(tmp
     enhanced_group = widget.translationSettingsWidget.enhancedMainProfileCard.parentWidget()
     assert enhanced_group.titleLabel.text() == "模型、术语与审计"
     widget.close()
+
+
+def test_utility_model_card_binds_independent_profile_by_default_follows_main(tmp_path):
+    store = LLMModelProfileStore(tmp_path / "profiles.json")
+    saved = store.save(_profile("utility-bound", "工具模型", "utility-model"))
+    old_utility = cfg.utility_llm_profile_id.value
+    try:
+        widget = TranslationSettingWidget(profile_store=store)
+        card = widget.utilityProfileCard
+
+        # 默认项是「跟随主翻译模型」即空绑定（解析器派生路径），不是「未配置」。
+        assert card.selectedProfileId() == ""
+        assert card.comboBox.itemText(0) == "跟随主翻译模型"
+        assert "未配置" not in [
+            card.comboBox.itemText(i) for i in range(card.comboBox.count())
+        ]
+
+        # 工具模型卡是页签区上方的顶层共享卡，不嵌进任何页签。
+        root = widget.rootLayout
+        assert root.indexOf(card) < root.indexOf(widget.pivot)
+        assert not any(
+            page.isAncestorOf(card) for page in widget.pages.values()
+        )
+
+        # 选择独立方案即覆盖主翻译派生。
+        card.comboBox.setCurrentIndex(card.comboBox.findData(saved.profile_id))
+        app.processEvents()
+        assert cfg.utility_llm_profile_id.value == saved.profile_id
+        assert card.selectedProfileId() == saved.profile_id
+        assert card.contentLabel.text() == "断句、字幕优化、后处理与配音改写使用绑定的独立方案"
+
+        # 切回默认项即清空绑定，恢复跟随主翻译模型。
+        card.comboBox.setCurrentIndex(0)
+        app.processEvents()
+        assert cfg.utility_llm_profile_id.value == ""
+
+        # 解析器 fail-fast 的错误文案指向这张真实存在的卡。
+        assert card.titleLabel.text() in UTILITY_PROFILE_CARD
+        assert card is widget.utilityProfileCard
+        widget.close()
+    finally:
+        cfg.set(cfg.utility_llm_profile_id, old_utility)
+
+
+def test_utility_model_card_clears_binding_when_bound_profile_is_deleted(
+    tmp_path, monkeypatch
+):
+    module = import_module("videocaptioner.ui.components.TranslationSettingWidget")
+    store = LLMModelProfileStore(tmp_path / "profiles.json")
+    saved = store.save(_profile("doomed", "将被删除", "doomed-model"))
+
+    class ConfirmDelete:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def exec(self):
+            return True
+
+    old_utility = cfg.utility_llm_profile_id.value
+    old_main = cfg.main_llm_profile_id.value
+    try:
+        cfg.set(cfg.utility_llm_profile_id, saved.profile_id)
+        cfg.set(cfg.main_llm_profile_id, saved.profile_id)
+        monkeypatch.setattr(module, "MessageBox", ConfirmDelete)
+        widget = TranslationSettingWidget(profile_store=store)
+        card = widget.utilityProfileCard
+        assert card.selectedProfileId() == saved.profile_id
+
+        # 删除方案同时清掉工具角色绑定，不留悬空绑定（解析器对 NotFound 报错）。
+        widget._deleteProfile(card)
+        assert store.list() == ()
+        assert cfg.utility_llm_profile_id.value == ""
+        assert cfg.main_llm_profile_id.value == ""
+        assert card.selectedProfileId() == ""
+        widget.close()
+    finally:
+        cfg.set(cfg.main_llm_profile_id, old_main)
+        cfg.set(cfg.utility_llm_profile_id, old_utility)
+
+
+def test_profile_dialog_fetch_models_fills_editable_dropdown(tmp_path):
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.nameEdit.setText("拉取方案")
+    dialog.baseUrlEdit.setText("https://example.test/v1")
+    dialog.apiKeyEdit.setText("secret")
+    dialog.modelEdit.setText("hand-typed-model")
+
+    # Base URL 为空时不发请求。
+    dialog.baseUrlEdit.setText("")
+    emitted = []
+    dialog.modelsRequested.connect(lambda base, key: emitted.append((base, key)))
+    dialog.fetchModelsButton.click()
+    assert emitted == []
+    assert dialog.fetchModelsButton.isEnabled()
+
+    # 有 Base URL 时按方案的 base_url/api_key 发起拉取。
+    dialog.baseUrlEdit.setText("https://example.test/v1")
+    dialog.fetchModelsButton.click()
+    assert emitted == [("https://example.test/v1", "secret")]
+
+    # 拉取结果填充可编辑下拉，且手填的模型名保留。
+    dialog.showFetchedModels(["model-a", "model-b"])
+    items = [dialog.modelEdit.itemText(i) for i in range(dialog.modelEdit.count())]
+    assert items == ["model-a", "model-b"]
+    assert dialog.modelEdit.currentText() == "hand-typed-model"
+    assert dialog.fetchModelsButton.isEnabled()
+    assert dialog.fetchModelsButton.text() == "获取模型列表"
+
+    # 拉取失败只提示，不阻塞保存。
+    dialog.showFetchedModelsFailure("boom")
+    assert dialog.fetchModelsButton.isEnabled()
+    assert dialog.yesButton.isEnabled()
+    assert dialog.values()["model"] == "hand-typed-model"
+    dialog.close()
+    parent.close()

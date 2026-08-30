@@ -17,6 +17,7 @@ from videocaptioner.cli.config import (
     format_config,
     get,
     load_config_file,
+    mask_credential,
     save_config_value,
 )
 
@@ -70,7 +71,7 @@ def _set(key: str, value: str) -> int:
         output.error(str(e))
         return EXIT.GENERAL_ERROR
     # Mask sensitive values in success message
-    display = f"{value[:4]}...{value[-4:]}" if ("key" in key) and len(value) > 8 else value
+    display = mask_credential(value) if ("key" in key) and len(value) > 8 else value
     output.success(f"{key} = {display}")
     return EXIT.SUCCESS
 
@@ -84,8 +85,7 @@ def _get(key: str, config: dict) -> int:
     if isinstance(value, dict):
         print(format_config(value))
     elif isinstance(value, str) and ("key" in key or "token" in key) and value:
-        masked = f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "****"
-        print(masked)
+        print(mask_credential(value))
     else:
         print(value)
     return EXIT.SUCCESS
@@ -140,10 +140,13 @@ def _interactive_init(args: Namespace, config_data: dict) -> int:
         translator = _prompt("Non-LLM translator [bing] (bing/google/deeplx): ", "bing")
         _set_nested(config_data, "translate.service", translator)
         print()
-        print("LLM config is used for AI subtitle polish, LLM translation, and --adapt-length.")
-        _set_nested(config_data, "llm.api_key", _prompt("LLM API key [skip]: "))
-        _set_nested(config_data, "llm.api_base", _prompt(f"LLM API base [{DEFAULTS['llm']['api_base']}]: ", DEFAULTS["llm"]["api_base"]))
-        _set_nested(config_data, "llm.model", _prompt(f"LLM model [{DEFAULTS['llm']['model']}]: ", DEFAULTS["llm"]["model"]))
+        print("LLM model config comes from the model profile store (shared with the GUI).")
+        print("Run 'videocaptioner profile list' to see profile ids.")
+        _set_nested(
+            config_data,
+            "llm.profile_id",
+            _prompt("LLM model profile id for main translation [skip]: "),
+        )
         print()
         print("Dubbing config is used by 'dub' and 'process --dub-only'.")
         _set_nested(config_data, "dubbing.preset", _prompt("Dubbing preset [edge-cn-female] (no API key): ", "edge-cn-female"))
@@ -174,9 +177,7 @@ def _build_onboarding_config(args: Namespace) -> dict:
     _set_nested(config_data, "dubbing.audio_mode", "replace")
 
     mappings = {
-        "llm_api_key": "llm.api_key",
-        "llm_api_base": "llm.api_base",
-        "llm_model": "llm.model",
+        "llm_profile": "llm.profile_id",
         "asr": "transcribe.asr",
         "translator": "translate.service",
         "translation_mode": "translate.mode",
@@ -213,7 +214,10 @@ def _render_onboarding_template(config_data: dict) -> str:
     f.write("# VideoCaptioner configuration\n")
     f.write("# Priority: CLI flags > environment variables > this file > built-in defaults.\n")
     f.write("# Keep API keys private. This file is written with 0600 permissions on Unix.\n\n")
-    f.write("# [llm] is used for AI subtitle polish, LLM translation, reflective translation, and dubbing length adaptation.\n")
+    f.write("# [llm] selects LLM model profiles by id from the model profile store (run 'videocaptioner profile list').\n")
+    f.write("# profile_id is the main translation model and the derivation source for utility roles (split/optimize/postprocess/dub rewrite).\n")
+    f.write("# review_profile_id is required by enhanced_llm translation; utility_profile_id overrides the derived utility model.\n")
+    f.write("# llm_content_logging and credentials live in the profile store file, not here.\n")
     f.write("# [whisper_api] is only needed when transcribe.asr = \"whisper-api\".\n")
     f.write("# [transcribe] controls speech-to-text. bijian/jianying need no key; whisper-cpp needs a local binary/model.\n")
     f.write("# transcribe.mimo_asr is used by transcribe.asr = \"mimo-asr\"; transcribe.qwen is used by \"qwen-local\" and MiMo alignment.\n")
@@ -231,11 +235,9 @@ def _user_facing_config(config_data: dict) -> dict:
     """Keep onboarding config focused on settings users actually choose."""
     return {
         "llm": {
-            "api_key": config_data["llm"]["api_key"],
-            "api_base": config_data["llm"]["api_base"],
-            "model": config_data["llm"]["model"],
-            "work_context_tokens": config_data["llm"]["work_context_tokens"],
-            "max_concurrency": config_data["llm"]["max_concurrency"],
+            "profile_id": config_data["llm"]["profile_id"],
+            "review_profile_id": config_data["llm"]["review_profile_id"],
+            "utility_profile_id": config_data["llm"]["utility_profile_id"],
         },
         "whisper_api": {
             "api_key": config_data["whisper_api"]["api_key"],

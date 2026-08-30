@@ -25,6 +25,34 @@ class Check:
     fix: str = ""
 
 
+# Shared fix-hint prefix for the three [llm] id checks (the id list source).
+_PROFILE_LIST_HINT = "Run 'videocaptioner profile list' to see available ids, then "
+
+
+def _profile_id_fix(key: str, suffix: str = "") -> str:
+    """Build the fix hint for an [llm] profile-id check."""
+
+    return f"{_PROFILE_LIST_HINT}'videocaptioner config set {key} <id>'{suffix}"
+
+
+def _bound_missing_check(key: str, profile_id: str, available: list[str]):
+    """Error check for a bound profile id absent from the store (None otherwise).
+
+    A blank binding is valid for the utility role (it derives from the main
+    profile) and reported separately for the review role, so only the
+    bound-but-missing case is shared here.
+    """
+
+    if not profile_id or profile_id in available:
+        return None
+    return Check(
+        key,
+        "error",
+        f"Profile '{profile_id}' does not exist in the store",
+        _profile_id_fix(key),
+    )
+
+
 def run(args: Namespace, config: dict) -> int:
     checks = _run_checks(
         config,
@@ -183,10 +211,11 @@ def _check_subtitle(config: dict) -> list[Check]:
     checks: list[Check] = []
     optimize = bool(get(config, "subtitle.optimize", True))
     split = bool(get(config, "subtitle.split", True))
+    compress = bool(get(config, "subtitle.compress_fast_subtitles", False))
     translate = bool(get(config, "subtitle.translate", False))
     translator = get(config, "translate.service", "bing")
     translation_mode = get(config, "translate.mode", "enhanced_llm")
-    needs_llm = optimize or split or (
+    needs_llm = optimize or split or compress or (
         translate and translation_mode in {"single_llm", "enhanced_llm"}
     )
     checks.append(
@@ -197,10 +226,64 @@ def _check_subtitle(config: dict) -> list[Check]:
             f"translation_mode={translation_mode}, translator={translator}",
         )
     )
-    if needs_llm and not get(config, "llm.api_key", ""):
-        checks.append(Check("llm.api_key", "warn", "LLM API key is missing; AI polish/split/LLM translation will fail", "Run 'videocaptioner config set llm.api_key <key>' or disable AI polish/split"))
-    if needs_llm and not get(config, "llm.model", ""):
-        checks.append(Check("llm.model", "error", "LLM model is missing", "Run 'videocaptioner config set llm.model <model>'"))
+    if not needs_llm:
+        return checks
+
+    from videocaptioner.cli.config import list_llm_profile_ids, llm_profile_ids
+
+    profile_ids = llm_profile_ids(config)
+    available = list_llm_profile_ids()
+    if not available:
+        checks.append(
+            Check(
+                "llm.profile_id",
+                "error",
+                "The model profile store is empty; LLM consumers have nothing to resolve",
+                "Create a model profile in the GUI (翻译设置 → 方案 → 新建), "
+                "then set llm.profile_id with 'videocaptioner config set llm.profile_id <id>'",
+            )
+        )
+        return checks
+    if not profile_ids["main"]:
+        checks.append(
+            Check(
+                "llm.profile_id",
+                "error",
+                "llm.profile_id is not set",
+                _profile_id_fix("llm.profile_id"),
+            )
+        )
+    else:
+        main_check = _bound_missing_check("llm.profile_id", profile_ids["main"], available)
+        if main_check:
+            checks.append(main_check)
+    # An empty utility binding is valid: it derives from the main profile. Only
+    # a bound-but-missing id is an error, so the resolver never silently falls
+    # back to derivation when the user explicitly bound something.
+    utility_check = _bound_missing_check(
+        "llm.utility_profile_id", profile_ids["utility"], available
+    )
+    if utility_check:
+        checks.append(utility_check)
+    # enhanced_llm + a blank review id is a hard runtime failure (the resolver
+    # fail-fasts instead of falling back to the main profile), so it is an
+    # error with binding guidance, not a soft warning.
+    if translate and translation_mode == "enhanced_llm":
+        if not profile_ids["review"]:
+            checks.append(
+                Check(
+                    "llm.review_profile_id",
+                    "error",
+                    "enhanced_llm translation requires a review profile and none is set",
+                    _profile_id_fix("llm.review_profile_id", " (or use single_llm mode)"),
+                )
+            )
+        else:
+            review_check = _bound_missing_check(
+                "llm.review_profile_id", profile_ids["review"], available
+            )
+            if review_check:
+                checks.append(review_check)
     return checks
 
 

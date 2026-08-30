@@ -6,7 +6,7 @@ from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import build_legacy_llm_profile, get
+from videocaptioner.cli.config import get
 
 # BCP 47 → TargetLanguage.value (Chinese label) mapping for internal use
 _LANG_MAP = {
@@ -53,6 +53,12 @@ _LANG_MAP = {
 
 def _display_usage_value(value: object) -> str:
     return "不可用" if value is None else str(value)
+
+
+def _profile_model(profile) -> str:
+    """Model name for a resolved profile, or "" when the role resolves none."""
+
+    return profile.model if profile is not None else ""
 
 
 def _resolve_target_language(code: str):
@@ -122,31 +128,40 @@ def run(args: Namespace, config: dict) -> int:
     llm_translation = need_translate and translation_mode != "non_llm"
 
     # Validate AFTER resolving the actual need_translate / need_optimize state.
-    # Legacy optimize/split calls intentionally keep using [llm], while LLM
-    # translation resolves its independent main/review profiles.
+    # Every LLM role (split/optimize/translate) resolves its connection from
+    # the model profile store; a missing profile fails fast with guidance.
     needs_llm = need_optimize or need_split or llm_translation
     main_translation_profile = None
     review_translation_profile = None
+    utility_profile = None
     if need_optimize or need_split:
         from videocaptioner.cli.validators import validate_llm
 
         if not validate_llm(config):
             return EXIT.USAGE_ERROR
+        from videocaptioner.cli.config import resolve_cli_utility_profile
+
+        try:
+            utility_profile = resolve_cli_utility_profile(config)
+        except ValueError as exc:
+            output.error(str(exc))
+            return EXIT.USAGE_ERROR
     if llm_translation:
         from videocaptioner.cli.config import (
-            build_translation_llm_profile,
-            build_translation_llm_profiles,
+            resolve_main_llm_profile,
+            resolve_review_llm_profile,
         )
         from videocaptioner.cli.validators import validate_translation_llm
 
         if not validate_translation_llm(config, translation_mode):
             return EXIT.USAGE_ERROR
-        if translation_mode == "enhanced_llm":
-            main_translation_profile, review_translation_profile = (
-                build_translation_llm_profiles(config)
-            )
-        else:
-            main_translation_profile = build_translation_llm_profile(config, "main")
+        try:
+            main_translation_profile = resolve_main_llm_profile(config)
+            if translation_mode == "enhanced_llm":
+                review_translation_profile = resolve_review_llm_profile(config)
+        except ValueError as exc:
+            output.error(str(exc))
+            return EXIT.USAGE_ERROR
         relevant_profiles = [main_translation_profile]
         if translation_mode == "enhanced_llm":
             assert review_translation_profile is not None
@@ -215,21 +230,8 @@ def run(args: Namespace, config: dict) -> int:
         suffix = f"_{target_lang_code}" if need_translate else "_optimized"
         output_path = str(input_path.with_name(f"{initial_name}{suffix}.srt"))
 
-    # Setup LLM environment
-    llm_api_key = get(config, "llm.api_key", "")
-    llm_api_base = get(config, "llm.api_base", "")
-    llm_model = get(config, "llm.model", "")
-    # TODO(ticket-14): 临时桥——[llm] 三标量构 profile 喂 split/optimize 的新签名。
-    # 14 号票把 CLI 的 LLM 配置面坍缩进方案库后一次性删除此桥。
-    utility_profile = (
-        build_legacy_llm_profile(config)
-        if (need_optimize or need_split) and llm_api_key and llm_model
-        else None
-    )
-    if llm_api_key:
-        os.environ["OPENAI_API_KEY"] = llm_api_key
-    if llm_api_base:
-        os.environ["OPENAI_BASE_URL"] = llm_api_base
+    # LLM connections for split/optimize/translate come from the resolved
+    # model profiles above; no ambient OPENAI_* environment relay remains.
 
     # Load custom prompt (only if LLM features are needed)
     custom_prompt = getattr(args, "prompt", None) or get(config, "translate.main_prompt", "")
@@ -248,8 +250,13 @@ def run(args: Namespace, config: dict) -> int:
                 f"Translation mode: {translation_mode}, service: {translator_service}, "
                 f"target: {target_lang_code}"
             )
-        if needs_llm and llm_model:
-            output.info(f"LLM: {llm_model} @ {llm_api_base}")
+        if needs_llm and utility_profile is not None:
+            output.info(f"LLM: {utility_profile.model} @ {utility_profile.base_url}")
+        elif needs_llm and main_translation_profile is not None:
+            output.info(
+                f"LLM translation: {main_translation_profile.model} "
+                f"@ {main_translation_profile.base_url}"
+            )
 
     from videocaptioner.cli.validators import resolve_layout
 
@@ -304,7 +311,7 @@ def run(args: Namespace, config: dict) -> int:
 
             splitter = SubtitleSplitter(
                 thread_num=thread_num,
-                model=llm_model,
+                model=_profile_model(utility_profile),
                 profile=utility_profile,
                 max_word_count_cjk=get(config, "subtitle.max_word_count_cjk", 18),
                 max_word_count_english=get(config, "subtitle.max_word_count_english", 12),
@@ -329,7 +336,7 @@ def run(args: Namespace, config: dict) -> int:
             optimizer = SubtitleOptimizer(
                 thread_num=thread_num,
                 batch_num=batch_size,
-                model=llm_model,
+                model=_profile_model(utility_profile),
                 profile=utility_profile,
                 custom_prompt=get(config, "subtitle.optimization_prompt", ""),
                 update_callback=callback,
@@ -464,7 +471,7 @@ def run(args: Namespace, config: dict) -> int:
                     batch_num=batch_size,
                     source_language=source_language,
                     target_language=target_language,
-                    model=llm_model,
+                    model=_profile_model(profile),
                     custom_prompt=custom_prompt,
                     is_reflect=need_reflect,
                     update_callback=callback,
