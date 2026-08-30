@@ -13,7 +13,6 @@ from videocaptioner.core.entities import (
     SubtitleTask,
     TranslatorServiceEnum,
 )
-from videocaptioner.core.llm.check_llm import check_llm_connection
 from videocaptioner.core.llm.context import (
     clear_task_context,
     generate_task_id,
@@ -23,6 +22,11 @@ from videocaptioner.core.llm.context import (
 from videocaptioner.core.llm.request_options import (
     RequestOptionsError,
     validate_structured_output_compatibility,
+)
+from videocaptioner.core.llm.utility import (
+    UTILITY_PROFILE_CARD,
+    UtilityProfileError,
+    validate_utility_profile,
 )
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
 from videocaptioner.core.split.split import SubtitleSplitter
@@ -73,19 +77,32 @@ def create_translator_from_config(
     if translator_service == TranslatorServiceEnum.DEEPLX:
         os.environ["DEEPLX_ENDPOINT"] = config.deeplx_endpoint or ""
 
+    is_llm_mode = config.effective_translation_mode() in {
+        TranslationMode.SINGLE_LLM.value,
+        TranslationMode.ENHANCED_LLM.value,
+    }
+    if is_llm_mode and config.main_llm_profile is None:
+        # LLM 翻译不再静默回退到环境变量；无方案即带指引 fail-fast。
+        raise UtilityProfileError(
+            "未配置主翻译模型配置方案，无法使用 LLM 翻译；"
+            "请到翻译设置页选择或创建模型配置方案"
+        )
+
     return TranslatorFactory.create_translator(
         translator_type=SERVICE_TO_TYPE[translator_service],
         thread_num=(
             config.main_llm_profile.max_concurrency
-            if config.main_llm_profile is not None
-            and config.effective_translation_mode()
-            in {TranslationMode.SINGLE_LLM.value, TranslationMode.ENHANCED_LLM.value}
+            if config.main_llm_profile is not None and is_llm_mode
             else config.thread_num
         ),
         batch_num=config.batch_size,
         source_language=config.source_language,
         target_language=config.target_language,
-        model=config.llm_model or "",
+        model=(
+            config.main_llm_profile.model
+            if config.main_llm_profile is not None and is_llm_mode
+            else ""
+        ),
         custom_prompt=custom_prompt,
         is_reflect=(
             config.need_reflect
@@ -93,12 +110,7 @@ def create_translator_from_config(
             else False
         ),
         update_callback=callback,
-        profile=(
-            config.main_llm_profile
-            if config.effective_translation_mode()
-            in {TranslationMode.SINGLE_LLM.value, TranslationMode.ENHANCED_LLM.value}
-            else None
-        ),
+        profile=(config.main_llm_profile if is_llm_mode else None),
     )
 
 
@@ -130,26 +142,24 @@ class SubtitleThread(QThread):
     def set_custom_prompt_text(self, text: str):
         self.custom_prompt_text = text
 
-    def _setup_llm_config(self) -> SubtitleConfig:
-        """验证 LLM 配置并设置环境变量，返回 SubtitleConfig"""
-        config = self.task.subtitle_config
-        if not config:
-            raise Exception(self.tr("LLM API 未配置, 请检查LLM配置"))
-        base_url = config.utility_llm_base_url or config.base_url
-        api_key = config.utility_llm_api_key or config.api_key
-        model = config.utility_llm_model or config.llm_model
-        if base_url and api_key and model:
-            success, message = check_llm_connection(
-                base_url,
-                api_key,
-                model,
+    def _validate_utility_profile(self, subtitle_config: SubtitleConfig) -> None:
+        """工具角色方案的启动预检（仅本地校验，不发真请求）。
+
+        与增强翻译的本地预检同强度：任务在进入断句/优化前 fail-fast，
+        错误文案指向翻译设置页·工具模型卡。
+        """
+        profile = subtitle_config.utility_llm_profile
+        if profile is None:
+            raise UtilityProfileError(
+                "未找到可用的模型配置方案：主翻译方案与工具模型绑定均为空，"
+                f"请到{UTILITY_PROFILE_CARD}选择或创建模型配置方案"
             )
-            if not success:
-                raise Exception(f"{self.tr('LLM API 测试失败: ')}{message or ''}")
-            os.environ["OPENAI_BASE_URL"] = base_url
-            os.environ["OPENAI_API_KEY"] = api_key
-            return config
-        raise Exception(self.tr("LLM API 未配置, 请检查LLM配置"))
+        try:
+            validate_utility_profile(profile)
+        except UtilityProfileError as exc:
+            raise UtilityProfileError(
+                f"工具模型方案无法用于字幕断句/优化：{exc}"
+            ) from exc
 
     @staticmethod
     def _enum(value, enum_type):
@@ -312,10 +322,10 @@ class SubtitleThread(QThread):
                 asr_data.split_to_word_segments()
                 self.update_all.emit(asr_data.to_json())
 
-            # 验证 LLM 配置
-            if self.need_legacy_llm(subtitle_config, asr_data):
+            # 工具角色方案启动预检（fail-fast，仅本地校验）
+            if self.need_utility_llm(subtitle_config, asr_data):
                 self.progress.emit(2, self.tr("开始验证 LLM 配置..."))
-                subtitle_config = self._setup_llm_config()
+                self._validate_utility_profile(subtitle_config)
 
             # 字词级字幕按用户选择执行语义断句或本地快速合并。
             if asr_data.is_word_timestamp():
@@ -328,7 +338,10 @@ class SubtitleThread(QThread):
                 logger.info("正在%s", "LLM字幕断句" if use_llm_split else "快速合并字幕")
                 splitter = SubtitleSplitter(
                     thread_num=subtitle_config.thread_num,
-                    model=subtitle_config.utility_llm_model or subtitle_config.llm_model,
+                    model=subtitle_config.utility_llm_profile.model
+                    if subtitle_config.utility_llm_profile
+                    else "",
+                    profile=subtitle_config.utility_llm_profile,
                     max_word_count_cjk=subtitle_config.max_word_count_cjk,
                     max_word_count_english=subtitle_config.max_word_count_english,
                     use_llm=use_llm_split,
@@ -362,13 +375,16 @@ class SubtitleThread(QThread):
                 self.progress.emit(0, self.tr("优化字幕..."))
                 logger.info("正在优化字幕...")
                 self.finished_subtitle_length = 0
-                utility_model = subtitle_config.utility_llm_model or subtitle_config.llm_model
-                if not utility_model:
-                    raise Exception(self.tr("LLM 模型未配置"))
+                if subtitle_config.utility_llm_profile is None:
+                    raise UtilityProfileError(
+                        "未找到可用的模型配置方案：主翻译方案与工具模型绑定均为空，"
+                        f"请到{UTILITY_PROFILE_CARD}选择或创建模型配置方案"
+                    )
                 optimizer = SubtitleOptimizer(
                     thread_num=subtitle_config.thread_num,
                     batch_num=subtitle_config.batch_size,
-                    model=utility_model,
+                    model=subtitle_config.utility_llm_profile.model,
+                    profile=subtitle_config.utility_llm_profile,
                     custom_prompt=optimization_prompt or "",
                     update_callback=self.callback,
                 )
@@ -449,6 +465,7 @@ class SubtitleThread(QThread):
             clear_task_context()
 
     def need_legacy_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
+        """Whether any consumer still needs an LLM resolved for this run."""
         return (
             subtitle_config.need_optimize
             or (subtitle_config.need_split and asr_data.is_word_timestamp())
@@ -458,6 +475,16 @@ class SubtitleThread(QThread):
                 == TranslationMode.SINGLE_LLM.value
                 and subtitle_config.main_llm_profile is None
             )
+        )
+
+    def need_utility_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):
+        """Whether the utility roles (split/optimize) need a model profile.
+
+        Kept at the old need_legacy_llm decision point so the startup preflight
+        fires at the same moment it always did.
+        """
+        return subtitle_config.need_optimize or (
+            subtitle_config.need_split and asr_data.is_word_timestamp()
         )
 
     # Backward-compatible public helper retained for existing callers/tests.
@@ -554,15 +581,15 @@ class RetranslateThread(QThread):
             if not config.target_language:
                 raise Exception("目标语言未配置")
 
-            # 设置 LLM 环境变量（LLM 翻译需要）
-            if config.translator_service == TranslatorServiceEnum.OPENAI:
-                if config.main_llm_profile is not None:
-                    pass
-                elif not (config.base_url and config.api_key and config.llm_model):
-                    raise Exception("LLM API 未配置，请检查 LLM 配置")
-                else:
-                    os.environ["OPENAI_BASE_URL"] = config.base_url
-                    os.environ["OPENAI_API_KEY"] = config.api_key
+            # LLM 翻译必须携带模型配置方案；不再静默回退到环境变量。
+            if (
+                config.translator_service == TranslatorServiceEnum.OPENAI
+                and config.main_llm_profile is None
+            ):
+                raise UtilityProfileError(
+                    "未配置主翻译模型配置方案，无法使用 LLM 翻译；"
+                    "请到翻译设置页选择或创建模型配置方案"
+                )
 
             # 构建仅含选中行的 ASRData
             asr_data = ASRData.from_json(self.selected_data)

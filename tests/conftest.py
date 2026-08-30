@@ -194,6 +194,29 @@ def _mock_split_response(messages: List[Dict[str, Any]]) -> str:
     return "<br>".join(chunks)
 
 
+class _FakeGatewayFromCall:
+    """Bridge the gateway seam onto the legacy ``call_llm`` fake.
+
+    Consumers migrated to ``profile + gateway`` (split/optimize) dispatch
+    through ``LLMGateway.complete``; this adapter keeps the single
+    ``fake_call_llm`` above serving both the legacy and migrated paths.
+    """
+
+    def __init__(self, call_llm):
+        self._call_llm = call_llm
+
+    def complete(self, profile, request, **kwargs):
+        del kwargs
+        messages = [
+            {"role": message.role, "content": message.content}
+            for message in request.messages
+        ]
+        response = self._call_llm(messages=messages, model=profile.model)
+        from videocaptioner.core.llm.models import LLMResult
+
+        return LLMResult(text=str(response.choices[0].message.content))
+
+
 @pytest.fixture
 def mock_llm_client(monkeypatch):
     """Mock OpenAI-compatible LLM calls used by split/translate/optimize tests."""
@@ -240,8 +263,25 @@ def mock_llm_client(monkeypatch):
         "videocaptioner.core.optimize.optimize.call_llm",
         fake_call_llm,
     )
+    # split/optimize have migrated to the profile+gateway seam: patch the
+    # gateway constructor in both consumers so the fake call_llm above keeps
+    # serving those paths. (ticket-11; ticket-16 retires call_llm entirely)
+    # split.split is where SubtitleSplitter builds its gateway; split_by_llm
+    # covers standalone calls of the module function.
     monkeypatch.setattr(
-        "videocaptioner.ui.thread.subtitle_thread.check_llm_connection",
-        lambda *args, **kwargs: (True, "ok"),
+        "videocaptioner.core.split.split.LLMGateway",
+        lambda: _FakeGatewayFromCall(fake_call_llm),
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.split.split_by_llm.LLMGateway",
+        lambda: _FakeGatewayFromCall(fake_call_llm),
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.optimize.optimize.LLMGateway",
+        lambda: _FakeGatewayFromCall(fake_call_llm),
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.translate.llm_translator.LLMGateway",
+        lambda: _FakeGatewayFromCall(fake_call_llm),
     )
     return fake_call_llm
