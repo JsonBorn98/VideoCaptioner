@@ -8,7 +8,7 @@ from typing import Any, Callable, List, Optional, Union
 import openai
 from openai import OpenAI
 
-from videocaptioner.core.llm.client import normalize_base_url
+from videocaptioner.core.llm.check_llm import normalize_base_url
 from videocaptioner.core.utils.cache import is_cache_enabled
 from videocaptioner.core.utils.text_utils import count_words
 

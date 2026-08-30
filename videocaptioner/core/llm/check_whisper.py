@@ -5,7 +5,7 @@ from typing import Any, Literal, Optional
 import openai
 
 from videocaptioner.config import ASSETS_PATH
-from videocaptioner.core.llm.client import normalize_base_url
+from videocaptioner.core.llm.check_llm import normalize_base_url
 from videocaptioner.core.utils.logger import setup_logger
 
 # 测试音频文件路径

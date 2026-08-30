@@ -1,33 +1,46 @@
 """SubtitleOptimizer 可接收规则型后处理注入的额外 prompt 约束。"""
 
 import json
-from types import SimpleNamespace
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+from videocaptioner.core.llm.models import (
+    LLMModelProfile,
+    LLMResult,
+    LLMTransport,
+    ProviderDialect,
+)
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
 
 
-def _resp(text: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=text))]
+def _profile() -> LLMModelProfile:
+    return LLMModelProfile(
+        profile_id="optimizer-test",
+        name="Optimizer test",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url="https://mock.local/v1",
+        api_key="test-api-key",
+        model="gpt-4o-mini",
     )
 
 
-def test_optimizer_injects_extra_rules_into_system_prompt(monkeypatch):
+def test_optimizer_injects_extra_rules_into_system_prompt():
     captured = {}
 
-    def fake_call_llm(messages, model, **kwargs):
-        assert "temperature" not in kwargs
-        captured["system"] = messages[0]["content"]
-        return _resp(json.dumps({"1": "你好"}, ensure_ascii=False))
+    class CapturingGateway:
+        def complete(self, profile, request, **kwargs):
+            del profile, kwargs
+            captured["system"] = request.messages[0].content
+            return LLMResult(text=json.dumps({"1": "你好"}, ensure_ascii=False))
 
-    monkeypatch.setattr("videocaptioner.core.optimize.optimize.call_llm", fake_call_llm)
     optimizer = SubtitleOptimizer(
         thread_num=1,
         batch_num=5,
         model="gpt-4o-mini",
         custom_prompt="",
         extra_rules="中文引号使用「」/『』。",
+        profile=_profile(),
+        gateway=CapturingGateway(),
     )
 
     data = ASRData([ASRDataSeg("你好", 0, 1000)])

@@ -1,17 +1,31 @@
 """LLM-based text splitting tests.
 
-Requires environment variables:
-    OPENAI_BASE_URL: OpenAI-compatible API endpoint
-    OPENAI_API_KEY: API key for authentication
-    OPENAI_MODEL: Model name (optional, defaults to gpt-4o-mini)
+Mock-based cases run the profile+gateway seam with a fake gateway; the
+integration-marked cases skip cleanly without OPENAI_* credentials.
 """
-
-from types import SimpleNamespace
 
 import pytest
 
 import videocaptioner.core.split.split_by_llm as split_by_llm_module
+from videocaptioner.core.llm.models import (
+    LLMModelProfile,
+    LLMTransport,
+    ProviderDialect,
+)
 from videocaptioner.core.split.split_by_llm import count_words, split_by_llm
+
+
+def _test_profile() -> LLMModelProfile:
+    """Build the utility-role profile used by fake-gateway split tests."""
+    return LLMModelProfile(
+        profile_id="split-test",
+        name="Split test",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url="https://mock.local/v1",
+        api_key="test-api-key",
+        model="gpt-4o-mini",
+    )
 
 
 @pytest.mark.integration
@@ -40,7 +54,9 @@ class TestSplitByLLM:
         model = "gpt-4o-mini"
         max_limit = 18
 
-        result = split_by_llm(text, model=model, max_word_count_cjk=max_limit)
+        result = split_by_llm(
+            text, model=model, max_word_count_cjk=max_limit, profile=_test_profile()
+        )
 
         print("\n" + "=" * 80)
         print(f"📝 中文断句测试 - 共 {len(result)} 段 (限制: ≤{max_limit}字/段)")
@@ -67,7 +83,12 @@ class TestSplitByLLM:
         model = "gpt-4o-mini"
         max_limit = 12
 
-        result = split_by_llm(text, model=model, max_word_count_english=max_limit)
+        result = split_by_llm(
+            text,
+            model=model,
+            max_word_count_english=max_limit,
+            profile=_test_profile(),
+        )
 
         print("\n" + "=" * 80)
         print(f"📝 英文断句测试 - 共 {len(result)} 段 (限制: ≤{max_limit} words/段)")
@@ -91,7 +112,9 @@ class TestSplitByLLM:
         model = "gpt-4o-mini"
         max_limit = 15
 
-        result = split_by_llm(text, model=model, max_word_count_cjk=max_limit)
+        result = split_by_llm(
+            text, model=model, max_word_count_cjk=max_limit, profile=_test_profile()
+        )
 
         print("\n" + "=" * 80)
         print(f"📝 中英混合断句测试 - 共 {len(result)} 段 (限制: ≤{max_limit}/段)")
@@ -110,7 +133,7 @@ class TestSplitByLLM:
         text = "人工智能技术正在改变世界。它让我们的生活变得更加便利。"
         model = "gpt-4o-mini"
 
-        result = split_by_llm(text, model=model)
+        result = split_by_llm(text, model=model, profile=_test_profile())
 
         # 合并后应该完全等于原文（忽略空格）
         merged = "".join(result)
@@ -121,7 +144,7 @@ class TestSplitByLLM:
         text = "你好世界。"
         model = "gpt-4o-mini"
 
-        result = split_by_llm(text, model=model)
+        result = split_by_llm(text, model=model, profile=_test_profile())
 
         print(f"\n📝 短文本断句结果: {result}")
 
@@ -136,7 +159,9 @@ class TestSplitByLLM:
         model = "gpt-4o-mini"
         max_limit = 15  # 放宽限制以适应mock的分割逻辑
 
-        result = split_by_llm(text, model=model, max_word_count_cjk=max_limit)
+        result = split_by_llm(
+            text, model=model, max_word_count_cjk=max_limit, profile=_test_profile()
+        )
 
         print("\n" + "=" * 80)
         print(
@@ -162,25 +187,24 @@ class TestSplitByLLM:
         calls = {"count": 0}
         sleeps = []
 
-        def flaky_call_llm(*args, **kwargs):
-            calls["count"] += 1
-            if calls["count"] == 1:
-                raise RuntimeError("temporary gateway error")
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(content="Hello<br>world")
-                    )
-                ]
-            )
+        class FlakyGateway:
+            def complete(self, profile, request, **kwargs):
+                del profile, kwargs
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise RuntimeError("temporary gateway error")
+                from videocaptioner.core.llm.models import LLMResult
 
-        monkeypatch.setattr(split_by_llm_module, "call_llm", flaky_call_llm)
+                return LLMResult(text="Hello<br>world")
+
         monkeypatch.setattr(split_by_llm_module.time, "sleep", sleeps.append)
 
         result = split_by_llm(
             "Hello world",
             model="gpt-4o-mini",
             max_word_count_english=4,
+            profile=_test_profile(),
+            gateway=FlakyGateway(),
         )
 
         assert result == ["Hello", "world"]
@@ -190,28 +214,36 @@ class TestSplitByLLM:
     def test_split_falls_back_after_retry_exhausted(self, monkeypatch):
         calls = {"count": 0}
 
-        def failing_call_llm(*args, **kwargs):
-            calls["count"] += 1
-            raise RuntimeError("gateway down")
+        class FailingGateway:
+            def complete(self, profile, request, **kwargs):
+                del profile, request, kwargs
+                calls["count"] += 1
+                raise RuntimeError("gateway down")
 
-        monkeypatch.setattr(split_by_llm_module, "call_llm", failing_call_llm)
         monkeypatch.setattr(split_by_llm_module.time, "sleep", lambda delay: None)
 
-        result = split_by_llm("Hello world", model="gpt-4o-mini")
+        result = split_by_llm(
+            "Hello world", model="gpt-4o-mini", profile=_test_profile(), gateway=FailingGateway()
+        )
 
         assert result == ["Hello world"]
         assert calls["count"] == split_by_llm_module.LLM_SPLIT_MAX_ATTEMPTS
 
-    def test_split_requests_have_a_bounded_timeout(self, monkeypatch):
+    def test_split_requests_have_a_bounded_timeout(self):
         observed = []
 
-        def fake_call_llm(*args, **kwargs):
-            observed.append(kwargs.get("timeout"))
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="Hello<br>world"))]
-            )
+        class RecordingGateway:
+            def complete(self, profile, request, **kwargs):
+                del profile, kwargs
+                observed.append(request.timeout)
+                from videocaptioner.core.llm.models import LLMResult
 
-        monkeypatch.setattr(split_by_llm_module, "call_llm", fake_call_llm)
+                return LLMResult(text="Hello<br>world")
 
-        assert split_by_llm("Hello world", model="gpt-4o-mini") == ["Hello", "world"]
+        assert split_by_llm(
+            "Hello world",
+            model="gpt-4o-mini",
+            profile=_test_profile(),
+            gateway=RecordingGateway(),
+        ) == ["Hello", "world"]
         assert observed == [split_by_llm_module.LLM_SPLIT_REQUEST_TIMEOUT_SECONDS]

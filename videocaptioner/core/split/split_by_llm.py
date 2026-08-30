@@ -7,7 +7,6 @@ from ..llm import (
     LLMGateway,
     LLMModelProfile,
     LLMRequest,
-    call_llm,
     llm_messages_from_dicts,
 )
 from ..prompts import get_prompt
@@ -101,22 +100,15 @@ def _split_with_agent_loop(
     last_result = None
 
     for step in range(MAX_STEPS):
-        if profile is not None and active_gateway is not None:
-            result_text = active_gateway.complete(
-                profile,
-                LLMRequest(
-                    messages=llm_messages_from_dicts(messages),
-                    timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
-                    metadata={"stage": "llm_split", "role": "utility"},
-                ),
-            ).text
-        else:
-            response = call_llm(
-                messages=messages,
-                model=model,
+        assert profile is not None and active_gateway is not None
+        result_text = active_gateway.complete(
+            profile,
+            LLMRequest(
+                messages=llm_messages_from_dicts(messages),
                 timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
-            )
-            result_text = response.choices[0].message.content
+                metadata={"stage": "llm_split", "role": "utility"},
+            ),
+        ).text
 
         # 解析结果
         result_text_cleaned = re.sub(r"\n+", "", result_text)

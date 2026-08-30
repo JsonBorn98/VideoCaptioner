@@ -3,10 +3,9 @@
 import json
 from dataclasses import dataclass
 from typing import Literal, Optional
+from urllib.parse import urlparse, urlunparse
 
 import openai
-
-from videocaptioner.core.llm.client import normalize_base_url
 
 from .gateway import LLMGateway
 from .models import (
@@ -15,8 +14,6 @@ from .models import (
     LLMMessage,
     LLMModelProfile,
     LLMRequest,
-    LLMTransport,
-    ProviderDialect,
     thaw_json_object,
 )
 from .request_options import known_thinking_budget
@@ -68,6 +65,29 @@ class CapabilityProbeResult:
     success: bool
     message: str
     category: Optional[LLMErrorCategory] = None
+
+
+def normalize_base_url(base_url: str) -> str:
+    """Normalize API base URL by ensuring /v1 suffix when needed."""
+    url = base_url.strip()
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+
+    if not path:
+        path = "/v1"
+
+    normalized = urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -240,33 +260,6 @@ def check_model_profile_connection(
     finally:
         if owns_gateway:
             runtime.close()
-
-
-def check_llm_connection(
-    base_url: str, api_key: str, model: str
-) -> tuple[Literal[True], Optional[str]] | tuple[Literal[False], Optional[str]]:
-    """测试 LLM API 连接
-
-    使用指定的API设置与LLM进行对话测试。
-
-    参数:
-        base_url: API 基础 URL
-        api_key: API 密钥
-        model: 模型名称
-
-    返回:
-        (是否成功, Error output或AI助手的回复)
-    """
-    profile = LLMModelProfile(
-        profile_id="legacy-connection-check",
-        name="Legacy connection check",
-        transport=LLMTransport.OPENAI_COMPATIBLE,
-        dialect=ProviderDialect.GENERIC,
-        base_url=normalize_base_url(base_url),
-        api_key=api_key.strip(),
-        model=model,
-    )
-    return check_model_profile_connection(profile)
 
 
 def get_available_models(base_url: str, api_key: str) -> list[str]:

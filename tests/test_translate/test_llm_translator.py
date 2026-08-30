@@ -12,9 +12,27 @@ from typing import Callable, Dict, List
 import pytest
 
 from videocaptioner.core.asr.asr_data import ASRData
+from videocaptioner.core.llm.models import (
+    LLMModelProfile,
+    LLMTransport,
+    ProviderDialect,
+)
 from videocaptioner.core.translate import SubtitleProcessData, TargetLanguage
 from videocaptioner.core.translate.llm_translator import LLMTranslator
 from videocaptioner.core.utils import cache
+
+
+def _mock_profile() -> LLMModelProfile:
+    """Build the main-role profile used by the mock-gateway translator tests."""
+    return LLMModelProfile(
+        profile_id="translator-mock",
+        name="Translator mock",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url="https://mock.local/v1",
+        api_key="test-api-key",
+        model=os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
+    )
 
 
 @pytest.mark.integration
@@ -26,16 +44,16 @@ class TestLLMTranslator:
         self, mock_llm_client, target_language: TargetLanguage
     ) -> LLMTranslator:
         """Create LLMTranslator instance for testing (using mock LLM)."""
-        model = "gpt-4o-mini"
 
         return LLMTranslator(
             thread_num=2,
             batch_num=5,
             target_language=target_language,
-            model=model,
+            model="gpt-4o-mini",
             custom_prompt="",
             is_reflect=False,
             update_callback=None,
+            profile=_mock_profile(),
         )
 
     @pytest.mark.parametrize(
@@ -100,9 +118,13 @@ class TestLLMTranslator:
     ) -> None:
         """Test that caching mechanism works correctly (using mock LLM)."""
         cache.enable_cache()
-
-        result1 = llm_translator.translate_subtitle(sample_asr_data)
-        result2 = llm_translator.translate_subtitle(sample_asr_data)
+        try:
+            result1 = llm_translator.translate_subtitle(sample_asr_data)
+            result2 = llm_translator.translate_subtitle(sample_asr_data)
+        finally:
+            # conftest disables the cache globally; leaving it enabled here
+            # polluted later gateway tests with shared-disk cache hits.
+            cache.disable_cache()
 
         print("\n" + "=" * 60)
         print("LLM Cache Test:")

@@ -18,7 +18,6 @@ from ..llm import (
     LLMGateway,
     LLMModelProfile,
     LLMRequest,
-    call_llm,
     llm_messages_from_dicts,
 )
 from ..prompts import get_prompt
@@ -254,21 +253,15 @@ class SubtitleOptimizer:
         # Agent loop
         for step in range(MAX_STEPS):
             # 调用LLM
-            if self.profile is not None:
-                assert self.gateway is not None
-                result_text = self.gateway.complete(
-                    self.profile,
-                    LLMRequest(
-                        messages=llm_messages_from_dicts(messages),
-                        metadata={"stage": "llm_optimize", "role": "utility"},
-                    ),
-                ).text
-            else:
-                response = call_llm(
-                    messages=messages,
-                    model=self.model,
-                )
-                result_text = response.choices[0].message.content
+            assert self.profile is not None
+            assert self.gateway is not None
+            result_text = self.gateway.complete(
+                self.profile,
+                LLMRequest(
+                    messages=llm_messages_from_dicts(messages),
+                    metadata={"stage": "llm_optimize", "role": "utility"},
+                ),
+            ).text
             if not result_text:
                 raise ValueError("LLM returned empty result")
 

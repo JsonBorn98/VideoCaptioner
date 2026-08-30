@@ -1,7 +1,7 @@
 """规则型字幕后处理与审计。
 
 统一收口占位符清理 / 文本规范化 / 时轴间隙闭合 / 阅读速度审计 / QA 报告，
-供 CLI 与 GUI 两条字幕管线共用。无 Qt、无网络（F5 压缩重译除外，走现有 call_llm）。
+供 CLI 与 GUI 两条字幕管线共用。无 Qt、无网络（F5 压缩重译除外，经 LLMGateway）。
 
 管线插入点（见 docs/dev/subtitle-optimizer-integration-plan.md §3.2）：
 - 加载后、断句前          → run_pre_stage       （占位符清理）

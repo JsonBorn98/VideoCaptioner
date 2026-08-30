@@ -11,7 +11,6 @@ from videocaptioner.core.llm import (
     LLMGateway,
     LLMModelProfile,
     LLMRequest,
-    call_llm,
     llm_messages_from_dicts,
 )
 from videocaptioner.core.prompts import get_prompt
@@ -218,19 +217,17 @@ class LLMTranslator(BaseTranslator):
         return True, ""
 
     def _call_text(self, messages: List[dict]) -> str:
-        if self.profile is not None:
-            assert self.gateway is not None
-            result = self.gateway.complete(
-                self.profile,
-                LLMRequest(
-                    messages=llm_messages_from_dicts(messages),
-                    max_output_tokens=self.profile.max_output_tokens,
-                    metadata={"stage": "single_llm_translation", "role": "main"},
-                ),
-            )
-            return result.text.strip()
-        response = call_llm(messages=messages, model=self.model)
-        return response.choices[0].message.content.strip()
+        assert self.profile is not None
+        assert self.gateway is not None
+        result = self.gateway.complete(
+            self.profile,
+            LLMRequest(
+                messages=llm_messages_from_dicts(messages),
+                max_output_tokens=self.profile.max_output_tokens,
+                metadata={"stage": "single_llm_translation", "role": "main"},
+            ),
+        )
+        return result.text.strip()
 
     def _translate_chunk_single(
         self, subtitle_chunk: List[SubtitleProcessData]

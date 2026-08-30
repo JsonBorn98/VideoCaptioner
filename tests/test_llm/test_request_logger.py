@@ -1,10 +1,7 @@
 import json
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
 
-import httpx
 import pytest
 
 from videocaptioner.core.llm import request_logger
@@ -26,12 +23,8 @@ from videocaptioner.core.llm.models import (
 @pytest.fixture(autouse=True)
 def _reset_content_logging():
     request_logger.set_llm_content_logging(False)
-    request_logger._pending_requests.clear()
-    request_logger.discard_pending_legacy_request()
     yield
     request_logger.set_llm_content_logging(False)
-    request_logger._pending_requests.clear()
-    request_logger.discard_pending_legacy_request()
 
 
 def _profile() -> LLMModelProfile:
@@ -316,155 +309,6 @@ def test_content_logging_only_adds_prompts_and_normalized_final_text(
     assert "must-not-log" not in serialized
     assert "hidden" not in serialized
     assert "echo" not in serialized
-
-
-def test_legacy_logger_obeys_same_content_policy(tmp_path, monkeypatch):
-    log_path = tmp_path / "legacy.jsonl"
-    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
-    request = httpx.Request(
-        "POST",
-        "https://example.test/v1/chat/completions",
-        content=json.dumps(
-            {
-                "model": "legacy-model",
-                "messages": [{"role": "user", "content": "private subtitle"}],
-                "extra_body": {"api_key": "never-log"},
-            }
-        ),
-    )
-    request_logger._on_request(request)
-    request_logger._on_response(httpx.Response(200, request=request))
-    response = SimpleNamespace(
-        usage={
-            "prompt_tokens": 4,
-            "completion_tokens": 2,
-            "completion_tokens_details": {"reasoning_tokens": 1},
-        },
-        choices=[SimpleNamespace(message=SimpleNamespace(content="final text"))],
-        model_dump=lambda: {"raw": "never-log-raw"},
-    )
-    request_logger.log_llm_response(response)
-
-    entry = json.loads(log_path.read_text("utf-8"))
-    assert entry["profile"] == {"id": "legacy", "model": "legacy-model"}
-    assert entry["usage"]["reasoning_tokens"] == 1
-    assert "request" not in entry
-    assert "response" not in entry
-    assert "private subtitle" not in log_path.read_text("utf-8")
-    assert "never-log" not in log_path.read_text("utf-8")
-
-    request_logger.set_llm_content_logging(True)
-    request2 = httpx.Request(
-        "POST",
-        "https://example.test/v1/chat/completions",
-        content=json.dumps(
-            {
-                "model": "legacy-model",
-                "messages": [{"role": "user", "content": "visible subtitle"}],
-                "reasoning": {"effort": "high"},
-            }
-        ),
-    )
-    request_logger._on_request(request2)
-    request_logger._on_response(httpx.Response(200, request=request2))
-    request_logger.log_llm_response(response)
-
-    entries = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
-    assert entries[-1]["request"]["messages"][-1]["content"] == "visible subtitle"
-    assert entries[-1]["response"] == {"text": "final text"}
-    assert "reasoning" not in entries[-1]["request"]
-
-
-def test_legacy_http_error_does_not_log_provider_body(tmp_path, monkeypatch):
-    log_path = tmp_path / "legacy-error.jsonl"
-    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
-    request = httpx.Request(
-        "POST",
-        "https://example.test/v1/chat/completions",
-        content=json.dumps({"model": "m", "messages": []}),
-    )
-    request_logger._on_request(request)
-    request_logger._on_response(
-        httpx.Response(429, text='{"error":"secret provider detail"}', request=request)
-    )
-
-    entry = json.loads(log_path.read_text("utf-8"))
-    assert entry["status"] == "error"
-    assert entry["error"]["status_code"] == 429
-    assert entry["error"]["retryable"] is True
-    assert "secret provider detail" not in log_path.read_text("utf-8")
-
-
-def test_legacy_concurrent_calls_keep_each_response_with_its_request(
-    tmp_path, monkeypatch
-):
-    log_path = tmp_path / "legacy-concurrent.jsonl"
-    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
-    request_logger.set_llm_content_logging(True)
-    first_ready = threading.Event()
-    second_logged = threading.Event()
-
-    def call(value: str) -> None:
-        request = httpx.Request(
-            "POST",
-            "https://example.test/v1/chat/completions",
-            content=json.dumps(
-                {
-                    "model": f"model-{value}",
-                    "messages": [{"role": "user", "content": f"prompt-{value}"}],
-                }
-            ),
-        )
-        request_logger._on_request(request)
-        request_logger._on_response(httpx.Response(200, request=request))
-        if value == "first":
-            first_ready.set()
-            assert second_logged.wait(2)
-        else:
-            assert first_ready.wait(2)
-        response = SimpleNamespace(
-            usage={"prompt_tokens": 1, "completion_tokens": 2},
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content=f"response-{value}")
-                )
-            ],
-        )
-        request_logger.log_llm_response(response)
-        if value == "second":
-            second_logged.set()
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        tuple(pool.map(call, ("first", "second")))
-
-    entries = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
-    assert len(entries) == 2
-    by_model = {entry["profile"]["model"]: entry for entry in entries}
-    for value in ("first", "second"):
-        entry = by_model[f"model-{value}"]
-        assert entry["request"]["messages"][0]["content"] == f"prompt-{value}"
-        assert entry["response"]["text"] == f"response-{value}"
-
-
-def test_discard_pending_legacy_request_removes_prompt_after_transport_failure():
-    request_logger.set_llm_content_logging(True)
-    request = httpx.Request(
-        "POST",
-        "https://example.test/v1/chat/completions",
-        content=json.dumps(
-            {
-                "model": "failed-model",
-                "messages": [{"role": "user", "content": "sensitive prompt"}],
-            }
-        ),
-    )
-    request_logger._on_request(request)
-    assert request_logger._pending_requests
-
-    request_logger.discard_pending_legacy_request()
-
-    assert request_logger._pending_requests == {}
-    assert not hasattr(request_logger._legacy_request_context, "request_key")
 
 
 def test_log_rotation_replaces_old_backup_without_copying_content(tmp_path, monkeypatch):

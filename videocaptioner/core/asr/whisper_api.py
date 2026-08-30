@@ -2,7 +2,7 @@ from typing import Any, Callable, List, Optional, Union
 
 from openai import BadRequestError, OpenAI
 
-from videocaptioner.core.llm.client import normalize_base_url
+from videocaptioner.core.llm.check_llm import normalize_base_url
 
 from ..utils.logger import setup_logger
 from .asr_data import ASRDataSeg

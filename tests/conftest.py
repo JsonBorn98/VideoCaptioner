@@ -6,7 +6,6 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
@@ -19,6 +18,7 @@ _TEST_APPDATA = tempfile.TemporaryDirectory(
 os.environ["VIDEOCAPTIONER_APPDATA_PATH"] = _TEST_APPDATA.name
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg  # noqa: E402
+from videocaptioner.core.llm.models import LLMResult  # noqa: E402
 from videocaptioner.core.translate import SubtitleProcessData, TargetLanguage  # noqa: E402
 from videocaptioner.core.utils import cache  # noqa: E402
 from videocaptioner.core.utils.text_utils import count_words, is_mainly_cjk  # noqa: E402
@@ -32,7 +32,6 @@ def pytest_unconfigure(config):
 
     del config
     for getter in (
-        cache.get_llm_cache,
         cache.get_gateway_cache,
         cache.get_asr_cache,
         cache.get_translate_cache,
@@ -122,12 +121,6 @@ def assert_translation_quality(original: str, translated: str, expected_keywords
     )
 
 
-def _mock_llm_response(content: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
-    )
-
-
 def _last_user_content(messages: List[Dict[str, Any]]) -> str:
     for message in reversed(messages):
         if message.get("role") == "user":
@@ -194,94 +187,65 @@ def _mock_split_response(messages: List[Dict[str, Any]]) -> str:
     return "<br>".join(chunks)
 
 
-class _FakeGatewayFromCall:
-    """Bridge the gateway seam onto the legacy ``call_llm`` fake.
+class _MockLLMGateway:
+    """Fake gateway: replay mock responses at the profile+gateway seam.
 
-    Consumers migrated to ``profile + gateway`` (split/optimize) dispatch
-    through ``LLMGateway.complete``; this adapter keeps the single
-    ``fake_call_llm`` above serving both the legacy and migrated paths.
+    Consumers (split/optimize/llm_translator) dispatch through
+    ``LLMGateway.complete``; this fake serves scripted responses without
+    environment-variable relays or symbol patching.
     """
 
-    def __init__(self, call_llm):
-        self._call_llm = call_llm
-
     def complete(self, profile, request, **kwargs):
-        del kwargs
+        del kwargs, profile
         messages = [
             {"role": message.role, "content": message.content}
             for message in request.messages
         ]
-        response = self._call_llm(messages=messages, model=profile.model)
-        from videocaptioner.core.llm.models import LLMResult
-
-        return LLMResult(text=str(response.choices[0].message.content))
-
-
-@pytest.fixture
-def mock_llm_client(monkeypatch):
-    """Mock OpenAI-compatible LLM calls used by split/translate/optimize tests."""
-
-    def fake_call_llm(
-        messages: List[Dict[str, Any]],
-        model: str,
-        **kwargs: Any,
-    ) -> SimpleNamespace:
-        assert "temperature" not in kwargs
-        del model, kwargs
         user_content = _last_user_content(messages)
 
         if "Please use multiple <br> tags" in user_content:
-            return _mock_llm_response(_mock_split_response(messages))
+            return LLMResult(text=_mock_split_response(messages))
 
         subtitle_dict = _parse_dict_from_text(user_content)
         if subtitle_dict:
             if "<input_subtitle>" in user_content:
-                return _mock_llm_response(json.dumps(subtitle_dict, ensure_ascii=False))
-
+                return LLMResult(
+                    text=json.dumps(subtitle_dict, ensure_ascii=False)
+                )
             translated = {
                 key: f"翻译:{value}"
                 for key, value in subtitle_dict.items()
             }
-            return _mock_llm_response(json.dumps(translated, ensure_ascii=False))
+            return LLMResult(text=json.dumps(translated, ensure_ascii=False))
 
-        return _mock_llm_response(f"翻译:{user_content}")
+        return LLMResult(text=f"翻译:{user_content}")
 
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://mock.local/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
-    monkeypatch.setattr("videocaptioner.core.llm.call_llm", fake_call_llm)
-    monkeypatch.setattr("videocaptioner.core.llm.client.call_llm", fake_call_llm)
-    monkeypatch.setattr(
-        "videocaptioner.core.split.split_by_llm.call_llm",
-        fake_call_llm,
-    )
-    monkeypatch.setattr(
-        "videocaptioner.core.translate.llm_translator.call_llm",
-        fake_call_llm,
-    )
-    monkeypatch.setattr(
-        "videocaptioner.core.optimize.optimize.call_llm",
-        fake_call_llm,
-    )
-    # split/optimize have migrated to the profile+gateway seam: patch the
-    # gateway constructor in both consumers so the fake call_llm above keeps
-    # serving those paths. (ticket-11; ticket-16 retires call_llm entirely)
+
+@pytest.fixture
+def mock_llm_client(monkeypatch):
+    """Mock OpenAI-compatible LLM calls used by split/translate/optimize tests.
+
+    Patches the gateway constructor in every consumer module so all requests
+    resolve through the fake gateway above (the profile+gateway seam; no
+    ambient OPENAI_* environment relays remain).
+    """
+
     # split.split is where SubtitleSplitter builds its gateway; split_by_llm
     # covers standalone calls of the module function.
     monkeypatch.setattr(
         "videocaptioner.core.split.split.LLMGateway",
-        lambda: _FakeGatewayFromCall(fake_call_llm),
+        _MockLLMGateway,
     )
     monkeypatch.setattr(
         "videocaptioner.core.split.split_by_llm.LLMGateway",
-        lambda: _FakeGatewayFromCall(fake_call_llm),
+        _MockLLMGateway,
     )
     monkeypatch.setattr(
         "videocaptioner.core.optimize.optimize.LLMGateway",
-        lambda: _FakeGatewayFromCall(fake_call_llm),
+        _MockLLMGateway,
     )
     monkeypatch.setattr(
         "videocaptioner.core.translate.llm_translator.LLMGateway",
-        lambda: _FakeGatewayFromCall(fake_call_llm),
+        _MockLLMGateway,
     )
-    return fake_call_llm
+    return _MockLLMGateway

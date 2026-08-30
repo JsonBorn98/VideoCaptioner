@@ -1,12 +1,11 @@
 """LLM unified client module."""
 
 from .check_llm import (
-    check_llm_connection,
     check_model_profile_connection,
     get_available_models,
+    normalize_base_url,
 )
 from .check_whisper import check_whisper_connection
-from .client import call_llm, get_llm_client
 from .gateway import LLMGateway
 from .models import (
     JSONValue,
@@ -30,11 +29,9 @@ from .utility import (
 )
 
 __all__ = [
-    "call_llm",
-    "get_llm_client",
-    "check_llm_connection",
     "check_model_profile_connection",
     "get_available_models",
+    "normalize_base_url",
     "check_whisper_connection",
     "JSONValue",
     "LLMCallError",

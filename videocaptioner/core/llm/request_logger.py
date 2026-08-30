@@ -1,4 +1,4 @@
-"""Privacy-preserving request logs for both LLM call paths."""
+"""Privacy-preserving request logs for gateway LLM calls."""
 
 from __future__ import annotations
 
@@ -6,16 +6,13 @@ import json
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-import httpx
-
 from videocaptioner.config import LOG_PATH
 
-from .context import get_task_context
 from .models import LLMCallError, LLMModelProfile, LLMRequest, LLMResult, LLMUsage
 
 LLM_LOG_FILE = LOG_PATH / "llm_requests.jsonl"
@@ -23,12 +20,10 @@ MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 
 
 _log_lock = threading.Lock()
-_pending_requests: Dict[int, Dict[str, Any]] = {}
 _content_logging_enabled = False
 # Set by the CLI when the env credential override swaps a resolved profile's
 # api_key; gateway log entries then record key_source="env_override".
 _env_api_key_override = False
-_legacy_request_context = threading.local()
 
 
 @dataclass(frozen=True)
@@ -232,207 +227,13 @@ def log_gateway_cache_hit(
     _write_log(entry)
 
 
-# ==================== Legacy HTTPX hooks ====================
-
-
-def _normalized_prompt_messages(value: Any) -> list[dict[str, str]]:
-    """Keep only role and textual prompt content from an OpenAI request body."""
-
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return []
-    normalized: list[dict[str, str]] = []
-    for message in value:
-        if not isinstance(message, Mapping):
-            continue
-        role = message.get("role")
-        content = message.get("content")
-        if not isinstance(role, str):
-            continue
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
-            parts = []
-            for part in content:
-                if isinstance(part, Mapping) and isinstance(part.get("text"), str):
-                    parts.append(part["text"])
-            text = "".join(parts)
-        else:
-            continue
-        normalized.append({"role": role, "content": text})
-    return normalized
-
-
-def _on_request(request: httpx.Request) -> None:
-    """Retain only safe metadata until the legacy SDK response is parsed."""
-
-    if "/chat/completions" not in str(request.url):
-        return
-
-    try:
-        request_body = json.loads(request.content.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        request_body = {}
-    if not isinstance(request_body, Mapping):
-        request_body = {}
-
-    include_content = is_llm_content_logging_enabled()
-    context = get_task_context()
-    pending: dict[str, Any] = {
-        "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "request_id": uuid.uuid4().hex,
-        "started_at": time.perf_counter(),
-        "model": str(request_body.get("model", "")),
-        "stage": context.stage if context is not None else "",
-        "include_content": include_content,
-    }
-    if include_content:
-        pending["messages"] = _normalized_prompt_messages(request_body.get("messages"))
-    request_key = id(request)
-    previous_key = getattr(_legacy_request_context, "request_key", None)
-    with _log_lock:
-        if previous_key is not None:
-            _pending_requests.pop(previous_key, None)
-        _pending_requests[request_key] = pending
-    _legacy_request_context.request_key = request_key
-
-
-def _legacy_base_entry(pending: Mapping[str, Any]) -> dict[str, Any]:
-    entry: dict[str, Any] = {
-        "time": pending.get("time", ""),
-        "request_id": pending.get("request_id", ""),
-        "stage": pending.get("stage", ""),
-        "role": "",
-        "attempt": 1,
-        "profile": {"id": "legacy", "model": pending.get("model", "")},
-        "duration_ms": max(
-            0,
-            int((time.perf_counter() - float(pending.get("started_at", 0.0))) * 1000),
-        ),
-    }
-    if pending.get("include_content"):
-        entry["request"] = {"messages": pending.get("messages", [])}
-    return entry
-
-
-def _on_response(response: httpx.Response) -> None:
-    """Record HTTP failures without persisting the provider response body."""
-
-    request = response.request
-    failed: Optional[dict[str, Any]] = None
-    with _log_lock:
-        pending = _pending_requests.get(id(request))
-        if pending is None:
-            return
-        pending["status_code"] = response.status_code
-        if response.status_code >= 400:
-            failed = _pending_requests.pop(id(request))
-        else:
-            pending["completed"] = True
-    if failed is not None:
-        if getattr(_legacy_request_context, "request_key", None) == id(request):
-            delattr(_legacy_request_context, "request_key")
-        entry = _legacy_base_entry(failed)
-        status_code = int(failed.get("status_code", 0))
-        entry["status"] = "error"
-        entry["error"] = {
-            "type": "HTTPStatusError",
-            "category": "provider_error",
-            "retryable": status_code == 429 or status_code >= 500,
-            "status_code": status_code,
-        }
-        _write_log(entry)
-
-
-def _model_dump(value: Any) -> Mapping[str, Any]:
-    if isinstance(value, Mapping):
-        return value
-    if value is not None and hasattr(value, "model_dump"):
-        try:
-            dumped = value.model_dump()
-            return dumped if isinstance(dumped, Mapping) else {}
-        except Exception:
-            return {}
-    return {}
-
-
-def _legacy_usage(response: Any) -> dict[str, int]:
-    usage = _model_dump(getattr(response, "usage", None))
-    prompt_details = _model_dump(usage.get("prompt_tokens_details"))
-    completion_details = _model_dump(usage.get("completion_tokens_details"))
-    return {
-        "input_tokens": int(usage.get("prompt_tokens") or 0),
-        "output_tokens": int(usage.get("completion_tokens") or 0),
-        "cache_read_tokens": int(prompt_details.get("cached_tokens") or 0),
-        "cache_write_tokens": 0,
-        "reasoning_tokens": int(completion_details.get("reasoning_tokens") or 0),
-    }
-
-
-def _legacy_final_text(response: Any) -> str:
-    choices = getattr(response, "choices", None)
-    if not choices:
-        return ""
-    message = getattr(choices[0], "message", None)
-    content = getattr(message, "content", None)
-    return content if isinstance(content, str) else ""
-
-
-# ==================== 公开 API ====================
-
-
-def create_logging_http_client() -> httpx.Client:
-    """创建带隐私保护日志记录的 HTTPX 客户端。"""
-
-    return httpx.Client(
-        event_hooks={
-            "request": [_on_request],
-            "response": [_on_response],
-        }
-    )
-
-
-def discard_pending_legacy_request() -> None:
-    """Forget the current thread's legacy request after an SDK/network failure."""
-
-    request_key = getattr(_legacy_request_context, "request_key", None)
-    if request_key is None:
-        return
-    with _log_lock:
-        _pending_requests.pop(request_key, None)
-    delattr(_legacy_request_context, "request_key")
-
-
-def log_llm_response(response: Any) -> None:
-    """Finalize one legacy SDK call without writing its raw response."""
-
-    request_key = getattr(_legacy_request_context, "request_key", None)
-    if request_key is None:
-        return
-    with _log_lock:
-        pending = _pending_requests.get(request_key)
-        if pending is None or not pending.get("completed"):
-            return
-        pending = _pending_requests.pop(request_key)
-    delattr(_legacy_request_context, "request_key")
-
-    entry = _legacy_base_entry(pending)
-    entry["status"] = "success"
-    entry["usage"] = _legacy_usage(response)
-    if pending.get("include_content"):
-        entry["response"] = {"text": _legacy_final_text(response)}
-    _write_log(entry)
-
-
 __all__ = [
     "LLMRequestLogHandle",
     "begin_gateway_request",
-    "create_logging_http_client",
-    "discard_pending_legacy_request",
     "finish_gateway_request",
     "is_env_api_key_override_active",
     "is_llm_content_logging_enabled",
     "log_gateway_cache_hit",
-    "log_llm_response",
     "set_env_api_key_override",
     "set_llm_content_logging",
 ]
