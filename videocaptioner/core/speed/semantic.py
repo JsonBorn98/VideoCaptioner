@@ -19,6 +19,7 @@ from typing import Any, Protocol
 import regex
 
 from ..llm import LLMGateway, LLMMessage, LLMModelProfile, LLMRequest
+from ..llm.utility import borrow_utility_gateway
 from ..prompts import get_prompt
 from .models import canonical_sha256
 from .validation import (
@@ -319,11 +320,8 @@ def _parse_review_response(response: Any) -> SemanticReviewResponse:
     )
 
 
-def _default_rewriter(
-    profile: LLMModelProfile, gateway: LLMGateway | None = None
-) -> SemanticRewriter:
+def _default_rewriter(profile: LLMModelProfile, runtime: LLMGateway) -> SemanticRewriter:
     prompt = get_prompt("optimize/speed_repair")
-    runtime = gateway or LLMGateway()
 
     def rewrite(request: SemanticRewriteRequest) -> SemanticRewriteResponse:
         result = runtime.complete(
@@ -346,11 +344,42 @@ def _default_rewriter(
     return rewrite
 
 
-def _default_reviewer(
-    profile: LLMModelProfile, gateway: LLMGateway | None = None
-) -> SemanticReviewer:
+def _default_reviewer(profile: LLMModelProfile, runtime: LLMGateway) -> SemanticReviewer:
     prompt = get_prompt("optimize/speed_repair")
-    runtime = gateway or LLMGateway()
+
+    def review(request: SemanticReviewRequest) -> SemanticReviewResponse:
+        payload = {
+            "schema_version": SEMANTIC_REPAIR_SCHEMA_VERSION,
+            "task": "review",
+            "window_id": request.window_id,
+            "content_is_untrusted_data": request.content_is_untrusted_data,
+            "source_segments": list(request.source_segments),
+            "candidate_segments": list(request.candidate_segments),
+            "deterministic_reasons": [
+                {
+                    "code": reason.code.value,
+                    "message": reason.message,
+                    "details": list(reason.details),
+                }
+                for reason in request.deterministic_reasons
+            ],
+        }
+        result = runtime.complete(
+            profile,
+            LLMRequest(
+                messages=(
+                    LLMMessage("system", prompt),
+                    LLMMessage("user", json.dumps(payload, ensure_ascii=False)),
+                ),
+                max_output_tokens=profile.max_output_tokens,
+                response_schema=REVIEW_RESPONSE_SCHEMA,
+                timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
+                metadata={"stage": "llm_semantic_review", "role": "utility"},
+            ),
+        )
+        return _parse_review_response(result.text)
+
+    return review
 
     def review(request: SemanticReviewRequest) -> SemanticReviewResponse:
         payload = {
@@ -553,8 +582,40 @@ def repair_semantic_windows(
     if not 0 <= minimum_literal_coverage <= 1:
         raise ValueError("minimum_literal_coverage must be between 0 and 1")
     review_profile = reviewer_profile or profile
-    rewrite_fn = rewriter or _default_rewriter(profile, gateway)
-    review_fn = reviewer or _default_reviewer(review_profile, gateway)
+    with borrow_utility_gateway(gateway) as runtime:
+        rewrite_fn = rewriter or _default_rewriter(profile, runtime)
+        review_fn = reviewer or _default_reviewer(review_profile, runtime)
+        return _repair_windows_with(
+            cues,
+            rewrite_fn=rewrite_fn,
+            review_fn=review_fn,
+            profile=profile,
+            review_profile=review_profile,
+            cache=cache,
+            window_size=window_size,
+            max_feedback_retries=max_feedback_retries,
+            minimum_literal_coverage=minimum_literal_coverage,
+        )
+
+
+def _repair_windows_with(
+    cues: Sequence[SemanticRepairCue],
+    *,
+    rewrite_fn: SemanticRewriter,
+    review_fn: SemanticReviewer,
+    profile: LLMModelProfile,
+    review_profile: LLMModelProfile,
+    cache: RewriteCache | None,
+    window_size: int,
+    max_feedback_retries: int,
+    minimum_literal_coverage: float,
+) -> SemanticRepairResult:
+    """Run the window repair transactions with bound implementations.
+
+    Extracted from :func:`repair_semantic_windows` so the gateway borrow can
+    span the whole loop (a self-built gateway is closed only after the last
+    window) without re-indenting the transaction body.
+    """
     output_by_id = {cue.cue_id: cue for cue in cues}
     records: list[SemanticRepairRecord] = []
 

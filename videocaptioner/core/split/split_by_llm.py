@@ -5,10 +5,10 @@ from typing import List, Optional, Tuple
 
 from ..llm import (
     LLMGateway,
-    LLMMessage,
     LLMModelProfile,
     LLMRequest,
     call_llm,
+    llm_messages_from_dicts,
 )
 from ..prompts import get_prompt
 from ..utils.logger import setup_logger
@@ -105,9 +105,7 @@ def _split_with_agent_loop(
             result_text = active_gateway.complete(
                 profile,
                 LLMRequest(
-                    messages=tuple(
-                        LLMMessage(str(m["role"]), str(m["content"])) for m in messages
-                    ),
+                    messages=llm_messages_from_dicts(messages),
                     timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
                     metadata={"stage": "llm_split", "role": "utility"},
                 ),

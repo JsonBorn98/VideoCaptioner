@@ -24,7 +24,8 @@ from videocaptioner.core.llm.request_options import (
     validate_structured_output_compatibility,
 )
 from videocaptioner.core.llm.utility import (
-    UTILITY_PROFILE_CARD,
+    MAIN_LLM_PROFILE_MISSING_MESSAGE,
+    UTILITY_PROFILE_UNRESOLVED_MESSAGE,
     UtilityProfileError,
     validate_utility_profile,
 )
@@ -83,10 +84,7 @@ def create_translator_from_config(
     }
     if is_llm_mode and config.main_llm_profile is None:
         # LLM 翻译不再静默回退到环境变量；无方案即带指引 fail-fast。
-        raise UtilityProfileError(
-            "未配置主翻译模型配置方案，无法使用 LLM 翻译；"
-            "请到翻译设置页选择或创建模型配置方案"
-        )
+        raise UtilityProfileError(MAIN_LLM_PROFILE_MISSING_MESSAGE)
 
     return TranslatorFactory.create_translator(
         translator_type=SERVICE_TO_TYPE[translator_service],
@@ -150,10 +148,7 @@ class SubtitleThread(QThread):
         """
         profile = subtitle_config.utility_llm_profile
         if profile is None:
-            raise UtilityProfileError(
-                "未找到可用的模型配置方案：主翻译方案与工具模型绑定均为空，"
-                f"请到{UTILITY_PROFILE_CARD}选择或创建模型配置方案"
-            )
+            raise UtilityProfileError(UTILITY_PROFILE_UNRESOLVED_MESSAGE)
         try:
             validate_utility_profile(profile)
         except UtilityProfileError as exc:
@@ -376,10 +371,7 @@ class SubtitleThread(QThread):
                 logger.info("正在优化字幕...")
                 self.finished_subtitle_length = 0
                 if subtitle_config.utility_llm_profile is None:
-                    raise UtilityProfileError(
-                        "未找到可用的模型配置方案：主翻译方案与工具模型绑定均为空，"
-                        f"请到{UTILITY_PROFILE_CARD}选择或创建模型配置方案"
-                    )
+                    raise UtilityProfileError(UTILITY_PROFILE_UNRESOLVED_MESSAGE)
                 optimizer = SubtitleOptimizer(
                     thread_num=subtitle_config.thread_num,
                     batch_num=subtitle_config.batch_size,
@@ -586,10 +578,7 @@ class RetranslateThread(QThread):
                 config.translator_service == TranslatorServiceEnum.OPENAI
                 and config.main_llm_profile is None
             ):
-                raise UtilityProfileError(
-                    "未配置主翻译模型配置方案，无法使用 LLM 翻译；"
-                    "请到翻译设置页选择或创建模型配置方案"
-                )
+                raise UtilityProfileError(MAIN_LLM_PROFILE_MISSING_MESSAGE)
 
             # 构建仅含选中行的 ASRData
             asr_data = ASRData.from_json(self.selected_data)

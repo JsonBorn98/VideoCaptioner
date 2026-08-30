@@ -9,10 +9,10 @@ import openai
 
 from videocaptioner.core.llm import (
     LLMGateway,
-    LLMMessage,
     LLMModelProfile,
     LLMRequest,
     call_llm,
+    llm_messages_from_dicts,
 )
 from videocaptioner.core.prompts import get_prompt
 from videocaptioner.core.translate.base import BaseTranslator, SubtitleProcessData, logger
@@ -223,10 +223,7 @@ class LLMTranslator(BaseTranslator):
             result = self.gateway.complete(
                 self.profile,
                 LLMRequest(
-                    messages=tuple(
-                        LLMMessage(str(message["role"]), str(message["content"]))
-                        for message in messages
-                    ),
+                    messages=llm_messages_from_dicts(messages),
                     max_output_tokens=self.profile.max_output_tokens,
                     metadata={"stage": "single_llm_translation", "role": "main"},
                 ),

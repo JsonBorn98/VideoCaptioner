@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Optional
 
+from .gateway import LLMGateway
 from .models import LLMModelProfile, OpenAIEndpoint
 from .profiles import LLMModelProfileStore, LLMProfileNotFoundError
 from .request_options import (
@@ -19,6 +22,17 @@ from .request_options import (
 )
 
 UTILITY_PROFILE_CARD = "翻译设置页·工具模型卡"
+
+# 解析器与 GUI 启动预检共用的「无可解析方案」报错文案（原为三处字面量复制）。
+UTILITY_PROFILE_UNRESOLVED_MESSAGE = (
+    "未找到可用的模型配置方案：主翻译方案与工具模型绑定均为空，"
+    f"请到{UTILITY_PROFILE_CARD}选择或创建模型配置方案"
+)
+# LLM 翻译缺主翻译方案时的报错文案（GUI 任务线程与重翻译线程共用）。
+MAIN_LLM_PROFILE_MISSING_MESSAGE = (
+    "未配置主翻译模型配置方案，无法使用 LLM 翻译；"
+    "请到翻译设置页选择或创建模型配置方案"
+)
 
 
 class UtilityProfileError(ValueError):
@@ -77,10 +91,7 @@ def resolve_utility_profile(
     if main is not None:
         return _stripped(main)
 
-    raise UtilityProfileError(
-        "未找到可用的模型配置方案：主翻译方案与工具模型绑定均为空，"
-        f"请到{UTILITY_PROFILE_CARD}选择或创建模型配置方案"
-    )
+    raise UtilityProfileError(UTILITY_PROFILE_UNRESOLVED_MESSAGE)
 
 
 def validate_utility_profile(profile: LLMModelProfile) -> None:
@@ -102,9 +113,34 @@ def validate_utility_profile(profile: LLMModelProfile) -> None:
     validate_structured_output_compatibility(profile)
 
 
+@contextmanager
+def borrow_utility_gateway(gateway: Optional[LLMGateway]) -> Iterator[LLMGateway]:
+    """Yield a gateway for one functional consumer call, closing it if owned.
+
+    Shared seam for the function-shaped utility consumers (dub rewrite,
+    compress, semantic repair). An injected gateway is used as-is and never
+    closed — the caller keeps its lifecycle. A missing one is constructed
+    lazily here and released on exit, so self-built gateways can never leak.
+    Long-lived constructor-held consumers (split/optimize, translation paths)
+    hold their gateway for the object's lifetime and stay out of this seam.
+    """
+
+    if gateway is not None:
+        yield gateway
+        return
+    runtime = LLMGateway()
+    try:
+        yield runtime
+    finally:
+        runtime.close()
+
+
 __all__ = [
+    "MAIN_LLM_PROFILE_MISSING_MESSAGE",
     "UTILITY_PROFILE_CARD",
+    "UTILITY_PROFILE_UNRESOLVED_MESSAGE",
     "UtilityProfileError",
+    "borrow_utility_gateway",
     "resolve_utility_profile",
     "validate_utility_profile",
 ]

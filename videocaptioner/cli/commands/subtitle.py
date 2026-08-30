@@ -6,7 +6,7 @@ from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
+from videocaptioner.cli.config import build_legacy_llm_profile, get
 
 # BCP 47 → TargetLanguage.value (Chinese label) mapping for internal use
 _LANG_MAP = {
@@ -221,8 +221,6 @@ def run(args: Namespace, config: dict) -> int:
     llm_model = get(config, "llm.model", "")
     # TODO(ticket-14): 临时桥——[llm] 三标量构 profile 喂 split/optimize 的新签名。
     # 14 号票把 CLI 的 LLM 配置面坍缩进方案库后一次性删除此桥。
-    from videocaptioner.cli.config import build_legacy_llm_profile
-
     utility_profile = (
         build_legacy_llm_profile(config)
         if (need_optimize or need_split) and llm_api_key and llm_model

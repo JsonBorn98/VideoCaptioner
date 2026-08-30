@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import videocaptioner.core.dubbing.rewriter as rewriter_module
+import videocaptioner.core.llm.utility as llm_utility_module
 from videocaptioner.core.dubbing.models import DubbingConfig, DubbingSegment
 from videocaptioner.core.dubbing.rewriter import (
     REWRITE_RESPONSE_SCHEMA,
@@ -163,7 +163,7 @@ def test_missing_gateway_is_constructed_lazily_and_closed(monkeypatch):
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setattr(rewriter_module, "LLMGateway", _OwnedGateway)
+    monkeypatch.setattr(llm_utility_module, "LLMGateway", _OwnedGateway)
     segment = _segment()
 
     rewrite_segments_if_needed([segment], _config(), _profile())

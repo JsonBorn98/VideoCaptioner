@@ -19,6 +19,7 @@ from .models import (
     LLMUsage,
     OpenAIEndpoint,
     ProviderDialect,
+    llm_messages_from_dicts,
     thaw_json_object,
 )
 from .profiles import LLMModelProfileStore
@@ -48,6 +49,7 @@ __all__ = [
     "OpenAIEndpoint",
     "ProviderDialect",
     "UtilityProfileError",
+    "llm_messages_from_dicts",
     "resolve_utility_profile",
     "thaw_json_object",
     "validate_utility_profile",

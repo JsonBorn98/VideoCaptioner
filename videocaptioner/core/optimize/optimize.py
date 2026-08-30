@@ -16,10 +16,10 @@ from ..asr.asr_data import ASRData, ASRDataSeg
 from ..entities import SubtitleProcessData
 from ..llm import (
     LLMGateway,
-    LLMMessage,
     LLMModelProfile,
     LLMRequest,
     call_llm,
+    llm_messages_from_dicts,
 )
 from ..prompts import get_prompt
 from ..split.alignment import SubtitleAligner
@@ -259,10 +259,7 @@ class SubtitleOptimizer:
                 result_text = self.gateway.complete(
                     self.profile,
                     LLMRequest(
-                        messages=tuple(
-                            LLMMessage(str(m["role"]), str(m["content"]))
-                            for m in messages
-                        ),
+                        messages=llm_messages_from_dicts(messages),
                         metadata={"stage": "llm_optimize", "role": "utility"},
                     ),
                 ).text

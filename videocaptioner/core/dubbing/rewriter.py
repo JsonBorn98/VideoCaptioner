@@ -4,7 +4,11 @@ import json
 from typing import Any, Iterable, Optional
 
 from videocaptioner.core.llm import LLMGateway, LLMMessage, LLMModelProfile, LLMRequest
-from videocaptioner.core.llm.utility import UTILITY_PROFILE_CARD, UtilityProfileError
+from videocaptioner.core.llm.utility import (
+    UTILITY_PROFILE_CARD,
+    UtilityProfileError,
+    borrow_utility_gateway,
+)
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.text_utils import is_mainly_cjk
 
@@ -103,13 +107,8 @@ def rewrite_segments_if_needed(
         response_schema=REWRITE_RESPONSE_SCHEMA,
         metadata={"stage": "llm_dub_rewrite", "role": "utility"},
     )
-    owns_gateway = gateway is None
-    runtime = gateway or LLMGateway()
-    try:
+    with borrow_utility_gateway(gateway) as runtime:
         result = runtime.complete(profile, request)
-    finally:
-        if owns_gateway:
-            runtime.close()
     parsed = json.loads(result.text)
     items = parsed.get("items", []) if isinstance(parsed, dict) else []
     rewritten = {

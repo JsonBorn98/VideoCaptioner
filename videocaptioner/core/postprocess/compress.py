@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import json_repair
 
 from ..llm import LLMGateway, LLMMessage, LLMRequest
+from ..llm.utility import borrow_utility_gateway
 from ..prompts import get_prompt
 from ..utils.logger import setup_logger
 from ..utils.text_utils import is_mainly_cjk
@@ -185,14 +186,14 @@ def compress_fast_subtitles(
         return asr_data, report
 
     stage = report.stage("compress")
-    runtime = gateway or LLMGateway()
-    try:
-        result = _agent_loop(candidates, cfg, profile, runtime)
-    except Exception as exc:  # noqa: BLE001 —— 单点失败不阻断
-        logger.warning("压缩重译调用失败，全部保留原文: %s", exc)
-        for cand in candidates:
-            report.compress_failures.append(cand["text"][:40])
-        return asr_data, report
+    with borrow_utility_gateway(gateway) as runtime:
+        try:
+            result = _agent_loop(candidates, cfg, profile, runtime)
+        except Exception as exc:  # noqa: BLE001 —— 单点失败不阻断
+            logger.warning("压缩重译调用失败，全部保留原文: %s", exc)
+            for cand in candidates:
+                report.compress_failures.append(cand["text"][:40])
+            return asr_data, report
 
     # 逐条校验后写回：合格则替换，否则保留原文并记入失败队列
     for idx, cand in enumerate(candidates, 1):
