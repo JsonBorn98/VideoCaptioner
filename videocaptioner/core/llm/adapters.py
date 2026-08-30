@@ -36,6 +36,11 @@ logger = setup_logger("llm_adapters")
 
 StructuredChatStrategy = Literal["json_schema", "tool", "json_object"]
 
+# Request deadline in seconds.  Every transport constructor defaults to this;
+# the OpenAI SDK's own default is Timeout(connect=5.0, read=600, ...).
+# LLMRequest.timeout overrides the adapter default for a single request.
+DEFAULT_TIMEOUT_SECONDS = 120.0
+
 # Every transport labels the structured contract it sends, as a schema name or as
 # a tool name.  Anthropic also matches the label when reading the reply back, so
 # keep one identifier for all of them.
@@ -297,9 +302,7 @@ def _rejects_forced_tool_request(exc: openai.APIStatusError) -> bool:
 
 
 class LLMAdapter(ABC):
-    # Request deadline in seconds. Every transport constructor defaults to 120
-    # (the OpenAI SDK's own default is Timeout(connect=5.0, read=600, ...));
-    # LLMRequest.timeout overrides the adapter default for a single request.
+    # Every transport constructor sets this; see DEFAULT_TIMEOUT_SECONDS.
     timeout: float
 
     def __init__(self, profile: LLMModelProfile) -> None:
@@ -358,7 +361,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         self,
         profile: LLMModelProfile,
         client: Any = None,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__(profile)
         self.timeout = timeout
@@ -672,7 +675,7 @@ class AnthropicMessagesAdapter(LLMAdapter):
         self,
         profile: LLMModelProfile,
         session: Optional[requests.Session] = None,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__(profile)
         self.session = session or requests.Session()
@@ -814,7 +817,7 @@ class GeminiAdapter(LLMAdapter):
         self,
         profile: LLMModelProfile,
         session: Optional[requests.Session] = None,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__(profile)
         self.session = session or requests.Session()

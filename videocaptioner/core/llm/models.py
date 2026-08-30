@@ -290,9 +290,11 @@ class LLMRequest:
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
         if self.timeout is not None:
-            if type(self.timeout) not in {int, float}:
-                raise ValueError("timeout must be a positive number or None")
-            if not math.isfinite(self.timeout) or self.timeout <= 0:
+            if (
+                type(self.timeout) not in {int, float}
+                or not math.isfinite(self.timeout)
+                or self.timeout <= 0
+            ):
                 raise ValueError("timeout must be a positive number or None")
         if self.request_options_override is not None:
             object.__setattr__(
