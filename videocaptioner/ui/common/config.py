@@ -22,7 +22,6 @@ from qfluentwidgets import (
 from videocaptioner.config import MODEL_PATH, SETTINGS_PATH, WORK_PATH
 from videocaptioner.core.entities import (
     FasterWhisperModelEnum,
-    LLMServiceEnum,
     SubtitleLayoutEnum,
     SubtitleRenderModeEnum,
     TranscribeLanguageEnum,
@@ -108,54 +107,8 @@ class SpeedProfileValidator(ConfigValidator):
 class Config(QConfig):
     """应用配置"""
 
-    # LLM配置
-    llm_service = OptionsConfigItem(
-        "LLM",
-        "LLMService",
-        LLMServiceEnum.OPENAI,
-        OptionsValidator(LLMServiceEnum),
-        EnumSerializer(LLMServiceEnum),
-    )
-
-    openai_model = ConfigItem("LLM", "OpenAI_Model", "gpt-4o-mini")
-    openai_api_key = ConfigItem("LLM", "OpenAI_API_Key", "")
-    openai_api_base = ConfigItem("LLM", "OpenAI_API_Base", "https://api.openai.com/v1")
-
-    silicon_cloud_model = ConfigItem("LLM", "SiliconCloud_Model", "gpt-4o-mini")
-    silicon_cloud_api_key = ConfigItem("LLM", "SiliconCloud_API_Key", "")
-    silicon_cloud_api_base = ConfigItem(
-        "LLM", "SiliconCloud_API_Base", "https://api.siliconflow.cn/v1"
-    )
-
-    deepseek_model = ConfigItem("LLM", "DeepSeek_Model", "deepseek-chat")
-    deepseek_api_key = ConfigItem("LLM", "DeepSeek_API_Key", "")
-    deepseek_api_base = ConfigItem(
-        "LLM", "DeepSeek_API_Base", "https://api.deepseek.com/v1"
-    )
-
-    ollama_model = ConfigItem("LLM", "Ollama_Model", "llama2")
-    ollama_api_key = ConfigItem("LLM", "Ollama_API_Key", "ollama")
-    ollama_api_base = ConfigItem("LLM", "Ollama_API_Base", "http://localhost:11434/v1")
-
-    lm_studio_model = ConfigItem("LLM", "LmStudio_Model", "qwen2.5:7b")
-    lm_studio_api_key = ConfigItem("LLM", "LmStudio_API_Key", "lmstudio")
-    lm_studio_api_base = ConfigItem(
-        "LLM", "LmStudio_API_Base", "http://localhost:1234/v1"
-    )
-
-    gemini_model = ConfigItem("LLM", "Gemini_Model", "gemini-pro")
-    gemini_api_key = ConfigItem("LLM", "Gemini_API_Key", "")
-    gemini_api_base = ConfigItem(
-        "LLM",
-        "Gemini_API_Base",
-        "https://generativelanguage.googleapis.com/v1beta/openai/",
-    )
-
-    chatglm_model = ConfigItem("LLM", "ChatGLM_Model", "glm-4")
-    chatglm_api_key = ConfigItem("LLM", "ChatGLM_API_Key", "")
-    chatglm_api_base = ConfigItem(
-        "LLM", "ChatGLM_API_Base", "https://open.bigmodel.cn/api/paas/v4"
-    )
+    # 旧「通用 LLM 工具配置」服务槽已整页退役：工具角色统一走模型配置方案体系
+    # （ADR-0014）；settings.json 里残留的 LLM.* 键值留盘成死数据，不迁移不清理。
     llm_content_logging = ConfigItem(
         "LLMLog", "ContentLogging", False, BoolValidator()
     )

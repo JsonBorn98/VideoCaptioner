@@ -499,7 +499,10 @@ def test_setting_interface_embeds_translation_widget_and_relabels_legacy_llm(tmp
     )
 
     assert widget.translationSettingsWidget is not None
-    assert widget.llmGroup.titleLabel.text() == "通用 LLM 工具配置"
+    # 旧「通用 LLM 工具配置」服务页整组退役，方案体系是唯一的 LLM 配置面。
+    assert not hasattr(widget, "llmGroup")
+    assert not hasattr(widget, "llmServiceCard")
+    assert not hasattr(widget, "checkLLMConnectionCard")
     assert widget.translationSettingsWidget.stackedWidget.count() == 3
     assert widget.llmContentLoggingCard is not None
     assert widget.translationSettingsWidget.height() > 200
