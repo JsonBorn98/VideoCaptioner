@@ -25,6 +25,9 @@ MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 _log_lock = threading.Lock()
 _pending_requests: Dict[int, Dict[str, Any]] = {}
 _content_logging_enabled = False
+# Set by the CLI when the env credential override swaps a resolved profile's
+# api_key; gateway log entries then record key_source="env_override".
+_env_api_key_override = False
 _legacy_request_context = threading.local()
 
 
@@ -47,6 +50,22 @@ def set_llm_content_logging(enabled: bool) -> None:
 
 def is_llm_content_logging_enabled() -> bool:
     return _content_logging_enabled
+
+
+def set_env_api_key_override(active: bool) -> None:
+    """Mark that resolved profiles carry an environment-injected credential.
+
+    Set by the CLI when VIDEOCAPTIONER_LLM_API_KEY swaps a resolved profile's
+    api_key; gateway log entries then record key_source="env_override" so the
+    injected key stays visible per request. Unset keeps the field absent.
+    """
+
+    global _env_api_key_override
+    _env_api_key_override = bool(active)
+
+
+def is_env_api_key_override_active() -> bool:
+    return _env_api_key_override
 
 
 # ==================== 日志写入 ====================
@@ -133,8 +152,13 @@ def _base_entry(profile: LLMModelProfile, request: LLMRequest) -> dict[str, Any]
         },
     }
     # Only emitted when set, so existing entries keep their shape (e.g. the CLI
-    # marks CI-injected credentials with key_source="env_override").
+    # marks CI-injected credentials with key_source="env_override"). Explicit
+    # request metadata wins; otherwise the process-wide env-override marker
+    # applies (set by the CLI when VIDEOCAPTIONER_LLM_API_KEY swaps a resolved
+    # profile's credential — see set_env_api_key_override).
     key_source = request.metadata.get("key_source")
+    if not key_source and _env_api_key_override:
+        key_source = "env_override"
     if key_source:
         entry["key_source"] = str(key_source)
     return entry
@@ -405,8 +429,10 @@ __all__ = [
     "create_logging_http_client",
     "discard_pending_legacy_request",
     "finish_gateway_request",
+    "is_env_api_key_override_active",
     "is_llm_content_logging_enabled",
     "log_gateway_cache_hit",
     "log_llm_response",
+    "set_env_api_key_override",
     "set_llm_content_logging",
 ]

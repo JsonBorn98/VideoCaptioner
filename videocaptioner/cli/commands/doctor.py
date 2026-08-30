@@ -25,6 +25,16 @@ class Check:
     fix: str = ""
 
 
+# Shared fix-hint prefix for the three [llm] id checks (the id list source).
+_PROFILE_LIST_HINT = "Run 'videocaptioner profile list' to see available ids, then "
+
+
+def _profile_id_fix(key: str, suffix: str = "") -> str:
+    """Build the fix hint for an [llm] profile-id check."""
+
+    return f"{_PROFILE_LIST_HINT}'videocaptioner config set {key} <id>'{suffix}"
+
+
 def run(args: Namespace, config: dict) -> int:
     checks = _run_checks(
         config,
@@ -222,8 +232,7 @@ def _check_subtitle(config: dict) -> list[Check]:
                 "llm.profile_id",
                 "error",
                 "llm.profile_id is not set",
-                "Run 'videocaptioner profile list' to see ids, then "
-                "'videocaptioner config set llm.profile_id <id>'",
+                _profile_id_fix("llm.profile_id"),
             )
         )
     elif profile_ids["main"] not in available:
@@ -232,8 +241,7 @@ def _check_subtitle(config: dict) -> list[Check]:
                 "llm.profile_id",
                 "error",
                 f"Profile '{profile_ids['main']}' does not exist in the store",
-                "Run 'videocaptioner profile list' to see available ids, then "
-                "'videocaptioner config set llm.profile_id <id>'",
+                _profile_id_fix("llm.profile_id"),
             )
         )
     # An empty utility binding is valid: it derives from the main profile. Only
@@ -245,10 +253,12 @@ def _check_subtitle(config: dict) -> list[Check]:
                 "llm.utility_profile_id",
                 "error",
                 f"Profile '{profile_ids['utility']}' does not exist in the store",
-                "Run 'videocaptioner profile list' to see available ids, then "
-                "'videocaptioner config set llm.utility_profile_id <id>'",
+                _profile_id_fix("llm.utility_profile_id"),
             )
         )
+    # enhanced_llm + a blank review id is a hard runtime failure (the resolver
+    # fail-fasts instead of falling back to the main profile), so it is an
+    # error with binding guidance, not a soft warning.
     if (
         translate
         and translation_mode == "enhanced_llm"
@@ -257,11 +267,9 @@ def _check_subtitle(config: dict) -> list[Check]:
         checks.append(
             Check(
                 "llm.review_profile_id",
-                "warn",
+                "error",
                 "enhanced_llm translation requires a review profile and none is set",
-                "Run 'videocaptioner profile list' to see ids, then "
-                "'videocaptioner config set llm.review_profile_id <id>' "
-                "(or use single_llm mode)",
+                _profile_id_fix("llm.review_profile_id", " (or use single_llm mode)"),
             )
         )
     elif (
@@ -274,8 +282,7 @@ def _check_subtitle(config: dict) -> list[Check]:
                 "llm.review_profile_id",
                 "error",
                 f"Profile '{profile_ids['review']}' does not exist in the store",
-                "Run 'videocaptioner profile list' to see available ids, then "
-                "'videocaptioner config set llm.review_profile_id <id>'",
+                _profile_id_fix("llm.review_profile_id"),
             )
         )
     return checks

@@ -55,6 +55,12 @@ def _display_usage_value(value: object) -> str:
     return "不可用" if value is None else str(value)
 
 
+def _profile_model(profile) -> str:
+    """Model name for a resolved profile, or "" when the role resolves none."""
+
+    return profile.model if profile is not None else ""
+
+
 def _resolve_target_language(code: str):
     """Resolve a BCP 47 code to a TargetLanguage enum value (case-insensitive)."""
     from videocaptioner.core.translate.types import TargetLanguage
@@ -305,7 +311,7 @@ def run(args: Namespace, config: dict) -> int:
 
             splitter = SubtitleSplitter(
                 thread_num=thread_num,
-                model=utility_profile.model if utility_profile else "",
+                model=_profile_model(utility_profile),
                 profile=utility_profile,
                 max_word_count_cjk=get(config, "subtitle.max_word_count_cjk", 18),
                 max_word_count_english=get(config, "subtitle.max_word_count_english", 12),
@@ -330,7 +336,7 @@ def run(args: Namespace, config: dict) -> int:
             optimizer = SubtitleOptimizer(
                 thread_num=thread_num,
                 batch_num=batch_size,
-                model=utility_profile.model if utility_profile else "",
+                model=_profile_model(utility_profile),
                 profile=utility_profile,
                 custom_prompt=get(config, "subtitle.optimization_prompt", ""),
                 update_callback=callback,
@@ -465,7 +471,7 @@ def run(args: Namespace, config: dict) -> int:
                     batch_num=batch_size,
                     source_language=source_language,
                     target_language=target_language,
-                    model=profile.model if profile is not None else "",
+                    model=_profile_model(profile),
                     custom_prompt=custom_prompt,
                     is_reflect=need_reflect,
                     update_callback=callback,

@@ -56,37 +56,36 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
     _add_llm_profile_flags(group)
 
 
-def _add_llm_profile_flags(group) -> None:
+def _add_llm_profile_flags(group, *, hidden: bool = False) -> None:
     """Add the three model-profile selection flags to one argument group."""
+    help_text = argparse.SUPPRESS if hidden else None
+
     group.add_argument(
         "--llm-profile",
         dest="llm_profile",
         metavar="ID",
-        help="Model profile id for the main translation model (see 'videocaptioner profile list')",
+        help=help_text
+        or "Model profile id for the main translation model (see 'videocaptioner profile list')",
     )
     group.add_argument(
         "--review-profile",
         dest="review_profile",
         metavar="ID",
-        help="Model profile id for the enhanced-LLM review model",
+        help=help_text or "Model profile id for the enhanced-LLM review model",
     )
     group.add_argument(
         "--utility-profile",
         dest="utility_profile",
         metavar="ID",
-        help="Model profile id for utility roles (split/optimize/postprocess/dub rewrite); default derives from the main profile",
+        help=help_text
+        or "Model profile id for utility roles (split/optimize/postprocess/dub rewrite); "
+        "default derives from the main profile",
     )
 
 
 def _add_hidden_llm_options(parser: argparse.ArgumentParser) -> None:
     """Keep the model-profile selectors available without task-first help noise."""
-    group = parser.add_argument_group("LLM options")
-    group.add_argument("--llm-profile", dest="llm_profile", metavar="ID",
-                       help=argparse.SUPPRESS)
-    group.add_argument("--review-profile", dest="review_profile", metavar="ID",
-                       help=argparse.SUPPRESS)
-    group.add_argument("--utility-profile", dest="utility_profile", metavar="ID",
-                       help=argparse.SUPPRESS)
+    _add_llm_profile_flags(parser.add_argument_group("LLM options"), hidden=True)
 
 
 def _add_output_options(parser: argparse.ArgumentParser) -> None:
@@ -1369,7 +1368,8 @@ def _run_style(args: argparse.Namespace) -> int:
 def _run_profile(args: argparse.Namespace) -> int:
     from videocaptioner.cli.commands.profile_cmd import run
 
-    return run(args)
+    config = _load_config(args)
+    return run(args, config)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

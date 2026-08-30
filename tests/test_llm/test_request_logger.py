@@ -101,6 +101,70 @@ def test_gateway_logs_concurrent_attempts_without_cross_pairing(tmp_path, monkey
     assert "echo" not in log_path.read_text("utf-8")
 
 
+def test_env_api_key_override_marks_entries_with_key_source(tmp_path, monkeypatch):
+    # The CLI's VIDEOCAPTIONER_LLM_API_KEY override flips this marker; every
+    # gateway entry of the process then records key_source="env_override".
+    log_path = tmp_path / "env-key.jsonl"
+    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
+    profile = _profile()
+    gateway = LLMGateway(adapter_factory=lambda _profile: _OutOfOrderAdapter(profile))
+
+    request_logger.set_env_api_key_override(True)
+    try:
+        gateway.complete(
+            profile,
+            LLMRequest(
+                messages=(LLMMessage("user", "ci subtitle"),),
+                metadata={"stage": "llm_optimize", "role": "utility"},
+            ),
+        )
+    finally:
+        request_logger.set_env_api_key_override(False)
+
+    entry = json.loads(log_path.read_text("utf-8"))
+    assert entry["key_source"] == "env_override"
+
+
+def test_entries_without_the_env_override_marker_keep_their_shape(tmp_path, monkeypatch):
+    log_path = tmp_path / "no-env-key.jsonl"
+    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
+    profile = _profile()
+    gateway = LLMGateway(adapter_factory=lambda _profile: _OutOfOrderAdapter(profile))
+
+    gateway.complete(
+        profile,
+        LLMRequest(
+            messages=(LLMMessage("user", "plain subtitle"),),
+            metadata={"stage": "llm_optimize", "role": "utility"},
+        ),
+    )
+
+    entry = json.loads(log_path.read_text("utf-8"))
+    assert "key_source" not in entry
+
+
+def test_request_metadata_key_source_wins_over_the_process_marker(tmp_path, monkeypatch):
+    log_path = tmp_path / "explicit-key.jsonl"
+    monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
+    profile = _profile()
+    gateway = LLMGateway(adapter_factory=lambda _profile: _OutOfOrderAdapter(profile))
+
+    request_logger.set_env_api_key_override(True)
+    try:
+        gateway.complete(
+            profile,
+            LLMRequest(
+                messages=(LLMMessage("user", "explicit subtitle"),),
+                metadata={"stage": "translation", "role": "main", "key_source": "store"},
+            ),
+        )
+    finally:
+        request_logger.set_env_api_key_override(False)
+
+    entry = json.loads(log_path.read_text("utf-8"))
+    assert entry["key_source"] == "store"
+
+
 def test_gateway_logs_each_retry_with_its_own_attempt_number(tmp_path, monkeypatch):
     class RetryOnceAdapter(LLMAdapter):
         def __init__(self, profile):

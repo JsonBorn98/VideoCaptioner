@@ -306,7 +306,7 @@ def build_config(
     # The CLI is agent-facing: silently ignored LLM keys are a debugging hell,
     # so leftover pre-profile keys get a one-time stderr warning plus migration
     # guidance. The data itself is tolerated, not migrated (dead data, no fail).
-    _warn_legacy_llm_keys(file_config, env_config, cli_overrides or {})
+    _warn_legacy_llm_keys(file_config, cli_overrides or {}, os.environ)
     return config
 
 
@@ -349,29 +349,26 @@ def _legacy_llm_key_hits(env: Mapping[str, str]) -> list[str]:
     return sorted(set(hits))
 
 
-def _warn_legacy_llm_keys(file_config: dict, env_config: dict, cli_overrides: dict) -> None:
+def _warn_legacy_llm_keys(
+    file_config: dict, cli_overrides: dict, env: Mapping[str, str]
+) -> None:
     """Warn once when pre-profile LLM keys are still present in any layer."""
 
-    layers = (
-        ("config file", file_config, _LEGACY_LLM_FILE_KEYS, False),
-        # Env layer: report what is actually set, not what ENV_MAP mapped.
-        ("environment", env_config, _LEGACY_LLM_FILE_KEYS, True),
-        ("command line", cli_overrides, _LEGACY_LLM_FILE_KEYS, False),
-    )
+    # File/CLI layers report the known legacy TOML keys they still carry; the
+    # env layer reports the legacy variable names actually set (not what
+    # ENV_MAP mapped, which no longer covers them).
     keys: list[tuple[str, list[str]]] = []
-    for source, layer, file_keys, is_env in layers:
-        if is_env:
-            hits = _legacy_llm_key_hits(os.environ)
-            if hits:
-                keys.append((source, hits))
-            continue
+    for source, layer in (("config file", file_config), ("command line", cli_overrides)):
         hits = [
             key
-            for key in file_keys
+            for key in _LEGACY_LLM_FILE_KEYS
             if _get_nested(layer, key, _MISSING) is not _MISSING
         ]
         if hits:
             keys.append((source, hits))
+    env_hits = _legacy_llm_key_hits(env)
+    if env_hits:
+        keys.append(("environment", env_hits))
     if not keys:
         return
 
@@ -431,6 +428,12 @@ def llm_profile_ids(config: dict) -> dict[str, str]:
     }
 
 
+def mask_credential(value: str) -> str:
+    """Mask a credential for terminal display (shared by config/profile output)."""
+
+    return f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "****"
+
+
 def apply_env_api_key_override(profile):
     """Swap only the credential of a resolved profile from the environment.
 
@@ -440,10 +443,17 @@ def apply_env_api_key_override(profile):
     resulting profile's api_key also feeds the gateway cache key, so an
     overridden key never reuses another key's cached responses. Returns the
     profile unchanged when the variable is unset or blank.
+
+    The override also flips the gateway request-log marker, so every entry of
+    this process records key_source="env_override" (the marker lives with the
+    other request-log display state in request_logger).
     """
     from dataclasses import replace
 
+    from videocaptioner.core.llm.request_logger import set_env_api_key_override
+
     key = os.environ.get(LLM_API_KEY_ENV_OVERRIDE, "").strip()
+    set_env_api_key_override(bool(key))
     return replace(profile, api_key=key) if key else profile
 
 
@@ -522,7 +532,9 @@ def resolve_cli_utility_profile(config: dict, store=None):
     ids (which the resolver already validated) with the store path, the TOML
     keys, and the available profile ids. Resolution semantics are unchanged —
     an independent utility binding wins, then the main profile derives, and a
-    lost binding is an error rather than a silent fallback.
+    lost binding is an error rather than a silent fallback. Like the main and
+    review roles, the resolved profile passes through the env credential
+    override (VIDEOCAPTIONER_LLM_API_KEY) so all three roles behave alike.
     """
 
     from videocaptioner.core.llm.utility import UtilityProfileError, resolve_utility_profile
@@ -530,7 +542,7 @@ def resolve_cli_utility_profile(config: dict, store=None):
     ids = llm_profile_ids(config)
     store = _profile_store() if store is None else store
     try:
-        return resolve_utility_profile(store, ids["main"], ids["utility"])
+        profile = resolve_utility_profile(store, ids["main"], ids["utility"])
     except UtilityProfileError:
         if ids["utility"]:
             reason = (
@@ -550,6 +562,7 @@ def resolve_cli_utility_profile(config: dict, store=None):
                 "profile to resolve."
             )
         raise ValueError(_llm_profile_guidance(reason)) from None
+    return apply_env_api_key_override(profile)
 
 
 def _llm_profile_guidance(reason: str) -> str:
@@ -669,8 +682,7 @@ def format_config(config: dict, indent: int = 0) -> str:
             lines.append(format_config(value, indent + 1))
         elif isinstance(value, str) and ("key" in key or "token" in key) and value:
             # Mask sensitive values
-            masked = f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "****"
-            lines.append(f"{prefix}{key} = {masked}")
+            lines.append(f"{prefix}{key} = {mask_credential(value)}")
         else:
             lines.append(f"{prefix}{key} = {value}")
     return "\n".join(lines)

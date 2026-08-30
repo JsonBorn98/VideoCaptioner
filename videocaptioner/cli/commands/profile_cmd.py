@@ -9,9 +9,11 @@ from argparse import Namespace
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
+from videocaptioner.cli.config import _profile_store, mask_credential, save_config_value
 
 
-def run(args: Namespace) -> int:
+def run(args: Namespace, config: dict) -> int:
+    del config  # The profile store is read directly; kept for the run(args, config) shape.
     action = getattr(args, "profile_action", None)
 
     if action == "list":
@@ -25,20 +27,8 @@ def run(args: Namespace) -> int:
     return EXIT.USAGE_ERROR
 
 
-def _store():
-    from videocaptioner.core.llm.profiles import LLMModelProfileStore
-
-    return LLMModelProfileStore()
-
-
-def _mask(value: str) -> str:
-    """Mask a credential the same way 'config get' masks stored keys."""
-
-    return f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "****"
-
-
 def _list() -> int:
-    profiles = _store().list()
+    profiles = _profile_store().list()
     if not profiles:
         from videocaptioner.core.llm.profiles import DEFAULT_LLM_PROFILES_PATH
 
@@ -67,7 +57,7 @@ def _show(profile_id: str) -> int:
     )
 
     try:
-        profile = _store().get(profile_id)
+        profile = _profile_store().get(profile_id)
     except LLMProfileNotFoundError:
         output.error(f"Model profile '{profile_id}' does not exist.")
         _hint_available_ids()
@@ -78,18 +68,17 @@ def _show(profile_id: str) -> int:
     for key in sorted(values):
         value = values[key]
         if key == "api_key":
-            value = _mask(str(value)) if str(value) else "(empty)"
+            value = mask_credential(str(value)) if str(value) else "(empty)"
         print(f"  {key}: {value}")
     print(f"\nRaw profile file (api_key in clear text): {DEFAULT_LLM_PROFILES_PATH}")
     return EXIT.SUCCESS
 
 
 def _set_default(profile_id: str) -> int:
-    from videocaptioner.cli.config import save_config_value
     from videocaptioner.core.llm.profiles import LLMProfileNotFoundError
 
     try:
-        _store().get(profile_id)
+        _profile_store().get(profile_id)
     except LLMProfileNotFoundError:
         output.error(f"Model profile '{profile_id}' does not exist.")
         _hint_available_ids()
@@ -106,7 +95,7 @@ def _set_default(profile_id: str) -> int:
 
 
 def _hint_available_ids() -> None:
-    profiles = _store().list()
+    profiles = _profile_store().list()
     if profiles:
         output.hint(
             "Available profile ids: " + ", ".join(item.profile_id for item in profiles)

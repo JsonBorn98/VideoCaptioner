@@ -695,14 +695,16 @@ class ProfileSelectionCard(SettingCard):
         content: str,
         parent=None,
         *,
-        unbound_label: str = "未配置",
-        unbound_content: str = "未配置，相关 LLM 翻译模式不可用",
+        unbound_label: Optional[str] = None,
+        unbound_content: Optional[str] = None,
     ):
         super().__init__(FIF.ROBOT, title, content, parent)
         self.configItem = config_item
         self.configuredContent = content
-        self.unboundLabel = unbound_label
-        self.unboundContent = unbound_content
+        # Callers pass already-translated text (tr at the literal site, so Qt's
+        # translation tools can extract it); None means the card's own default.
+        self.unboundLabel = unbound_label or self.tr("未配置")
+        self.unboundContent = unbound_content or self.tr("未配置，相关 LLM 翻译模式不可用")
         self.comboBox = ComboBox(self)
         self.comboBox.setMinimumWidth(170)
         self.createButton = PushButton(self.tr("新增"), self)
@@ -738,7 +740,7 @@ class ProfileSelectionCard(SettingCard):
         self.comboBox.blockSignals(True)
         try:
             self.comboBox.clear()
-            self.comboBox.addItem(self.tr(self.unboundLabel), userData="")
+            self.comboBox.addItem(self.unboundLabel, userData="")
             for profile in profiles:
                 self.comboBox.addItem(profile.name, userData=profile.profile_id)
             selected_index = self.comboBox.findData(selected_id)
@@ -752,7 +754,7 @@ class ProfileSelectionCard(SettingCard):
         self.editButton.setEnabled(configured)
         self.deleteButton.setEnabled(configured)
         self.contentLabel.setText(
-            self.configuredContent if configured else self.tr(self.unboundContent)
+            self.configuredContent if configured else self.unboundContent
         )
 
     def selectedProfileId(self) -> str:
@@ -843,7 +845,7 @@ class TranslationSettingWidget(QWidget):
             self.tr("工具模型"),
             self.tr("断句、字幕优化、后处理与配音改写使用绑定的独立方案"),
             self,
-            unbound_label="跟随主翻译模型",
+            unbound_label=self.tr("跟随主翻译模型"),
             unbound_content=self.tr("跟随主翻译模型；主翻译方案未配置时相关功能不可用"),
         )
         self._buildPages()
@@ -1011,8 +1013,8 @@ class TranslationSettingWidget(QWidget):
         content: str,
         parent,
         *,
-        unbound_label: str = "未配置",
-        unbound_content: str = "未配置，相关 LLM 翻译模式不可用",
+        unbound_label: Optional[str] = None,
+        unbound_content: Optional[str] = None,
     ) -> ProfileSelectionCard:
         card = ProfileSelectionCard(
             config_item,

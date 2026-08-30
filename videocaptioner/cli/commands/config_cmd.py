@@ -17,6 +17,7 @@ from videocaptioner.cli.config import (
     format_config,
     get,
     load_config_file,
+    mask_credential,
     save_config_value,
 )
 
@@ -70,7 +71,7 @@ def _set(key: str, value: str) -> int:
         output.error(str(e))
         return EXIT.GENERAL_ERROR
     # Mask sensitive values in success message
-    display = f"{value[:4]}...{value[-4:]}" if ("key" in key) and len(value) > 8 else value
+    display = mask_credential(value) if ("key" in key) and len(value) > 8 else value
     output.success(f"{key} = {display}")
     return EXIT.SUCCESS
 
@@ -84,8 +85,7 @@ def _get(key: str, config: dict) -> int:
     if isinstance(value, dict):
         print(format_config(value))
     elif isinstance(value, str) and ("key" in key or "token" in key) and value:
-        masked = f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "****"
-        print(masked)
+        print(mask_credential(value))
     else:
         print(value)
     return EXIT.SUCCESS

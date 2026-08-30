@@ -410,6 +410,54 @@ class TestLLMProfileResolution:
 
         assert resolve_main_llm_profile(config).api_key == "main-secret"
 
+    def test_env_api_key_overrides_the_utility_role_credential(self, profile_store, monkeypatch):
+        # The utility role passes through the same env credential override as
+        # the main and review roles (spec: only the credential is swapped).
+        from videocaptioner.cli.config import resolve_cli_utility_profile
+
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_API_KEY", "ci-injected-key")
+        config = build_config(
+            cli_overrides={
+                "llm": {"profile_id": "main-profile", "utility_profile_id": "utility-profile"}
+            }
+        )
+
+        profile = resolve_cli_utility_profile(config)
+
+        assert profile.api_key == "ci-injected-key"
+        assert profile.base_url == "https://utility.test/v1"
+        assert profile.model == "utility-model"
+        assert profile.profile_id == "utility-profile"
+
+    def test_blank_env_api_key_keeps_the_utility_stored_credential(
+        self, profile_store, monkeypatch
+    ):
+        from videocaptioner.cli.config import resolve_cli_utility_profile
+
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_API_KEY", "  ")
+        config = build_config(cli_overrides={"llm": {"profile_id": "main-profile"}})
+
+        assert resolve_cli_utility_profile(config).api_key == "main-secret"
+
+    def test_env_override_marks_the_gateway_request_log(self, profile_store, monkeypatch):
+        # Story 18: with the key injected, request logs record where it came
+        # from (key_source=env_override); without it the field stays absent.
+        from videocaptioner.cli.config import resolve_main_llm_profile
+        from videocaptioner.core.llm import request_logger
+
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_API_KEY", "ci-injected-key")
+        config = build_config(cli_overrides={"llm": {"profile_id": "main-profile"}})
+
+        try:
+            assert resolve_main_llm_profile(config).api_key == "ci-injected-key"
+            assert request_logger.is_env_api_key_override_active() is True
+        finally:
+            request_logger.set_env_api_key_override(False)
+
+        monkeypatch.delenv("VIDEOCAPTIONER_LLM_API_KEY")
+        assert resolve_main_llm_profile(config).api_key == "main-secret"
+        assert request_logger.is_env_api_key_override_active() is False
+
     def test_empty_api_key_in_store_is_not_a_validation_error(self, profile_store):
         # Keyless local services store an empty api_key; existence is what matters.
         from videocaptioner.cli.config import resolve_main_llm_profile

@@ -904,3 +904,81 @@ class TestDoctorParser:
         out = capsys.readouterr().out
         assert "--json" in out
         assert "--check-api" in out
+
+
+class TestDoctorSubtitleChecks:
+    """doctor's [llm] id checks close over the resolver's runtime semantics."""
+
+    @staticmethod
+    def _seed_store(tmp_path, monkeypatch):
+        from videocaptioner.core.llm.models import (
+            LLMModelProfile,
+            LLMTransport,
+            ProviderDialect,
+        )
+        from videocaptioner.core.llm.profiles import LLMModelProfileStore
+
+        store_path = tmp_path / "llm_model_profiles.json"
+        store = LLMModelProfileStore(store_path)
+        for profile_id, model in (
+            ("main-profile", "main-model"),
+            ("review-profile", "review-model"),
+        ):
+            store.save(
+                LLMModelProfile(
+                    profile_id=profile_id,
+                    name=profile_id,
+                    transport=LLMTransport.OPENAI_COMPATIBLE,
+                    dialect=ProviderDialect.GENERIC,
+                    base_url=f"https://{profile_id}.test/v1",
+                    api_key="secret",
+                    model=model,
+                    work_context_tokens=16_384,
+                )
+            )
+        monkeypatch.setattr(
+            "videocaptioner.core.llm.profiles.DEFAULT_LLM_PROFILES_PATH", store_path
+        )
+        return store
+
+    @staticmethod
+    def _llm_checks(config):
+        from videocaptioner.cli.commands.doctor import _check_subtitle
+
+        return [check for check in _check_subtitle(config) if check.name.startswith("llm.")]
+
+    def test_enhanced_mode_without_review_id_is_an_error(self, tmp_path, monkeypatch):
+        # enhanced_llm + a blank review id fail-fasts at runtime; doctor must
+        # surface it as an error with binding guidance, not a soft warning.
+        self._seed_store(tmp_path, monkeypatch)
+        config = build_config(
+            cli_overrides={
+                "llm": {"profile_id": "main-profile"},
+                "subtitle": {"translate": True},
+                "translate": {"mode": "enhanced_llm"},
+            }
+        )
+
+        checks = self._llm_checks(config)
+        review = next(check for check in checks if check.name == "llm.review_profile_id")
+
+        assert review.status == "error"
+        assert "config set llm.review_profile_id" in review.fix
+
+    def test_enhanced_mode_with_review_id_passes(self, tmp_path, monkeypatch):
+        self._seed_store(tmp_path, monkeypatch)
+        config = build_config(
+            cli_overrides={
+                "llm": {
+                    "profile_id": "main-profile",
+                    "review_profile_id": "review-profile",
+                },
+                "subtitle": {"translate": True},
+                "translate": {"mode": "enhanced_llm"},
+            }
+        )
+
+        assert not [
+            check for check in self._llm_checks(config) if check.status != "ok"
+        ]
+
