@@ -1,16 +1,39 @@
 """Optional text shortening for time-constrained dubbing."""
 
 import json
-from typing import Iterable
+from typing import Any, Iterable, Optional
 
-from openai import OpenAI
-
+from videocaptioner.core.llm import LLMGateway, LLMMessage, LLMModelProfile, LLMRequest
+from videocaptioner.core.llm.utility import UTILITY_PROFILE_CARD, UtilityProfileError
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.text_utils import is_mainly_cjk
 
 from .models import DubbingConfig, DubbingSegment
 
 logger = setup_logger("dubbing.rewriter")
+
+# Formal JSON Schema for the rewrite response {items:[{index,text}]}. Providers
+# with native structured output enforce the shape; the generic dialect keeps
+# bare JSON mode, where the prompt already restates it.
+REWRITE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "text": {"type": "string"},
+                },
+                "required": ["index", "text"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
 
 
 def should_rewrite(segment: DubbingSegment, threshold: float) -> bool:
@@ -26,19 +49,32 @@ def should_rewrite(segment: DubbingSegment, threshold: float) -> bool:
     return required > comfortable * threshold
 
 
-def rewrite_segments_if_needed(segments: Iterable[DubbingSegment], config: DubbingConfig) -> None:
-    """Shorten long subtitle lines with an OpenAI-compatible LLM."""
+def rewrite_segments_if_needed(
+    segments: Iterable[DubbingSegment],
+    config: DubbingConfig,
+    profile: Optional[LLMModelProfile] = None,
+    *,
+    gateway: Optional[LLMGateway] = None,
+) -> None:
+    """Shorten long subtitle lines with the utility-role model profile.
+
+    The profile and gateway follow the shared consumer seam: callers inject a
+    resolved model profile (and, in tests, a fake gateway); a missing gateway
+    is constructed lazily and released again when this call owns it.
+    """
     if not config.rewrite_too_long:
         return
-    if not (config.llm_api_key and config.llm_api_base and config.llm_model):
-        raise ValueError("Duration rewrite requires llm.api_key, llm.api_base, and llm.model")
+    if profile is None:
+        raise UtilityProfileError(
+            "配音改写已开启但未提供模型配置方案，"
+            f"请到{UTILITY_PROFILE_CARD}选择或创建模型配置方案"
+        )
 
     targets = [seg for seg in segments if should_rewrite(seg, config.rewrite_threshold)]
     if not targets:
         return
 
     logger.info("dubbing rewrite: %d segment(s) over duration threshold", len(targets))
-    client = OpenAI(api_key=config.llm_api_key, base_url=config.llm_api_base)
     payload = [
         {
             "index": seg.index,
@@ -48,34 +84,37 @@ def rewrite_segments_if_needed(segments: Iterable[DubbingSegment], config: Dubbi
         }
         for seg in targets
     ]
-    messages = [
-        {
-            "role": "system",
-            "content": (
+    request = LLMRequest(
+        messages=(
+            LLMMessage(
+                "system",
                 "You shorten subtitle dubbing lines while preserving meaning, language, "
-                "speaker intent, names, numbers, and key facts. Return only JSON."
+                "speaker intent, names, numbers, and key facts. Return only JSON.",
             ),
-        },
-        {
-            "role": "user",
-            "content": (
+            LLMMessage(
+                "user",
                 "Rewrite only lines that are too long for the duration. Keep one output "
                 "per input index. Make each line natural to speak and shorter. JSON format: "
                 '{"items":[{"index":1,"text":"..."}]}\n\n'
-                f"{json.dumps({'items': payload}, ensure_ascii=False)}"
+                f"{json.dumps({'items': payload}, ensure_ascii=False)}",
             ),
-        },
-    ]
-    response = client.chat.completions.create(
-        model=config.llm_model,
-        messages=messages,  # type: ignore[arg-type]
-        response_format={"type": "json_object"},
+        ),
+        max_output_tokens=profile.max_output_tokens,
+        response_schema=REWRITE_RESPONSE_SCHEMA,
+        metadata={"stage": "llm_dub_rewrite", "role": "utility"},
     )
-    content = response.choices[0].message.content or "{}"
-    result = json.loads(content)
+    owns_gateway = gateway is None
+    runtime = gateway or LLMGateway()
+    try:
+        result = runtime.complete(profile, request)
+    finally:
+        if owns_gateway:
+            runtime.close()
+    parsed = json.loads(result.text)
+    items = parsed.get("items", []) if isinstance(parsed, dict) else []
     rewritten = {
         int(item["index"]): str(item["text"]).strip()
-        for item in result.get("items", [])
+        for item in items
         if isinstance(item, dict) and item.get("text")
     }
     for seg in targets:
