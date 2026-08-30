@@ -7,7 +7,7 @@ import pytest
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli.commands.process import _resolve_final_output_path
-from videocaptioner.cli.config import build_config
+from videocaptioner.cli.config import build_config, load_config_file
 from videocaptioner.cli.main import _build_cli_overrides, build_parser, main
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import TranscribeModelEnum
@@ -337,42 +337,77 @@ class TestSubtitleParser:
         assert "--speed-optimize" not in out
         assert "--normalize-quotes" not in out
 
-    def test_translation_role_options_build_partial_overrides(self):
+    def test_llm_profile_flags_build_partial_overrides(self):
         args = build_parser().parse_args(
             [
                 "subtitle",
                 "input.srt",
-                "--main-llm-endpoint",
-                "responses",
-                "--main-llm-max-output-tokens",
-                "2048",
-                "--main-llm-request-options-json",
-                '{"reasoning":{"effort":"high"}}',
-                "--review-llm-max-output-tokens",
-                "auto",
-                "--review-llm-options",
-                "{}",
+                "--llm-profile",
+                "main-profile",
+                "--review-profile",
+                "review-profile",
             ]
         )
 
         overrides = _build_cli_overrides(args)
 
-        assert overrides["translate"]["llm"]["main"] == {
-            "openai_endpoint": "responses",
-            "max_output_tokens": "2048",
-            "request_options_json": '{"reasoning":{"effort":"high"}}',
-        }
-        assert overrides["translate"]["llm"]["review"] == {
-            "max_output_tokens": "auto",
-            "request_options_json": "{}",
+        assert overrides["llm"] == {
+            "profile_id": "main-profile",
+            "review_profile_id": "review-profile",
         }
 
-    def test_translation_role_flags_reject_unknown_endpoint(self):
-        with pytest.raises(SystemExit) as exc:
-            build_parser().parse_args(
-                ["subtitle", "input.srt", "--main-llm-endpoint", "auto"]
-            )
-        assert exc.value.code == 2
+    def test_llm_profile_flags_override_env_and_toml(self, monkeypatch):
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_PROFILE_ID", "env-profile")
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_REVIEW_PROFILE_ID", "env-review")
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_UTILITY_PROFILE_ID", "env-utility")
+        args = build_parser().parse_args(
+            [
+                "subtitle",
+                "input.srt",
+                "--llm-profile",
+                "flag-profile",
+                "--utility-profile",
+                "flag-utility",
+            ]
+        )
+
+        config = build_config(cli_overrides=_build_cli_overrides(args))
+
+        # Flag > env > TOML falls out of the layer merge.
+        assert config["llm"]["profile_id"] == "flag-profile"
+        assert config["llm"]["review_profile_id"] == "env-review"
+        assert config["llm"]["utility_profile_id"] == "flag-utility"
+
+    def test_llm_env_profile_ids_override_toml(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            '[llm]\nprofile_id = "toml-profile"\nutility_profile_id = "toml-utility"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("VIDEOCAPTIONER_LLM_PROFILE_ID", "env-profile")
+
+        config = build_config(config_path=config_file)
+
+        assert config["llm"]["profile_id"] == "env-profile"
+        assert config["llm"]["utility_profile_id"] == "toml-utility"
+
+    def test_postprocess_profile_flag_still_selects_the_template(self):
+        args = build_parser().parse_args(["postprocess", "input.srt", "--profile", "smooth"])
+
+        overrides = _build_cli_overrides(args)
+
+        assert overrides["postprocess"]["profile"] == "smooth"
+        assert "llm" not in overrides
+
+    def test_postprocess_llm_profile_flag_is_distinct_from_template(self):
+        args = build_parser().parse_args(
+            ["postprocess", "input.srt", "--profile", "smooth", "--llm-profile", "main"]
+        )
+
+        overrides = _build_cli_overrides(args)
+
+        assert overrides["postprocess"]["profile"] == "smooth"
+        assert overrides["llm"]["profile_id"] == "main"
 
 
 class TestPostprocessParser:
@@ -709,8 +744,11 @@ class TestConfigParser:
         result = main(["config", "show"])
         assert result == EXIT.SUCCESS
         out = capsys.readouterr().out
-        assert "llm:" in out
-        assert "api_key" in out
+        llm_section = out.split("llm:", 1)[1].split("whisper_api:", 1)[0]
+        assert "profile_id" in llm_section
+        assert "review_profile_id" in llm_section
+        assert "utility_profile_id" in llm_section
+        assert "api_key" not in llm_section
 
     def test_path(self, capsys):
         result = main(["config", "path"])
@@ -725,6 +763,131 @@ class TestConfigParser:
         assert "[dubbing]" in out
         assert "edge-cn-female" in out
         assert "audio_mode" in out
+
+
+class TestProfileParser:
+    """Top-level 'videocaptioner profile' command group behavior."""
+
+    @staticmethod
+    def _seed_store(tmp_path, monkeypatch):
+        from videocaptioner.core.llm.models import LLMModelProfile, LLMTransport, ProviderDialect
+        from videocaptioner.core.llm.profiles import LLMModelProfileStore
+
+        store_path = tmp_path / "llm_model_profiles.json"
+        store = LLMModelProfileStore(store_path)
+        store.save(
+            LLMModelProfile(
+                profile_id="main-profile",
+                name="Main Profile",
+                transport=LLMTransport.OPENAI_COMPATIBLE,
+                dialect=ProviderDialect.GENERIC,
+                base_url="https://main.test/v1",
+                api_key="sk-main-secret-12345",
+                model="main-model",
+                work_context_tokens=16_384,
+            )
+        )
+        monkeypatch.setattr(
+            "videocaptioner.core.llm.profiles.DEFAULT_LLM_PROFILES_PATH", store_path
+        )
+        return store
+
+    def test_no_action(self):
+        assert main(["profile"]) == EXIT.USAGE_ERROR
+
+    def test_unknown_action(self):
+        with pytest.raises(SystemExit) as exc:
+            main(["profile", "destroy"])
+        assert exc.value.code == 2
+
+    def test_list(self, tmp_path, monkeypatch, capsys):
+        self._seed_store(tmp_path, monkeypatch)
+
+        result = main(["profile", "list"])
+
+        out = capsys.readouterr().out
+        assert result == EXIT.SUCCESS
+        assert "main-profile" in out
+        assert "main-model" in out
+
+    def test_list_empty_store(self, tmp_path, monkeypatch, capsys):
+        store_path = tmp_path / "llm_model_profiles.json"
+        monkeypatch.setattr(
+            "videocaptioner.core.llm.profiles.DEFAULT_LLM_PROFILES_PATH", store_path
+        )
+
+        result = main(["profile", "list"])
+
+        assert result == EXIT.GENERAL_ERROR
+        assert "No model profiles found" in capsys.readouterr().err
+
+    def test_show_masks_the_api_key(self, tmp_path, monkeypatch, capsys):
+        self._seed_store(tmp_path, monkeypatch)
+
+        result = main(["profile", "show", "main-profile"])
+
+        out = capsys.readouterr().out
+        assert result == EXIT.SUCCESS
+        assert "main-profile" in out
+        assert "sk-main-secret-12345" not in out
+        assert "sk-m" in out  # masked form keeps a short prefix
+        assert "api_key" in out
+
+    def test_show_hints_the_raw_store_file(self, tmp_path, monkeypatch, capsys):
+        self._seed_store(tmp_path, monkeypatch)
+
+        main(["profile", "show", "main-profile"])
+
+        assert "llm_model_profiles.json" in capsys.readouterr().out
+
+    def test_show_unknown_id_lists_available_ids(self, tmp_path, monkeypatch, capsys):
+        self._seed_store(tmp_path, monkeypatch)
+
+        result = main(["profile", "show", "ghost"])
+
+        assert result == EXIT.GENERAL_ERROR
+        err = capsys.readouterr().err
+        assert "does not exist" in err
+        assert "main-profile" in err
+
+    def test_set_default_writes_llm_profile_id(self, tmp_path, monkeypatch, capsys):
+        self._seed_store(tmp_path, monkeypatch)
+        config_file = tmp_path / "config.toml"
+        monkeypatch.setattr(
+            "videocaptioner.cli.config.CONFIG_FILE", config_file
+        )
+        monkeypatch.setattr(
+            "videocaptioner.cli.commands.config_cmd.CONFIG_FILE", config_file
+        )
+        monkeypatch.setattr(
+            "videocaptioner.cli.config.CONFIG_DIR", tmp_path
+        )
+
+        result = main(["profile", "set-default", "main-profile"])
+
+        assert result == EXIT.SUCCESS
+        stored = load_config_file(config_file)
+        assert stored["llm"]["profile_id"] == "main-profile"
+        assert "llm.profile_id = main-profile" in capsys.readouterr().err
+
+    def test_set_default_rejects_unknown_id(self, tmp_path, monkeypatch, capsys):
+        self._seed_store(tmp_path, monkeypatch)
+
+        result = main(["profile", "set-default", "ghost"])
+
+        assert result == EXIT.GENERAL_ERROR
+        err = capsys.readouterr().err
+        assert "does not exist" in err
+        assert "Available profile ids: main-profile" in err
+
+    def test_help_lists_actions(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["profile", "--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "list" in out
+        assert "show" in out
+        assert "set-default" in out
 
 
 class TestDoctorParser:
