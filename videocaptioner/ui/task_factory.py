@@ -27,6 +27,7 @@ from videocaptioner.core.llm.profiles import (
     LLMModelProfileStore,
     LLMProfileNotFoundError,
 )
+from videocaptioner.core.llm.utility import resolve_utility_profile
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
 from videocaptioner.core.postprocess.profiles import PostprocessProfileStore
@@ -525,19 +526,6 @@ class TaskFactory:
         profile_store = PostprocessProfileStore()
         config = config_snapshot or profile_store.resolve_config(resolved_profile_id)
 
-        model_items = {
-            LLMServiceEnum.OPENAI: cfg.openai_model,
-            LLMServiceEnum.SILICON_CLOUD: cfg.silicon_cloud_model,
-            LLMServiceEnum.DEEPSEEK: cfg.deepseek_model,
-            LLMServiceEnum.OLLAMA: cfg.ollama_model,
-            LLMServiceEnum.LM_STUDIO: cfg.lm_studio_model,
-            LLMServiceEnum.GEMINI: cfg.gemini_model,
-            LLMServiceEnum.CHATGLM: cfg.chatglm_model,
-        }
-        model_item = model_items.get(cfg.llm_service.value)
-        if config.llm_model is None:
-            config = replace(config, llm_model=model_item.value if model_item else None)
-
         source = Path(subtitle_path)
         clean_name = source.name
         for prefix in ("【初版字幕】", "【后处理字幕】", "【字幕】", "【样式字幕】"):
@@ -552,6 +540,20 @@ class TaskFactory:
             if enabled_item is not None
             else True
         )
+
+        # 工具角色（压缩重译 / 语义修复）的模型与连接统一从模型配置方案体系解析：
+        # 独立工具绑定优先，无绑定则从主翻译方案派生（见 core/llm/utility.py）。
+        # 只对启用且确实会发起工具 LLM 请求的任务 fail-fast。
+        if resolved_enabled and config.needs_utility_llm() and config.utility_llm_profile is None:
+            config = replace(
+                config,
+                utility_llm_profile=resolve_utility_profile(
+                    LLMModelProfileStore(),
+                    cfg.main_llm_profile_id.value,
+                    cfg.utility_llm_profile_id.value,
+                ),
+            )
+
         if layout_mode is None:
             if need_next_task:
                 layout_mode = {

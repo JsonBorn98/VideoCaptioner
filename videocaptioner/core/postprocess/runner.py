@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,7 +12,7 @@ from ..entities import SubtitleLayoutEnum
 from ..subtitle.io import clone_subtitle_data, import_subtitle, save_canonical_srt
 from ..utils.logger import setup_logger
 from . import run_post_stage, run_pre_stage
-from .config import PostprocessConfig
+from .config import PostprocessConfig, config_payload
 from .models import PostprocessLayoutMode, PostprocessResult, PostprocessTask
 from .profiles import PostprocessProfileStore
 from .report import QualityReport
@@ -167,8 +167,11 @@ def run_postprocess_task(
     config = task.config_snapshot
     if config is None:
         config = (profile_store or PostprocessProfileStore()).resolve_config(task.profile_id)
-    # Freeze mutable config fields even when the caller supplied a live object.
-    config = PostprocessConfig(**asdict(config))
+    # Freeze mutable config fields even when the caller supplied a live object, while
+    # keeping the runtime-injected utility profile (an object reference, not payload).
+    injected = config.utility_llm_profile
+    config = PostprocessConfig(**config_payload(config))
+    config.utility_llm_profile = injected
     task.config_snapshot = config
     evidence = tuple(timing_windows) if config.precise_timing else ()
     # Visible outcome of 媒体增强对齐 / 对齐时间轴 (see CONTEXT.md).  None = not

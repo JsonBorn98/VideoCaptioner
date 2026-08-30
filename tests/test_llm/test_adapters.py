@@ -20,6 +20,10 @@ from videocaptioner.core.llm.models import (
     OpenAIEndpoint,
     ProviderDialect,
 )
+from videocaptioner.core.speed.semantic import (
+    REVIEW_RESPONSE_SCHEMA,
+    REWRITE_RESPONSE_SCHEMA,
+)
 
 
 def _profile(
@@ -293,6 +297,37 @@ def test_chat_unidentified_dialect_keeps_portable_json_mode():
     assert completions.kwargs["response_format"] == {"type": "json_object"}
     assert "tools" not in completions.kwargs
     assert "tool_choice" not in completions.kwargs
+    assert result.text == '{"translation":"ok"}'
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param(REWRITE_RESPONSE_SCHEMA, id="semantic-rewrite"),
+        pytest.param(REVIEW_RESPONSE_SCHEMA, id="semantic-review"),
+    ],
+)
+def test_semantic_schemas_on_generic_dialect_match_legacy_json_object_body(schema):
+    """语义修复两套响应形状挂载后，generic 档请求体与迁移前逐字节等价、零回归。
+
+    迁移前语义修复直接传 ``response_format={"type": "json_object"}`` 给
+    ``client.chat.completions.create``；迁移后同 schema 经 generic 档仍只发
+    这一个结构化控制，不携带 json_schema 定义、不携带 tools/tool_choice。
+    """
+
+    completions = _OpenAICompletions()
+    request = LLMRequest(
+        messages=(LLMMessage("system", "rules"), LLMMessage("user", "window")),
+        response_schema=schema,
+        timeout=60.0,
+    )
+
+    result = _chat_adapter(ProviderDialect.GENERIC, completions).complete(request)
+
+    assert completions.kwargs["response_format"] == {"type": "json_object"}
+    assert "tools" not in completions.kwargs
+    assert "tool_choice" not in completions.kwargs
+    assert "json_schema" not in completions.kwargs["response_format"]
     assert result.text == '{"translation":"ok"}'
 
 

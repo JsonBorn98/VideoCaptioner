@@ -7,8 +7,10 @@ CLI (`cli/config.py` DEFAULTS)、GUI (`ui/common/config.py` qconfig) 与
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, List, Literal, Optional
+
+from ..llm.models import LLMModelProfile
 
 
 @dataclass
@@ -75,8 +77,11 @@ class PostprocessConfig:
     # ---- LLM 压缩重译（P2）----
     compress_fast_subtitles: bool = False
     """对超硬限的中文行做局部压缩重译（需 LLM）。"""
-    llm_model: Optional[str] = None
-    """压缩重译使用的 LLM 模型名（由调用方从各自配置注入）。"""
+    # 运行期注入项（不落盘）：压缩与语义修复共用的工具角色模型配置方案。
+    utility_llm_profile: Optional[LLMModelProfile] = field(
+        default=None, repr=False, compare=False
+    )
+    """压缩重译与语义修复使用的模型配置方案（由调用方从各自配置注入，不参与持久化）。"""
 
     # ---- 统一字幕速度优化 ----
     speed_optimize: bool = False
@@ -205,6 +210,17 @@ class PostprocessConfig:
         """是否需要执行审计（审计开关 / QA 报告 / 压缩重译任一开启）。"""
         return self.audit_reading_speed or self.qa_report or self.compress_fast_subtitles
 
+    def needs_utility_llm(self) -> bool:
+        """本配置是否会发起工具角色 LLM 请求（压缩重译 / 语义修复）。
+
+        语义修复只在 apply 模式运行（analyze 是整段只读 dry run，不发请求）。
+        """
+        return self.compress_fast_subtitles or (
+            self.speed_optimize
+            and self.speed_mode == "apply"
+            and self.speed_semantic_repair
+        )
+
     def any_enabled(self) -> bool:
         """是否有任何非默认后处理需要执行（用于快速短路）。"""
         return (
@@ -216,3 +232,16 @@ class PostprocessConfig:
             or self.audit_enabled()
             or self.speed_optimize
         )
+
+
+# 运行期注入字段：任务装配时塞进来的 LLMModelProfile 对象引用，绝不进入
+# 持久化载荷（PostprocessProfileStore 的 JSON）——方案由模型配置方案库拥有。
+RUNTIME_INJECTED_FIELDS = frozenset({"utility_llm_profile"})
+
+
+def config_payload(config: PostprocessConfig) -> dict[str, Any]:
+    """返回可持久化的字段字典（深拷贝、剥离运行期注入对象）。"""
+    # 剥离必须在 asdict 之前：注入的 profile 对象持有 MappingProxyType 等不可
+    # deepcopy 的冻结字段，asdict 深拷贝它们会直接抛 TypeError。
+    stripped = replace(config, **{name: None for name in RUNTIME_INJECTED_FIELDS})
+    return asdict(stripped)

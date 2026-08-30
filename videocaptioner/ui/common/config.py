@@ -177,6 +177,7 @@ class Config(QConfig):
     )
     main_llm_profile_id = ConfigItem("Translate", "MainLLMProfileId", "")
     review_llm_profile_id = ConfigItem("Translate", "ReviewLLMProfileId", "")
+    utility_llm_profile_id = ConfigItem("Translate", "UtilityLLMProfileId", "")
     main_translation_prompt = ConfigItem(
         "Translate", "MainTranslationPrompt", DEFAULT_MAIN_TRANSLATION_PROMPT
     )
