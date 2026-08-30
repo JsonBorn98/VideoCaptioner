@@ -8,7 +8,6 @@ from videocaptioner.config import MODEL_PATH
 from videocaptioner.core.entities import (
     LANGUAGES,
     FullProcessTask,
-    LLMServiceEnum,
     SubtitleConfig,
     SubtitleExportPolicy,
     SubtitleLayoutEnum,
