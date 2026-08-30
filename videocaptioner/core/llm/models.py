@@ -282,10 +282,18 @@ class LLMRequest:
     cacheable_system_prefix: bool = True
     metadata: Mapping[str, str] = field(default_factory=dict)
     request_options_override: Optional[Mapping[str, JSONValue]] = None
+    # None means "use the adapter's constructor default"; a value overrides the
+    # adapter's request deadline for this request alone.
+    timeout: Optional[float] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        if self.timeout is not None:
+            if type(self.timeout) not in {int, float}:
+                raise ValueError("timeout must be a positive number or None")
+            if not math.isfinite(self.timeout) or self.timeout <= 0:
+                raise ValueError("timeout must be a positive number or None")
         if self.request_options_override is not None:
             object.__setattr__(
                 self,

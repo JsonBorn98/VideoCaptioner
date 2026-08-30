@@ -297,6 +297,11 @@ def _rejects_forced_tool_request(exc: openai.APIStatusError) -> bool:
 
 
 class LLMAdapter(ABC):
+    # Request deadline in seconds. Every transport constructor defaults to 120
+    # (the OpenAI SDK's own default is Timeout(connect=5.0, read=600, ...));
+    # LLMRequest.timeout overrides the adapter default for a single request.
+    timeout: float
+
     def __init__(self, profile: LLMModelProfile) -> None:
         self.profile = profile
 
@@ -306,6 +311,13 @@ class LLMAdapter(ABC):
 
     def close(self) -> None:
         """Release provider resources owned by this adapter, if any."""
+
+    def _effective_timeout(self, request: LLMRequest) -> float:
+        """Return this request's deadline, falling back to the adapter default."""
+
+        if request.timeout is not None:
+            return request.timeout
+        return self.timeout
 
     def _effective_profile(self, request: LLMRequest) -> LLMModelProfile:
         if request.request_options_override is None:
@@ -342,11 +354,18 @@ class LLMAdapter(ABC):
 
 
 class OpenAICompatibleAdapter(LLMAdapter):
-    def __init__(self, profile: LLMModelProfile, client: Any = None) -> None:
+    def __init__(
+        self,
+        profile: LLMModelProfile,
+        client: Any = None,
+        timeout: float = 120.0,
+    ) -> None:
         super().__init__(profile)
+        self.timeout = timeout
         self.client = client or openai.OpenAI(
             base_url=profile.base_url,
             api_key=profile.api_key or "not-required",
+            timeout=timeout,
         )
 
     def complete(self, request: LLMRequest) -> LLMResult:
@@ -416,6 +435,13 @@ class OpenAICompatibleAdapter(LLMAdapter):
             if self.profile.max_output_tokens is not None
             else request.max_output_tokens
         )
+
+    def _transport_options(self, request: LLMRequest) -> dict[str, Any]:
+        """Per-request transport options that never enter the HTTP body."""
+
+        if request.timeout is None:
+            return {}
+        return {"timeout": request.timeout}
 
     def _structured_chat_strategy(self) -> StructuredChatStrategy:
         """Pick how to transmit ``response_schema`` on the chat completions API.
@@ -506,6 +532,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             if name in final_body
         }
         kwargs["extra_body"] = final_body
+        kwargs.update(self._transport_options(request))
         response = self.client.chat.completions.create(**kwargs)
 
         choices = _read_attr(response, "choices", []) or []
@@ -584,6 +611,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             if name in final_body
         }
         kwargs["extra_body"] = final_body
+        kwargs.update(self._transport_options(request))
         response = self.client.responses.create(**kwargs)
 
         status_value = _diagnostic_text(_read_attr(response, "status"))
@@ -704,7 +732,7 @@ class AnthropicMessagesAdapter(LLMAdapter):
                     "content-type": "application/json",
                 },
                 json=payload,
-                timeout=self.timeout,
+                timeout=self._effective_timeout(request),
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise LLMCallError(
@@ -903,7 +931,7 @@ class GeminiAdapter(LLMAdapter):
                 url,
                 params={"key": self.profile.api_key},
                 json=payload,
-                timeout=self.timeout,
+                timeout=self._effective_timeout(request),
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise LLMCallError(
@@ -925,7 +953,7 @@ class GeminiAdapter(LLMAdapter):
                     url,
                     params={"key": self.profile.api_key},
                     json=payload,
-                    timeout=self.timeout,
+                    timeout=self._effective_timeout(request),
                 )
             except (requests.Timeout, requests.ConnectionError) as exc:
                 raise LLMCallError(

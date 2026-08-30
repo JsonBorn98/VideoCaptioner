@@ -81,6 +81,38 @@ class _OpenAICompletions:
         )
 
 
+def test_openai_compatible_self_constructed_client_defaults_to_120s_timeout():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        base_url="https://api.openai.test/v1",
+    )
+
+    adapter = OpenAICompatibleAdapter(profile)
+
+    try:
+        # The SDK default is Timeout(connect=5.0, read=600, ...); the adapter
+        # must tighten the request deadline to 120s like the native transports.
+        assert adapter.client.timeout == 120.0
+    finally:
+        adapter.client.close()
+
+
+def test_openai_compatible_custom_timeout_is_preserved():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        base_url="https://api.openai.test/v1",
+    )
+
+    adapter = OpenAICompatibleAdapter(profile, timeout=30.0)
+
+    try:
+        assert adapter.client.timeout == 30.0
+    finally:
+        adapter.client.close()
+
+
 def test_openai_compatible_maps_request_and_usage():
     completions = _OpenAICompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -602,6 +634,123 @@ def test_request_options_override_is_request_scoped_and_preserves_profile():
     }
     assert profile.request_options["reasoning_effort"] == "high"
     assert profile.request_options["metadata"]["mode"] == "profile"
+
+
+def test_llm_request_rejects_invalid_timeouts():
+    for invalid in (0, -1, -0.5, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="timeout"):
+            LLMRequest(messages=(LLMMessage("user", "hello"),), timeout=invalid)
+
+
+def test_anthropic_request_timeout_overrides_constructor_default():
+    session = _Session(_Response({"content": [{"type": "text", "text": "ok"}]}))
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+        ),
+        session=session,
+        timeout=17,
+    )
+
+    adapter.complete(
+        LLMRequest(messages=(LLMMessage("user", "Hi"),), timeout=30.0)
+    )
+    adapter.complete(LLMRequest(messages=(LLMMessage("user", "Hi"),)))
+
+    assert session.calls[0][1]["timeout"] == 30.0
+    assert session.calls[1][1]["timeout"] == 17
+
+
+def test_gemini_request_timeout_overrides_constructor_default():
+    session = _Session(
+        _Response({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
+    )
+    adapter = GeminiAdapter(
+        _profile(
+            LLMTransport.GEMINI,
+            ProviderDialect.GEMINI,
+            base_url="https://generativelanguage.test/v1beta",
+        ),
+        session=session,
+        timeout=19,
+    )
+
+    adapter.complete(
+        LLMRequest(messages=(LLMMessage("user", "Hi"),), timeout=60.0)
+    )
+    adapter.complete(LLMRequest(messages=(LLMMessage("user", "Hi"),)))
+
+    assert session.calls[0][1]["timeout"] == 60.0
+    assert session.calls[1][1]["timeout"] == 19
+
+
+def test_openai_chat_request_timeout_overrides_client_default():
+    calls = []
+
+    class RecordingCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="ok"), finish_reason="stop"
+                    )
+                ],
+                usage=None,
+            )
+
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.OPENAI,
+            base_url="https://api.openai.test/v1",
+        ),
+        client=SimpleNamespace(
+            chat=SimpleNamespace(completions=RecordingCompletions())
+        ),
+    )
+
+    adapter.complete(
+        LLMRequest(messages=(LLMMessage("user", "Translate this"),), timeout=30.0)
+    )
+    adapter.complete(LLMRequest(messages=(LLMMessage("user", "Translate this"),)))
+
+    # The request deadline is a transport option, never part of the HTTP body.
+    assert calls[0]["timeout"] == 30.0
+    assert calls[0]["extra_body"] == {"store": False}
+    assert "timeout" not in calls[1]
+
+
+def test_openai_responses_request_timeout_overrides_client_default():
+    responses = _OpenAIResponses(
+        SimpleNamespace(
+            status="completed",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[SimpleNamespace(type="output_text", text="ok")],
+                )
+            ],
+        )
+    )
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.OPENAI,
+            base_url="https://api.openai.test/v1",
+            openai_endpoint=OpenAIEndpoint.RESPONSES,
+        ),
+        client=SimpleNamespace(responses=responses),
+    )
+    request = LLMRequest(
+        messages=(LLMMessage("user", "Translate this"),), timeout=45.0
+    )
+
+    adapter.complete(request)
+
+    assert responses.kwargs["timeout"] == 45.0
 
 
 def test_adapter_reports_protected_request_option_as_non_retryable_configuration():
