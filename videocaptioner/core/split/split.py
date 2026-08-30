@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Union
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+from videocaptioner.core.llm import LLMGateway, LLMModelProfile
 from videocaptioner.core.split.split_by_llm import split_by_llm
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.text_utils import (
@@ -128,18 +129,24 @@ class SubtitleSplitter:
         max_word_count_english: int = MAX_WORD_COUNT_ENGLISH,
         use_llm: bool = True,
         progress_callback: Callable[[int, int], None] | None = None,
+        profile: "LLMModelProfile | None" = None,
+        gateway: "LLMGateway | None" = None,
     ):
         """初始化分割器
 
         Args:
             thread_num: 并发线程数
-            model: LLM模型名称
+            model: LLM模型名称（仅 profile 缺失的旧路径使用）
             max_word_count_cjk: CJK最大字数
             max_word_count_english: 英文最大单词数
             use_llm: 是否使用LLM进行语义断句。False时只使用本地规则快速合并。
+            profile: 工具角色模型配置方案；存在时请求一律经 LLMGateway 发出
+            gateway: 可注入的 gateway 实例（None 且 profile 存在时惰性构造）
         """
         self.thread_num = thread_num
         self.model = model
+        self.profile = profile
+        self.gateway = gateway or (LLMGateway() if profile is not None else None)
         self.max_word_count_cjk = max_word_count_cjk
         self.max_word_count_english = max_word_count_english
         self.use_llm = use_llm
@@ -359,6 +366,8 @@ class SubtitleSplitter:
             model=self.model,
             max_word_count_cjk=self.max_word_count_cjk,
             max_word_count_english=self.max_word_count_english,
+            profile=self.profile,
+            gateway=self.gateway,
         )
 
         return self._merge_segments_based_on_sentences(segments, sentences)

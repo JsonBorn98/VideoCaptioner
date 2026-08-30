@@ -21,38 +21,28 @@ from videocaptioner.core.entities import (
     SubtitleTask,
     TranslatorServiceEnum,
 )
-from videocaptioner.core.llm.check_llm import get_available_models
-from videocaptioner.core.translate.types import TargetLanguage
+from videocaptioner.core.llm.models import (
+    LLMModelProfile,
+    LLMTransport,
+    ProviderDialect,
+)
+from videocaptioner.core.translate.types import TargetLanguage, TranslationMode
 from videocaptioner.ui.thread.subtitle_thread import SubtitleThread
 
 # Load environment variables
 
 
-def get_test_model():
-    """Get appropriate model for testing.
-
-    Returns model from OPENAI_MODEL env var, or auto-detects from API.
-    """
-    # Check if model specified in environment
-    env_model = os.getenv("OPENAI_MODEL")
-    if env_model:
-        return env_model
-
-    # Auto-detect from API
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        return "gpt-4o-mini"  # Default fallback
-
-    try:
-        models = get_available_models(base_url, api_key)
-        if models:
-            return models[0]  # Return first available model
-    except Exception:
-        pass
-
-    return "gpt-4o-mini"  # Default fallback
+def get_test_profile() -> LLMModelProfile:
+    """Build the utility-role model profile used by split/optimize tests."""
+    return LLMModelProfile(
+        profile_id="test-utility",
+        name="Test utility profile",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        api_key=os.getenv("OPENAI_API_KEY") or "test-api-key",
+        model=os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
+    )
 
 
 def run_thread_with_timeout(thread, timeout_ms=60000):
@@ -188,9 +178,7 @@ class TestSubtitleThreadSplit:
         source.save(str(input_path), layout=SubtitleLayoutEnum.ONLY_ORIGINAL)
         config = base_config
         config.need_split = True
-        config.llm_model = get_test_model()
-        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        config.api_key = os.getenv("OPENAI_API_KEY")
+        config.utility_llm_profile = get_test_profile()
         task = SubtitleTask(
             subtitle_path=str(input_path),
             subtitle_config=config,
@@ -234,9 +222,7 @@ class TestSubtitleThreadSplit:
         config.need_split = True
         config.max_word_count_cjk = 15
         config.max_word_count_english = 20
-        config.llm_model = get_test_model()
-        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        config.api_key = os.getenv("OPENAI_API_KEY")
+        config.utility_llm_profile = get_test_profile()
 
         output_path = os.path.join(output_dir, "split_sentence.srt")
         task = SubtitleTask(
@@ -256,9 +242,7 @@ class TestSubtitleThreadSplit:
         """Test semantic-based splitting (using mock LLM)."""
         config = base_config
         config.need_split = True
-        config.llm_model = get_test_model()
-        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        config.api_key = os.getenv("OPENAI_API_KEY")
+        config.utility_llm_profile = get_test_profile()
 
         output_path = os.path.join(output_dir, "split_semantic.srt")
         task = SubtitleTask(
@@ -280,9 +264,7 @@ class TestSubtitleThreadOptimize:
         """Test LLM-based subtitle optimization (using mock LLM)."""
         config = base_config
         config.need_optimize = True
-        config.llm_model = get_test_model()
-        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        config.api_key = os.getenv("OPENAI_API_KEY")
+        config.utility_llm_profile = get_test_profile()
 
         output_path = os.path.join(output_dir, "optimize.srt")
         task = SubtitleTask(
@@ -349,10 +331,9 @@ class TestSubtitleThreadTranslate:
         config = base_config
         config.need_translate = True
         config.translator_service = TranslatorServiceEnum.OPENAI
+        config.translation_mode = TranslationMode.SINGLE_LLM
         config.target_language = TargetLanguage.SIMPLIFIED_CHINESE
-        config.llm_model = get_test_model()
-        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        config.api_key = os.getenv("OPENAI_API_KEY")
+        config.main_llm_profile = get_test_profile()
 
         output_path = os.path.join(output_dir, "translate_llm.srt")
         task = SubtitleTask(
@@ -377,9 +358,7 @@ class TestSubtitleThreadFullPipeline:
         config.need_translate = True
         config.translator_service = TranslatorServiceEnum.GOOGLE
         config.target_language = TargetLanguage.SIMPLIFIED_CHINESE
-        config.llm_model = get_test_model()
-        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        config.api_key = os.getenv("OPENAI_API_KEY")
+        config.utility_llm_profile = get_test_profile()
 
         output_path = os.path.join(output_dir, "split_translate.srt")
         task = SubtitleTask(
@@ -399,10 +378,10 @@ class TestSubtitleThreadFullPipeline:
         config.need_optimize = True
         config.need_translate = True
         config.translator_service = TranslatorServiceEnum.OPENAI
+        config.translation_mode = TranslationMode.SINGLE_LLM
         config.target_language = TargetLanguage.JAPANESE
-        config.llm_model = get_test_model()
-        config.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        config.api_key = os.getenv("OPENAI_API_KEY")
+        config.utility_llm_profile = get_test_profile()
+        config.main_llm_profile = get_test_profile()
 
         output_path = os.path.join(output_dir, "optimize_translate.srt")
         task = SubtitleTask(

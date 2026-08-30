@@ -27,6 +27,7 @@ from videocaptioner.core.llm.profiles import (
     LLMModelProfileStore,
     LLMProfileNotFoundError,
 )
+from videocaptioner.core.llm.utility import resolve_utility_profile
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
 from videocaptioner.core.postprocess.profiles import PostprocessProfileStore
@@ -374,50 +375,23 @@ class TaskFactory:
             else None
         )
 
-        # 根据当前选择的LLM服务获取对应的兼容配置
-        current_service = cfg.llm_service.value
-        if current_service == LLMServiceEnum.OPENAI:
-            base_url = cfg.openai_api_base.value
-            api_key = cfg.openai_api_key.value
-            llm_model = cfg.openai_model.value
-        elif current_service == LLMServiceEnum.SILICON_CLOUD:
-            base_url = cfg.silicon_cloud_api_base.value
-            api_key = cfg.silicon_cloud_api_key.value
-            llm_model = cfg.silicon_cloud_model.value
-        elif current_service == LLMServiceEnum.DEEPSEEK:
-            base_url = cfg.deepseek_api_base.value
-            api_key = cfg.deepseek_api_key.value
-            llm_model = cfg.deepseek_model.value
-        elif current_service == LLMServiceEnum.OLLAMA:
-            base_url = cfg.ollama_api_base.value
-            api_key = cfg.ollama_api_key.value
-            llm_model = cfg.ollama_model.value
-        elif current_service == LLMServiceEnum.LM_STUDIO:
-            base_url = cfg.lm_studio_api_base.value
-            api_key = cfg.lm_studio_api_key.value
-            llm_model = cfg.lm_studio_model.value
-        elif current_service == LLMServiceEnum.GEMINI:
-            base_url = cfg.gemini_api_base.value
-            api_key = cfg.gemini_api_key.value
-            llm_model = cfg.gemini_model.value
-        elif current_service == LLMServiceEnum.CHATGLM:
-            base_url = cfg.chatglm_api_base.value
-            api_key = cfg.chatglm_api_key.value
-            llm_model = cfg.chatglm_model.value
+        # 工具角色（断句/字幕优化）经 resolve_utility_profile 解析：独立绑定优先，
+        # 无绑定则从主翻译方案派生，一律剥离翻译专属调优字段（ADR-0014）。绑定
+        # 丢失在此 fail-fast；双空（无绑定也无主翻译方案）留 None，由任务线程在
+        # 启动预检（need_legacy_llm 判定同位置）报带「工具模型卡」指引的错误——
+        # 任务创建保持宽松契约，与主/校对方案的解析一致。
+        utility_profile_id = cfg.utility_llm_profile_id.value
+        has_utility_source = bool(main_profile_id.strip() or utility_profile_id.strip())
+        if (
+            cfg.need_split.value or cfg.need_optimize.value
+        ) and has_utility_source:
+            if profile_store is None:
+                profile_store = LLMModelProfileStore()
+            utility_profile = resolve_utility_profile(
+                profile_store, main_profile_id, utility_profile_id
+            )
         else:
-            base_url = ""
-            api_key = ""
-            llm_model = ""
-
-        # Single-model LLM and legacy LLM consumers both use the frozen main
-        # role. Retain the old scalar fields until all callers use profiles.
-        utility_base_url = base_url
-        utility_api_key = api_key
-        utility_llm_model = llm_model
-        if main_profile is not None:
-            base_url = main_profile.base_url
-            api_key = main_profile.api_key
-            llm_model = main_profile.model
+            utility_profile = None
 
         if translation_execution_mode in {
             TranslationExecutionMode.CLI,
@@ -440,12 +414,7 @@ class TaskFactory:
 
         config = SubtitleConfig(
             # 翻译配置
-            base_url=base_url,
-            api_key=api_key,
-            llm_model=llm_model,
-            utility_llm_base_url=utility_base_url,
-            utility_llm_api_key=utility_api_key,
-            utility_llm_model=utility_llm_model,
+            utility_llm_profile=utility_profile,
             deeplx_endpoint=cfg.deeplx_endpoint.value,
             # 翻译服务
             translator_service=translator_service,

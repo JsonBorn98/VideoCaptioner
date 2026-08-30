@@ -724,14 +724,9 @@ class SubtitleConfig:
     """字幕处理配置类"""
 
     # 翻译配置
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    llm_model: Optional[str] = None
-    # Existing split/optimize LLM remains a separate utility dependency; role
-    # prompts and provider-native translation profiles must not leak into it.
-    utility_llm_base_url: Optional[str] = None
-    utility_llm_api_key: Optional[str] = None
-    utility_llm_model: Optional[str] = None
+    # 工具角色（断句/字幕优化）的模型与连接统一走 utility_llm_profile，由
+    # resolve_utility_profile 解析并剥离翻译专属调优字段（ADR-0014）。
+    utility_llm_profile: Optional[LLMModelProfile] = None
     deeplx_endpoint: Optional[str] = None
     # 翻译服务
     translator_service: Optional[TranslatorServiceEnum] = None
@@ -740,9 +735,7 @@ class SubtitleConfig:
     need_reflect: bool = False
     thread_num: int = 10
     batch_size: int = 10
-    # Translation workflow and immutable role snapshots. The legacy connection
-    # fields above remain populated for callers that have not migrated to the
-    # profile-aware LLM gateway yet.
+    # Translation workflow and immutable role snapshots.
     translation_mode: Optional[TranslationMode] = None
     main_llm_profile: Optional[LLMModelProfile] = None
     review_llm_profile: Optional[LLMModelProfile] = None
@@ -808,12 +801,6 @@ class SubtitleConfig:
             missing.append("review")
         return tuple(missing)
 
-    def _mask_key(self, key: Optional[str]) -> str:
-        """Mask sensitive key for display"""
-        if not key or len(key) <= 8:
-            return "****"
-        return f"{key[:4]}...{key[-4:]}"
-
     def print_config(self) -> str:
         """Print subtitle processing configuration"""
         lines = ["=========== Subtitle Processing Task ==========="]
@@ -825,7 +812,10 @@ class SubtitleConfig:
 
         if self.need_optimize:
             lines.append("Optimize: Yes")
-            lines.append(f"  Model: {self.llm_model or 'None'}")
+            if self.utility_llm_profile is not None:
+                lines.append(
+                    f"  Model: {self.utility_llm_profile.name} / {self.utility_llm_profile.model}"
+                )
             if self.custom_prompt_text:
                 lines.append(f"  Custom Prompt: {self.custom_prompt_text[:30]}...")
 
@@ -837,9 +827,11 @@ class SubtitleConfig:
                 f"  Service: {self.translator_service.value if self.translator_service else 'None'}"
             )
             if self.translator_service == TranslatorServiceEnum.OPENAI:
-                lines.append(f"  API Base: {self.base_url}")
-                lines.append(f"  API Key: {self._mask_key(self.api_key)}")
-                lines.append(f"  Model: {self.llm_model}")
+                if self.main_llm_profile is not None:
+                    lines.append(
+                        "  Main LLM: "
+                        f"{self.main_llm_profile.name} / {self.main_llm_profile.model}"
+                    )
                 lines.append(f"  Reflect Translation: {self.need_reflect}")
             elif self.translator_service == TranslatorServiceEnum.DEEPLX:
                 lines.append(f"  DeepLX Endpoint: {self.deeplx_endpoint}")

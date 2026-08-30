@@ -177,6 +177,9 @@ class Config(QConfig):
     )
     main_llm_profile_id = ConfigItem("Translate", "MainLLMProfileId", "")
     review_llm_profile_id = ConfigItem("Translate", "ReviewLLMProfileId", "")
+    # 工具角色（断句/字幕优化/后处理/配音改写）的独立方案绑定；
+    # 空 = 跟随主翻译方案派生（解析器派生路径，ADR-0014）。
+    utility_llm_profile_id = ConfigItem("Translate", "UtilityLLMProfileId", "")
     main_translation_prompt = ConfigItem(
         "Translate", "MainTranslationPrompt", DEFAULT_MAIN_TRANSLATION_PROMPT
     )

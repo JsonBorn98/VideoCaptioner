@@ -1,9 +1,15 @@
 import difflib
 import re
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
-from ..llm import call_llm
+from ..llm import (
+    LLMGateway,
+    LLMMessage,
+    LLMModelProfile,
+    LLMRequest,
+    call_llm,
+)
 from ..prompts import get_prompt
 from ..utils.logger import setup_logger
 from ..utils.text_utils import count_words, is_mainly_cjk
@@ -21,14 +27,18 @@ def split_by_llm(
     model: str = "gpt-4o-mini",
     max_word_count_cjk: int = 18,
     max_word_count_english: int = 12,
+    profile: Optional[LLMModelProfile] = None,
+    gateway: Optional[LLMGateway] = None,
 ) -> List[str]:
     """使用LLM进行文本断句（固定使用句子Segments）
 
     Args:
         text: 待断句的文本
-        model: LLM模型名称
+        model: LLM模型名称（仅 profile 缺失的旧路径使用）
         max_word_count_cjk: 中文最大字符数
         max_word_count_english: 英文最大单词数
+        profile: 工具角色模型配置方案；存在时请求一律经 LLMGateway 发出
+        gateway: 可注入的 gateway 实例（None 且 profile 存在时惰性构造）
 
     Returns:
         断句后的文本列表
@@ -36,7 +46,12 @@ def split_by_llm(
     for attempt in range(LLM_SPLIT_MAX_ATTEMPTS):
         try:
             return _split_with_agent_loop(
-                text, model, max_word_count_cjk, max_word_count_english
+                text,
+                model,
+                max_word_count_cjk,
+                max_word_count_english,
+                profile=profile,
+                gateway=gateway,
             )
         except Exception as e:
             if attempt >= LLM_SPLIT_MAX_ATTEMPTS - 1:
@@ -61,6 +76,8 @@ def _split_with_agent_loop(
     model: str,
     max_word_count_cjk: int,
     max_word_count_english: int,
+    profile: Optional[LLMModelProfile] = None,
+    gateway: Optional[LLMGateway] = None,
 ) -> List[str]:
     """使用agent loop 建立反馈循环进行文本断句，自动验证和修正"""
     prompt_path = "split/sentence"
@@ -79,16 +96,29 @@ def _split_with_agent_loop(
         {"role": "user", "content": user_prompt},
     ]
 
+    active_gateway = gateway or (LLMGateway() if profile is not None else None)
+
     last_result = None
 
     for step in range(MAX_STEPS):
-        response = call_llm(
-            messages=messages,
-            model=model,
-            timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
-        )
-
-        result_text = response.choices[0].message.content
+        if profile is not None and active_gateway is not None:
+            result_text = active_gateway.complete(
+                profile,
+                LLMRequest(
+                    messages=tuple(
+                        LLMMessage(str(m["role"]), str(m["content"])) for m in messages
+                    ),
+                    timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
+                    metadata={"stage": "llm_split", "role": "utility"},
+                ),
+            ).text
+        else:
+            response = call_llm(
+                messages=messages,
+                model=model,
+                timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
+            )
+            result_text = response.choices[0].message.content
 
         # 解析结果
         result_text_cleaned = re.sub(r"\n+", "", result_text)
