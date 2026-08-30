@@ -1,8 +1,13 @@
 """Data models for subtitle dubbing."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
+
+if TYPE_CHECKING:
+    from videocaptioner.core.llm.models import LLMModelProfile
 
 DubbingProvider = Literal["siliconflow", "gemini", "edge"]
 FitMode = Literal["none", "tempo"]
@@ -72,9 +77,10 @@ class DubbingConfig:
     target_padding_ms: int = 80
     rewrite_too_long: bool = False
     rewrite_threshold: float = 1.15
-    llm_api_key: str = ""
-    llm_api_base: str = ""
-    llm_model: str = ""
+    # Utility-role model profile driving the optional duration rewrite. None
+    # means the rewrite cannot run; enabling rewrite_too_long without a
+    # profile is a configuration error raised by the rewriter.
+    llm_profile: Optional[LLMModelProfile] = None
     mix_original_audio: bool = False
     original_audio_volume: float = 0.25
     dubbed_audio_volume: float = 1.0
