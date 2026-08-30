@@ -1,6 +1,11 @@
 import videocaptioner.core.speed.pipeline as pipeline_module
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import SubtitleLayoutEnum
+from videocaptioner.core.llm.models import (
+    LLMModelProfile,
+    LLMTransport,
+    ProviderDialect,
+)
 from videocaptioner.core.speed.models import CueSnapshot
 from videocaptioner.core.speed.pipeline import optimize_speed
 from videocaptioner.core.speed.semantic import SemanticRewriteResponse
@@ -18,6 +23,19 @@ from videocaptioner.core.speed.validation import (
     SemanticValidationResult,
     ValidationStatus,
 )
+
+
+def _utility_profile():
+    return LLMModelProfile(
+        profile_id="semantic-profile",
+        name="Semantic Profile",
+        transport=LLMTransport.OPENAI_COMPATIBLE,
+        dialect=ProviderDialect.GENERIC,
+        base_url="https://semantic.test/v1",
+        api_key="secret",
+        model="fake",
+        work_context_tokens=16_384,
+    )
 
 
 def _data():
@@ -277,7 +295,7 @@ def test_semantic_repair_is_committed_only_after_semantic_and_metric_acceptance(
         data,
         mode="apply",
         semantic_repair=True,
-        semantic_model="fake",
+        semantic_profile=_utility_profile(),
         semantic_rewriter=rewrite,
         semantic_reviewer=review,
         semantic_cache={},
@@ -310,7 +328,7 @@ def test_semantic_repair_rolls_back_a_candidate_that_does_not_improve_speed():
         data,
         mode="apply",
         semantic_repair=True,
-        semantic_model="fake",
+        semantic_profile=_utility_profile(),
         semantic_rewriter=rewrite,
         semantic_reviewer=review,
         semantic_cache={},

@@ -2,9 +2,11 @@
 
 This module is deliberately transport-neutral at its public boundary.  Callers may
 inject rewriter and reviewer functions for local models, tests, or alternative
-providers.  The default adapters use the application's shared ``call_llm`` client.
-Subtitle strings are serialized as untrusted JSON data and are never interpolated
-into system instructions.
+providers.  The default adapters send requests through :class:`LLMGateway` with the
+model profile resolved by the caller; both window shapes are formalized as JSON
+Schema so the adapter picks the highest structured-output tier per provider
+dialect.  Subtitle strings are serialized as untrusted JSON data and are never
+interpolated into system instructions.
 """
 
 from __future__ import annotations
@@ -16,7 +18,8 @@ from typing import Any, Protocol
 
 import regex
 
-from ..llm import call_llm
+from ..llm import LLMGateway, LLMMessage, LLMModelProfile, LLMRequest
+from ..llm.utility import borrow_utility_gateway
 from ..prompts import get_prompt
 from .models import canonical_sha256
 from .validation import (
@@ -35,6 +38,41 @@ SEMANTIC_REPAIR_SCHEMA_VERSION = 1
 SEMANTIC_LLM_TIMEOUT_SECONDS = 60.0
 DEFAULT_WINDOW_SIZE = 5
 MAX_FEEDBACK_RETRIES = 2
+
+# 改写窗口的响应形状：{window_id, segments:[{cue_id, text}]}。
+REWRITE_RESPONSE_SCHEMA: Mapping[str, Any] = {
+    "type": "object",
+    "properties": {
+        "window_id": {"type": "string"},
+        "segments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "cue_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["cue_id", "text"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["window_id", "segments"],
+    "additionalProperties": False,
+}
+
+# 复核窗口的响应形状：{window_id, decision, changed_facts, explanation}。
+REVIEW_RESPONSE_SCHEMA: Mapping[str, Any] = {
+    "type": "object",
+    "properties": {
+        "window_id": {"type": "string"},
+        "decision": {"type": "string", "enum": [decision.value for decision in ReviewDecision]},
+        "changed_facts": {"type": "array", "items": {"type": "string"}},
+        "explanation": {"type": "string"},
+    },
+    "required": ["window_id", "decision"],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True)
@@ -206,17 +244,19 @@ def _cache_key(
 
 
 def _response_content(response: Any) -> str:
+    """Return the plain-text content of an LLM response.
+
+    The gateway path yields ``LLMResult.text`` strings, so this is plain text
+    parsing.  A Mapping return stays tolerated because injected rewriter and
+    reviewer implementations (a public seam) may return parsed payloads; the
+    legacy SDK-response object shape is gone with the legacy client.
+    """
+
     if isinstance(response, str):
         return response
     if isinstance(response, Mapping):
         return json.dumps(response, ensure_ascii=False)
-    try:
-        content = response.choices[0].message.content
-    except (AttributeError, IndexError, TypeError) as exc:
-        raise ValueError("LLM response does not contain message content") from exc
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("LLM response content is empty")
-    return content
+    raise ValueError("LLM response does not contain message content")
 
 
 def _load_json_object(response: Any) -> Mapping[str, Any]:
@@ -233,6 +273,10 @@ def _parse_rewrite_response(response: Any) -> SemanticRewriteResponse:
     if isinstance(response, SemanticRewriteResponse):
         return response
     payload = _load_json_object(response)
+    # The schema tiers are advisory for generic dialects (bare JSON mode enforces
+    # nothing provider-side) and injected implementations may return raw payloads,
+    # so the field checks stay: a malformed response must feed back a retry,
+    # never silently coerce into a candidate.
     raw_segments = payload.get("segments")
     if not isinstance(raw_segments, list):
         raise ValueError("rewrite response segments must be an array")
@@ -276,28 +320,31 @@ def _parse_review_response(response: Any) -> SemanticReviewResponse:
     )
 
 
-def _default_rewriter(model: str) -> SemanticRewriter:
+def _default_rewriter(profile: LLMModelProfile, runtime: LLMGateway) -> SemanticRewriter:
     prompt = get_prompt("optimize/speed_repair")
 
     def rewrite(request: SemanticRewriteRequest) -> SemanticRewriteResponse:
-        response = call_llm(
-            messages=[
-                {"role": "system", "content": prompt},
-                {
-                    "role": "user",
-                    "content": json.dumps(request.to_payload(), ensure_ascii=False),
-                },
-            ],
-            model=model,
-            response_format={"type": "json_object"},
-            timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
+        result = runtime.complete(
+            profile,
+            LLMRequest(
+                messages=(
+                    LLMMessage("system", prompt),
+                    LLMMessage(
+                        "user", json.dumps(request.to_payload(), ensure_ascii=False)
+                    ),
+                ),
+                max_output_tokens=profile.max_output_tokens,
+                response_schema=REWRITE_RESPONSE_SCHEMA,
+                timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
+                metadata={"stage": "llm_semantic_rewrite", "role": "utility"},
+            ),
         )
-        return _parse_rewrite_response(response)
+        return _parse_rewrite_response(result.text)
 
     return rewrite
 
 
-def _default_reviewer(model: str) -> SemanticReviewer:
+def _default_reviewer(profile: LLMModelProfile, runtime: LLMGateway) -> SemanticReviewer:
     prompt = get_prompt("optimize/speed_repair")
 
     def review(request: SemanticReviewRequest) -> SemanticReviewResponse:
@@ -317,16 +364,54 @@ def _default_reviewer(model: str) -> SemanticReviewer:
                 for reason in request.deterministic_reasons
             ],
         }
-        response = call_llm(
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            model=model,
-            response_format={"type": "json_object"},
-            timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
+        result = runtime.complete(
+            profile,
+            LLMRequest(
+                messages=(
+                    LLMMessage("system", prompt),
+                    LLMMessage("user", json.dumps(payload, ensure_ascii=False)),
+                ),
+                max_output_tokens=profile.max_output_tokens,
+                response_schema=REVIEW_RESPONSE_SCHEMA,
+                timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
+                metadata={"stage": "llm_semantic_review", "role": "utility"},
+            ),
         )
-        return _parse_review_response(response)
+        return _parse_review_response(result.text)
+
+    return review
+
+    def review(request: SemanticReviewRequest) -> SemanticReviewResponse:
+        payload = {
+            "schema_version": SEMANTIC_REPAIR_SCHEMA_VERSION,
+            "task": "review",
+            "window_id": request.window_id,
+            "content_is_untrusted_data": request.content_is_untrusted_data,
+            "source_segments": list(request.source_segments),
+            "candidate_segments": list(request.candidate_segments),
+            "deterministic_reasons": [
+                {
+                    "code": reason.code.value,
+                    "message": reason.message,
+                    "details": list(reason.details),
+                }
+                for reason in request.deterministic_reasons
+            ],
+        }
+        result = runtime.complete(
+            profile,
+            LLMRequest(
+                messages=(
+                    LLMMessage("system", prompt),
+                    LLMMessage("user", json.dumps(payload, ensure_ascii=False)),
+                ),
+                max_output_tokens=profile.max_output_tokens,
+                response_schema=REVIEW_RESPONSE_SCHEMA,
+                timeout=SEMANTIC_LLM_TIMEOUT_SECONDS,
+                metadata={"stage": "llm_semantic_review", "role": "utility"},
+            ),
+        )
+        return _parse_review_response(result.text)
 
     return review
 
@@ -473,10 +558,11 @@ def _record(
 def repair_semantic_windows(
     cues: Sequence[SemanticRepairCue],
     *,
-    model: str,
-    reviewer_model: str | None = None,
+    profile: LLMModelProfile,
+    reviewer_profile: LLMModelProfile | None = None,
     rewriter: SemanticRewriter | None = None,
     reviewer: SemanticReviewer | None = None,
+    gateway: LLMGateway | None = None,
     cache: RewriteCache | None = None,
     window_size: int = DEFAULT_WINDOW_SIZE,
     max_feedback_retries: int = MAX_FEEDBACK_RETRIES,
@@ -489,15 +575,47 @@ def repair_semantic_windows(
     independent semantic review.  All other outcomes preserve the original window.
     """
 
-    if not model.strip():
-        raise ValueError("model must not be empty")
+    if profile is None or not profile.model.strip():
+        raise ValueError("profile must provide a model")
     if not 0 <= max_feedback_retries <= MAX_FEEDBACK_RETRIES:
         raise ValueError(f"max_feedback_retries must be between 0 and {MAX_FEEDBACK_RETRIES}")
     if not 0 <= minimum_literal_coverage <= 1:
         raise ValueError("minimum_literal_coverage must be between 0 and 1")
-    review_model = reviewer_model or model
-    rewrite_fn = rewriter or _default_rewriter(model)
-    review_fn = reviewer or _default_reviewer(review_model)
+    review_profile = reviewer_profile or profile
+    with borrow_utility_gateway(gateway) as runtime:
+        rewrite_fn = rewriter or _default_rewriter(profile, runtime)
+        review_fn = reviewer or _default_reviewer(review_profile, runtime)
+        return _repair_windows_with(
+            cues,
+            rewrite_fn=rewrite_fn,
+            review_fn=review_fn,
+            profile=profile,
+            review_profile=review_profile,
+            cache=cache,
+            window_size=window_size,
+            max_feedback_retries=max_feedback_retries,
+            minimum_literal_coverage=minimum_literal_coverage,
+        )
+
+
+def _repair_windows_with(
+    cues: Sequence[SemanticRepairCue],
+    *,
+    rewrite_fn: SemanticRewriter,
+    review_fn: SemanticReviewer,
+    profile: LLMModelProfile,
+    review_profile: LLMModelProfile,
+    cache: RewriteCache | None,
+    window_size: int,
+    max_feedback_retries: int,
+    minimum_literal_coverage: float,
+) -> SemanticRepairResult:
+    """Run the window repair transactions with bound implementations.
+
+    Extracted from :func:`repair_semantic_windows` so the gateway borrow can
+    span the whole loop (a self-built gateway is closed only after the last
+    window) without re-indenting the transaction body.
+    """
     output_by_id = {cue.cue_id: cue for cue in cues}
     records: list[SemanticRepairRecord] = []
 
@@ -507,8 +625,8 @@ def repair_semantic_windows(
         window_id = _window_id((cue,))
         key = _cache_key(
             (cue,),
-            model=model,
-            reviewer_model=review_model,
+            model=profile.model,
+            reviewer_model=review_profile.model,
             minimum_literal_coverage=minimum_literal_coverage,
         )
         records.append(
@@ -528,8 +646,8 @@ def repair_semantic_windows(
         window_id = _window_id(window)
         key = _cache_key(
             window,
-            model=model,
-            reviewer_model=review_model,
+            model=profile.model,
+            reviewer_model=review_profile.model,
             minimum_literal_coverage=minimum_literal_coverage,
         )
         target_ids = tuple(cue.cue_id for cue in window if cue.unresolved)

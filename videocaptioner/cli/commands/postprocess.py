@@ -9,7 +9,7 @@ from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
+from videocaptioner.cli.config import build_legacy_llm_profile, get
 
 _LAYOUT_MODES = {
     "auto": "auto",
@@ -156,8 +156,16 @@ def run(args: Namespace, config: dict) -> int:
         for key, field_name in _CONFIG_OVERRIDE_FIELDS.items()
         if key in section
     }
-    llm_model = get(config, "llm.model", "") or None
-    resolved = replace(resolved, llm_model=llm_model, **overrides)
+    # TODO(ticket-14): temporary bridge — the compress/semantic-repair consumers
+    # now take a utility model profile instead of a model-name string, so the
+    # legacy [llm] scalars are bridged into a profile here until [llm] collapses
+    # to profile-id keys.
+    llm_model = get(config, "llm.model", "")
+    if llm_model and resolved.utility_llm_profile is None:
+        resolved = replace(
+            resolved, utility_llm_profile=build_legacy_llm_profile(config)
+        )
+    resolved = replace(resolved, **overrides)
 
     if media_missing:
         # Drop the unusable path so the core takes the clean 对齐降级

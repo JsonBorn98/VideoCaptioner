@@ -2,10 +2,11 @@
 
 from argparse import Namespace
 from pathlib import Path
+from typing import Optional
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
+from videocaptioner.cli.config import build_legacy_llm_profile, get
 from videocaptioner.cli.validators import (
     validate_dubbing,
     validate_subtitle_input,
@@ -18,6 +19,7 @@ from videocaptioner.core.dubbing.presets import (
     normalize_dubbing_voice,
     validate_dubbing_voice,
 )
+from videocaptioner.core.llm.models import LLMModelProfile
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -130,14 +132,32 @@ def _build_dubbing_config(config: dict, speaker_profiles: dict[str, SpeakerProfi
         target_padding_ms=int(get(config, "dubbing.target_padding_ms", 80)),
         rewrite_too_long=bool(get(config, "dubbing.rewrite_too_long", False)),
         rewrite_threshold=float(get(config, "dubbing.rewrite_threshold", 1.15)),
-        llm_api_key=get(config, "llm.api_key", ""),
-        llm_api_base=get(config, "llm.api_base", ""),
-        llm_model=get(config, "llm.model", ""),
+        llm_profile=_legacy_rewrite_profile(config),
         mix_original_audio=mix_original_audio,
         original_audio_volume=original_audio_volume,
         dubbed_audio_volume=float(get(config, "dubbing.dubbed_audio_volume", 1.0)),
         speaker_profiles=speaker_profiles,
     )
+
+
+def _legacy_rewrite_profile(config: dict) -> Optional[LLMModelProfile]:
+    """Bridge the legacy ``[llm]`` table into the rewrite profile.
+
+    TODO(ticket-14): the legacy [llm] table is removed wholesale there; this
+    bridge (and the validate_llm gate) goes with it. A blank api_key/model
+    yields no profile, so a disabled rewrite stays a silent no-op — matching
+    the pre-migration behavior where missing scalars only errored when the
+    rewrite actually ran. api_base is required the same way: the old rewriter
+    errored on any of the three missing, and without it the profile would
+    silently fall back to api.openai.com, so a rewrite that runs with no
+    profile fails fast with guidance instead of hitting the wrong endpoint.
+    """
+    api_key = str(get(config, "llm.api_key", ""))
+    api_base = str(get(config, "llm.api_base", ""))
+    model = str(get(config, "llm.model", ""))
+    if not api_key or not api_base or not model:
+        return None
+    return build_legacy_llm_profile(config)
 
 
 def _resolve_dubbing_settings(config: dict) -> dict[str, str]:

@@ -73,7 +73,7 @@ class DubbingPipeline:
         )
 
         cb(8, "rewriting long lines")
-        rewrite_segments_if_needed(segments, self.config)
+        rewrite_segments_if_needed(segments, self.config, self.config.llm_profile)
 
         warnings: list[str] = []
         timeline_items: list[tuple[str, int]] = []

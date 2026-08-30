@@ -6,7 +6,7 @@ from pathlib import Path
 
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
-from videocaptioner.cli.config import get
+from videocaptioner.cli.config import build_legacy_llm_profile, get
 
 # BCP 47 → TargetLanguage.value (Chinese label) mapping for internal use
 _LANG_MAP = {
@@ -219,6 +219,13 @@ def run(args: Namespace, config: dict) -> int:
     llm_api_key = get(config, "llm.api_key", "")
     llm_api_base = get(config, "llm.api_base", "")
     llm_model = get(config, "llm.model", "")
+    # TODO(ticket-14): 临时桥——[llm] 三标量构 profile 喂 split/optimize 的新签名。
+    # 14 号票把 CLI 的 LLM 配置面坍缩进方案库后一次性删除此桥。
+    utility_profile = (
+        build_legacy_llm_profile(config)
+        if (need_optimize or need_split) and llm_api_key and llm_model
+        else None
+    )
     if llm_api_key:
         os.environ["OPENAI_API_KEY"] = llm_api_key
     if llm_api_base:
@@ -298,6 +305,7 @@ def run(args: Namespace, config: dict) -> int:
             splitter = SubtitleSplitter(
                 thread_num=thread_num,
                 model=llm_model,
+                profile=utility_profile,
                 max_word_count_cjk=get(config, "subtitle.max_word_count_cjk", 18),
                 max_word_count_english=get(config, "subtitle.max_word_count_english", 12),
                 use_llm=need_split,
@@ -322,6 +330,7 @@ def run(args: Namespace, config: dict) -> int:
                 thread_num=thread_num,
                 batch_num=batch_size,
                 model=llm_model,
+                profile=utility_profile,
                 custom_prompt=get(config, "subtitle.optimization_prompt", ""),
                 update_callback=callback,
                 extra_rules="",

@@ -106,7 +106,6 @@ def run_post_stage(
     asr_data: "ASRData",
     cfg: PostprocessConfig,
     report: Optional[QualityReport] = None,
-    llm_ctx: Optional[dict] = None,
     layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
     timing_windows: Iterable["TimingEvidenceWindow"] = (),
 ) -> Tuple["ASRData", QualityReport]:
@@ -128,7 +127,7 @@ def run_post_stage(
         try:
             from .compress import compress_fast_subtitles
 
-            asr_data, report = compress_fast_subtitles(asr_data, cfg, report, llm_ctx)
+            asr_data, report = compress_fast_subtitles(asr_data, cfg, report)
         except Exception as exc:  # noqa: BLE001
             logger.warning("快速字幕压缩失败，已跳过: %s", exc)
 
@@ -170,7 +169,7 @@ def run_post_stage(
             reference_audit=cfg.speed_reference_audit,
             optimize_both_sides=cfg.optimize_both_sides,
             semantic_repair=cfg.speed_semantic_repair,
-            semantic_model=cfg.llm_model,
+            semantic_profile=cfg.utility_llm_profile,
             semantic_window_size=cfg.speed_semantic_window,
             semantic_uncertain_review=cfg.speed_llm_uncertain_review,
         )

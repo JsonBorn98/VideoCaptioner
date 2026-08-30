@@ -104,11 +104,6 @@ def test_single_llm_task_reuses_frozen_main_profile_in_legacy_fields(tmp_path):
         assert config.is_translation_mode_available()
         assert config.main_llm_profile == main
         assert config.review_llm_profile is None
-        assert (config.base_url, config.api_key, config.llm_model) == (
-            main.base_url,
-            main.api_key,
-            main.model,
-        )
     finally:
         cfg.set(cfg.translation_mode, old_mode)
         cfg.set(cfg.main_llm_profile_id, old_main_id)
@@ -160,9 +155,6 @@ def test_task_factory_freezes_role_profiles_and_role_settings(tmp_path):
         assert config.review_llm_profile is not None
         assert config.main_llm_profile.model == "main-v1"
         assert config.review_llm_profile.model == "review-v1"
-        assert config.llm_model == "main-v1"
-        assert config.base_url == main.base_url
-        assert config.api_key == main.api_key
         assert config.main_translation_prompt == "main role prompt"
         assert config.review_translation_prompt == "review role prompt"
         assert config.enhanced_batch_size == 17

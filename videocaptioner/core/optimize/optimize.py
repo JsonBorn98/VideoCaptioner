@@ -14,7 +14,13 @@ import json_repair
 
 from ..asr.asr_data import ASRData, ASRDataSeg
 from ..entities import SubtitleProcessData
-from ..llm import call_llm
+from ..llm import (
+    LLMGateway,
+    LLMModelProfile,
+    LLMRequest,
+    call_llm,
+    llm_messages_from_dicts,
+)
 from ..prompts import get_prompt
 from ..split.alignment import SubtitleAligner
 from ..utils.logger import setup_logger
@@ -42,16 +48,20 @@ class SubtitleOptimizer:
         custom_prompt: str,
         update_callback: Optional[Callable] = None,
         extra_rules: str = "",
+        profile: Optional[LLMModelProfile] = None,
+        gateway: Optional[LLMGateway] = None,
     ):
         """初始化优化器
 
         Args:
             thread_num: 并发线程数
             batch_num: 每批处理的字幕数量
-            model: LLM模型名称
+            model: LLM模型名称（仅 profile 缺失的旧路径使用）
             custom_prompt: 自定义优化提示词
             update_callback: 进度更新回调函数
             extra_rules: 由可选规则型后处理注入的额外输出约束
+            profile: 工具角色模型配置方案；存在时请求一律经 LLMGateway 发出
+            gateway: 可注入的 gateway 实例（None 且 profile 存在时惰性构造）
         """
         self.thread_num = thread_num
         self.batch_num = batch_num
@@ -59,6 +69,8 @@ class SubtitleOptimizer:
         self.custom_prompt = custom_prompt
         self.update_callback = update_callback
         self.extra_rules = extra_rules
+        self.profile = profile
+        self.gateway = gateway or (LLMGateway() if profile is not None else None)
 
         self.is_running = True
         self.executor: Optional[ThreadPoolExecutor] = None
@@ -242,12 +254,21 @@ class SubtitleOptimizer:
         # Agent loop
         for step in range(MAX_STEPS):
             # 调用LLM
-            response = call_llm(
-                messages=messages,
-                model=self.model,
-            )
-
-            result_text = response.choices[0].message.content
+            if self.profile is not None:
+                assert self.gateway is not None
+                result_text = self.gateway.complete(
+                    self.profile,
+                    LLMRequest(
+                        messages=llm_messages_from_dicts(messages),
+                        metadata={"stage": "llm_optimize", "role": "utility"},
+                    ),
+                ).text
+            else:
+                response = call_llm(
+                    messages=messages,
+                    model=self.model,
+                )
+                result_text = response.choices[0].message.content
             if not result_text:
                 raise ValueError("LLM returned empty result")
 

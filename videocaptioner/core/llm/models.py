@@ -272,6 +272,18 @@ class LLMMessage:
             raise ValueError(f"unsupported message role: {self.role}")
 
 
+def llm_messages_from_dicts(
+    messages: Sequence[Mapping[str, Any]],
+) -> tuple[LLMMessage, ...]:
+    """Coerce role/content dict messages into the frozen ``LLMMessage`` tuple.
+
+    Shared by the consumers that keep a plain-dict message list for their
+    legacy ``call_llm`` fallback and convert it at the gateway request site.
+    """
+
+    return tuple(LLMMessage(str(item["role"]), str(item["content"])) for item in messages)
+
+
 @dataclass(frozen=True)
 class LLMRequest:
     messages: Sequence[LLMMessage]
