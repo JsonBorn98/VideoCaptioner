@@ -42,7 +42,9 @@ from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.core.entities import TranslatorServiceEnum
 from videocaptioner.core.llm.check_llm import (
+    OutputLimitProbeStatus,
     get_available_models,
+    probe_model_output_limit,
     probe_model_profile_capabilities,
 )
 from videocaptioner.core.llm.models import (
@@ -187,6 +189,7 @@ class PromptSettingCard(SettingCard):
 
 class _ProfileDialog(MessageBoxBase):
     probeRequested = pyqtSignal(object)
+    outputLimitProbeRequested = pyqtSignal(object)
     modelsRequested = pyqtSignal(str, str)
 
     def __init__(
@@ -211,6 +214,11 @@ class _ProfileDialog(MessageBoxBase):
         self.concurrencySpin = SpinBox(self)
         self.outputModeCombo = ComboBox(self)
         self.outputTokensSpin = SpinBox(self)
+        self.outputLimitProbeButton = PushButton(self.tr("输出上限探查"), self)
+        self.outputLimitProbeResultLabel = CaptionLabel(
+            self.tr("尚未执行输出上限探查"), self
+        )
+        self.outputLimitProbeButton.setObjectName("modelOutputLimitProbeButton")
         self.advancedButton = PushButton(self.tr("显示高级请求参数"), self)
         self.templateCombo = ComboBox(self)
         self.applyTemplateButton = PushButton(self.tr("应用模板"), self)
@@ -252,6 +260,7 @@ class _ProfileDialog(MessageBoxBase):
             QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
         )
         self.probeResultLabel.setWordWrap(True)
+        self.outputLimitProbeResultLabel.setWordWrap(True)
         self.templateHint.setWordWrap(True)
         for key, (label, _description, _value) in _REQUEST_OPTION_TEMPLATES.items():
             self.templateCombo.addItem(label, userData=key)
@@ -294,8 +303,17 @@ class _ProfileDialog(MessageBoxBase):
         outputRow = QWidget(self)
         outputLayout = QHBoxLayout(outputRow)
         outputLayout.setContentsMargins(0, 0, 0, 0)
+        outputLayout.setSpacing(8)
         outputLayout.addWidget(self.outputModeCombo)
         outputLayout.addWidget(self.outputTokensSpin, 1)
+        outputLayout.addWidget(self.outputLimitProbeButton)
+
+        outputWidget = QWidget(self)
+        outputColumn = QVBoxLayout(outputWidget)
+        outputColumn.setContentsMargins(0, 0, 0, 0)
+        outputColumn.setSpacing(6)
+        outputColumn.addWidget(outputRow)
+        outputColumn.addWidget(self.outputLimitProbeResultLabel)
 
         modelRow = QWidget(self)
         modelLayout = QHBoxLayout(modelRow)
@@ -345,7 +363,7 @@ class _ProfileDialog(MessageBoxBase):
         form.addRow(BodyLabel(self.tr("API Key"), formWidget), self.apiKeyEdit)
         form.addRow(BodyLabel(self.tr("模型"), formWidget), modelRow)
         form.addRow(BodyLabel(self.tr("工作上下文"), formWidget), self.contextSpin)
-        form.addRow(BodyLabel(self.tr("最大输出 token"), formWidget), outputRow)
+        form.addRow(BodyLabel(self.tr("最大输出 token"), formWidget), outputWidget)
         form.addRow(BodyLabel(self.tr("最大并发"), formWidget), self.concurrencySpin)
         form.addRow(self.advancedButton)
         form.addRow(self.advancedWidget)
@@ -367,6 +385,7 @@ class _ProfileDialog(MessageBoxBase):
         self.yesButton.setText(self.tr("保存"))
         self.cancelButton.setText(self.tr("取消"))
         self.probeButton.clicked.connect(self._requestProbe)
+        self.outputLimitProbeButton.clicked.connect(self._requestOutputLimitProbe)
         self.fetchModelsButton.clicked.connect(self._requestModels)
         self.outputModeCombo.currentIndexChanged.connect(self._onOutputModeChanged)
         self.contextSpin.valueChanged.connect(self._onContextChanged)
@@ -576,6 +595,34 @@ class _ProfileDialog(MessageBoxBase):
         )
         return bool(confirm.exec())
 
+    def _confirmOutputLimitProbeCost(self) -> bool:
+        confirm = MessageBox(
+            self.tr("执行输出上限探查"),
+            self.tr(
+                "将使用当前未保存的配置发起探查请求，必要时再发一次验证重试，"
+                "可能产生两次请求费用。继续吗？"
+            ),
+            self,
+        )
+        return bool(confirm.exec())
+
+    def _requestOutputLimitProbe(self) -> None:
+        try:
+            profile = self.temporaryProfile()
+        except ValueError as exc:
+            InfoBar.warning(
+                self.tr("无法探查"),
+                str(exc),
+                duration=4000,
+                parent=self,
+            )
+            return
+        if not self._confirmOutputLimitProbeCost():
+            return
+        self.outputLimitProbeButton.setEnabled(False)
+        self.outputLimitProbeResultLabel.setText(self.tr("探查中…"))
+        self.outputLimitProbeRequested.emit(profile)
+
     def _requestProbe(self) -> None:
         try:
             profile = self.temporaryProfile()
@@ -649,6 +696,53 @@ class _ProfileDialog(MessageBoxBase):
             )
         )
 
+    def showOutputLimitProbeResult(self, result) -> None:
+        if result.status is OutputLimitProbeStatus.AT_LEAST_PROBE_VALUE:
+            self.outputLimitProbeResultLabel.setText(
+                self.tr("模型输出上限不低于探查值 {cap}").format(
+                    cap=result.probe_max_output_tokens
+                )
+            )
+            return
+        if result.status is OutputLimitProbeStatus.UNPARSEABLE:
+            self.outputLimitProbeResultLabel.setText(
+                self.tr("无法解析模型输出上限：{message}").format(
+                    message=result.message or ""
+                )
+            )
+            return
+        if result.status is OutputLimitProbeStatus.RETRY_FAILED:
+            self.outputLimitProbeResultLabel.setText(
+                self.tr("建议值验证未通过：{message}").format(
+                    message=result.message or ""
+                )
+            )
+            return
+        if result.apply_suggested and result.suggested_value is not None:
+            self.outputModeCombo.setCurrentIndex(
+                self.outputModeCombo.findData("custom")
+            )
+            self.outputTokensSpin.setValue(result.suggested_value)
+            self.outputLimitProbeResultLabel.setText(
+                self.tr(
+                    "已填入建议值 {suggested}（模型输出上限 {limit}）。"
+                    "未自动保存方案。"
+                ).format(
+                    suggested=result.suggested_value,
+                    limit=result.model_output_limit,
+                )
+            )
+            return
+        self.outputLimitProbeResultLabel.setText(
+            self.tr(
+                "发现模型输出上限 {limit}，建议值 {suggested}。"
+                "当前配置未超出上限，未改动。"
+            ).format(
+                limit=result.model_output_limit,
+                suggested=result.suggested_value,
+            )
+        )
+
 
 class ModelContextProbeThread(QThread):
     completed = pyqtSignal(object)
@@ -663,6 +757,22 @@ class ModelContextProbeThread(QThread):
             self.completed.emit(probe_model_profile_capabilities(self.profile))
         except Exception as exc:  # pragma: no cover - defensive thread boundary
             self.failed.emit(str(exc))
+
+
+class OutputLimitProbeThread(QThread):
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, profile: LLMModelProfile, parent=None):
+        super().__init__(parent)
+        self.profile = profile
+
+    def run(self) -> None:
+        try:
+            self.completed.emit(probe_model_output_limit(self.profile))
+        except Exception as exc:  # pragma: no cover - defensive thread boundary
+            self.failed.emit(str(exc))
+
 
 
 class ModelListFetchThread(QThread):
@@ -836,6 +946,7 @@ class TranslationSettingWidget(QWidget):
         self.pages: dict[str, QWidget] = {}
         self.profileCards: list[ProfileSelectionCard] = []
         self._probeThreads: set[ModelContextProbeThread] = set()
+        self._outputLimitProbeThreads: set[OutputLimitProbeThread] = set()
         self._fetchThreads: set[ModelListFetchThread] = set()
         # 工具模型卡是页签区上方的顶层共享卡：断句、字幕优化、后处理与配音改写在
         # 三种翻译方式下都会运行，所以不嵌进任何页签；空绑定即跟随主翻译方案派生
@@ -1133,6 +1244,9 @@ class TranslationSettingWidget(QWidget):
         dialog.probeRequested.connect(
             lambda profile, dialog=dialog: self._startProbe(dialog, profile)
         )
+        dialog.outputLimitProbeRequested.connect(
+            lambda profile, dialog=dialog: self._startOutputLimitProbe(dialog, profile)
+        )
         dialog.modelsRequested.connect(
             lambda base_url, api_key, dialog=dialog: self._startModelFetch(
                 dialog, base_url, api_key
@@ -1215,10 +1329,43 @@ class TranslationSettingWidget(QWidget):
         thread.failed.connect(failed)
         thread.start()
 
+    def _startOutputLimitProbe(
+        self, dialog: _ProfileDialog, profile: LLMModelProfile
+    ) -> None:
+        thread = OutputLimitProbeThread(profile, self)
+        self._outputLimitProbeThreads.add(thread)
+
+        def cleanup() -> None:
+            self._outputLimitProbeThreads.discard(thread)
+            thread.deleteLater()
+
+        def completed(result) -> None:
+            dialog.outputLimitProbeButton.setEnabled(True)
+            dialog.showOutputLimitProbeResult(result)
+            cleanup()
+
+        def failed(message: str) -> None:
+            dialog.outputLimitProbeButton.setEnabled(True)
+            dialog.outputLimitProbeResultLabel.setText(
+                self.tr("输出上限探查失败：{0}").format(message)
+            )
+            InfoBar.warning(
+                self.tr("输出上限探查失败"),
+                message,
+                duration=5000,
+                parent=dialog,
+            )
+            cleanup()
+
+        thread.completed.connect(completed)
+        thread.failed.connect(failed)
+        thread.start()
+
 
 __all__ = [
     "ModelContextProbeThread",
     "ModelListFetchThread",
+    "OutputLimitProbeThread",
     "ProfileSelectionCard",
     "PromptSettingCard",
     "TranslationSettingWidget",

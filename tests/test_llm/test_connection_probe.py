@@ -1,7 +1,9 @@
 from videocaptioner.core.llm.check_llm import (
     CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
+    OutputLimitProbeStatus,
     check_model_profile_connection,
     connection_probe_output_cap,
+    probe_model_output_limit,
     probe_model_profile_capabilities,
 )
 from videocaptioner.core.llm.models import (
@@ -176,3 +178,183 @@ def test_dual_probe_locally_rejects_inexact_results_without_blocking_other_probe
     assert result.text.category is LLMErrorCategory.INVALID_RESPONSE
     assert result.structured.success is False
     assert result.structured.category is LLMErrorCategory.INVALID_RESPONSE
+
+
+def test_output_limit_probe_uses_work_context_minus_one_and_keeps_config_when_accepted():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        work_context_tokens=16_384,
+        max_output_tokens=8_192,
+    )
+    gateway = _Gateway(LLMResult(text="OK"))
+
+    result = probe_model_output_limit(profile, gateway=gateway)
+
+    assert result.status is OutputLimitProbeStatus.AT_LEAST_PROBE_VALUE
+    assert result.suggested_value is None
+    assert result.model_output_limit is None
+    assert result.apply_suggested is False
+    assert result.probe_max_output_tokens == 16_383
+    assert profile.max_output_tokens == 8_192
+    assert len(gateway.calls) == 1
+    sent_profile, request, kwargs = gateway.calls[0]
+    assert sent_profile.max_output_tokens == 16_383
+    assert request.max_output_tokens == 16_383
+    assert request.metadata == {"stage": "output_limit_probe", "role": "utility"}
+    assert kwargs["max_attempts"] == 1
+    assert kwargs["use_cache"] is False
+
+
+def test_output_limit_probe_retries_once_with_suggested_value_before_allowing_fill():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        work_context_tokens=16_384,
+        max_output_tokens=10_000,
+    )
+    overflow = LLMCallError(
+        "max tokens too large",
+        category=LLMErrorCategory.OUTPUT_LIMIT,
+        retryable=False,
+        status_code=400,
+        model_output_limit=8192,
+    )
+    gateway = _Gateway([overflow, LLMResult(text="OK")])
+
+    result = probe_model_output_limit(profile, gateway=gateway)
+
+    assert result.status is OutputLimitProbeStatus.SUGGESTED
+    assert result.model_output_limit == 8192
+    assert result.suggested_value == 8192
+    assert result.apply_suggested is True
+    assert result.probe_max_output_tokens == 16_383
+    assert profile.max_output_tokens == 10_000
+    assert len(gateway.calls) == 2
+    assert gateway.calls[0][0].max_output_tokens == 16_383
+    assert gateway.calls[0][1].max_output_tokens == 16_383
+    assert gateway.calls[1][0].max_output_tokens == 8192
+    assert gateway.calls[1][1].max_output_tokens == 8192
+    assert gateway.calls[1][1].metadata == {
+        "stage": "output_limit_probe_retry",
+        "role": "utility",
+    }
+    assert gateway.calls[1][2]["max_attempts"] == 1
+    assert gateway.calls[1][2]["use_cache"] is False
+
+
+def test_output_limit_probe_caps_suggested_value_at_work_context_minus_one():
+    profile = _profile(
+        LLMTransport.GEMINI,
+        ProviderDialect.GEMINI,
+        work_context_tokens=16_384,
+        max_output_tokens=7_000,
+    )
+    overflow = LLMCallError(
+        "maxOutputTokens too large",
+        category=LLMErrorCategory.OUTPUT_LIMIT,
+        retryable=False,
+        status_code=400,
+        model_output_limit=65_536,
+    )
+    gateway = _Gateway([overflow, LLMResult(text="OK")])
+
+    result = probe_model_output_limit(profile, gateway=gateway)
+
+    assert result.status is OutputLimitProbeStatus.SUGGESTED
+    assert result.model_output_limit == 65_536
+    assert result.suggested_value == 16_383
+    assert result.apply_suggested is False
+    assert profile.max_output_tokens == 7_000
+    assert gateway.calls[0][0].max_output_tokens == 16_383
+    assert gateway.calls[1][0].max_output_tokens == 16_383
+    assert gateway.calls[1][1].max_output_tokens == 16_383
+
+
+def test_output_limit_probe_does_not_fill_auto_output_mode():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        work_context_tokens=16_384,
+    )
+    overflow = LLMCallError(
+        "max tokens too large",
+        category=LLMErrorCategory.OUTPUT_LIMIT,
+        retryable=False,
+        status_code=400,
+        model_output_limit=8192,
+    )
+    gateway = _Gateway([overflow, LLMResult(text="OK")])
+
+    result = probe_model_output_limit(profile, gateway=gateway)
+
+    assert result.status is OutputLimitProbeStatus.SUGGESTED
+    assert result.suggested_value == 8192
+    assert result.apply_suggested is False
+    assert profile.max_output_tokens is None
+    assert gateway.calls[0][0].max_output_tokens == 16_383
+    assert gateway.calls[1][0].max_output_tokens == 8192
+
+
+def test_output_limit_probe_passes_through_unparseable_error_without_suggestion():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        work_context_tokens=16_384,
+        max_output_tokens=10_000,
+    )
+    failure = LLMCallError(
+        "bad request",
+        category=LLMErrorCategory.CONFIGURATION,
+        retryable=False,
+        status_code=400,
+    )
+    gateway = _Gateway(failure)
+
+    result = probe_model_output_limit(profile, gateway=gateway)
+
+    assert result.status is OutputLimitProbeStatus.UNPARSEABLE
+    assert result.suggested_value is None
+    assert result.model_output_limit is None
+    assert result.apply_suggested is False
+    assert result.message == "configuration: bad request"
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0][0].max_output_tokens == 16_383
+    assert profile.max_output_tokens == 10_000
+
+
+def test_output_limit_probe_does_not_allow_fill_when_verification_retry_fails():
+    profile = _profile(
+        LLMTransport.OPENAI_COMPATIBLE,
+        ProviderDialect.OPENAI,
+        work_context_tokens=16_384,
+        max_output_tokens=10_000,
+    )
+    overflow = LLMCallError(
+        "max tokens too large",
+        category=LLMErrorCategory.OUTPUT_LIMIT,
+        retryable=False,
+        status_code=400,
+        model_output_limit=8192,
+    )
+    retry_failure = LLMCallError(
+        "still too large",
+        category=LLMErrorCategory.OUTPUT_LIMIT,
+        retryable=False,
+        status_code=400,
+        model_output_limit=4096,
+    )
+    gateway = _Gateway([overflow, retry_failure])
+
+    result = probe_model_output_limit(profile, gateway=gateway)
+
+    assert result.status is OutputLimitProbeStatus.RETRY_FAILED
+    assert result.suggested_value == 8192
+    assert result.model_output_limit == 8192
+    assert result.apply_suggested is False
+    assert result.message == "output-limit: still too large"
+    assert len(gateway.calls) == 2
+    assert profile.max_output_tokens == 10_000
+    assert gateway.calls[0][0].max_output_tokens == 16_383
+    assert gateway.calls[1][0].max_output_tokens == 8192
+    assert gateway.calls[1][1].max_output_tokens == 8192

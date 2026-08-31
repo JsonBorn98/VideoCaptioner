@@ -1,7 +1,8 @@
 """Provider-neutral LLM connection and reference capability probes."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Literal, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -95,6 +96,23 @@ class ModelProfileProbeResult:
     text: CapabilityProbeResult
     structured: CapabilityProbeResult
     max_output_tokens: int
+
+
+class OutputLimitProbeStatus(str, Enum):
+    AT_LEAST_PROBE_VALUE = "at-least-probe-value"
+    SUGGESTED = "suggested"
+    UNPARSEABLE = "unparseable"
+    RETRY_FAILED = "retry-failed"
+
+
+@dataclass(frozen=True)
+class OutputLimitProbeResult:
+    status: OutputLimitProbeStatus
+    probe_max_output_tokens: int
+    suggested_value: Optional[int] = None
+    model_output_limit: Optional[int] = None
+    apply_suggested: bool = False
+    message: Optional[str] = None
 
 
 def connection_probe_output_cap(profile: LLMModelProfile) -> int:
@@ -221,6 +239,100 @@ def probe_model_profile_capabilities(
     finally:
         if owns_gateway:
             runtime.close()
+
+
+def probe_model_output_limit(
+    profile: LLMModelProfile,
+    *,
+    gateway: Optional[LLMGateway] = None,
+) -> OutputLimitProbeResult:
+    """Probe the provider's model output limit and optionally suggest a fill-in.
+
+    The first request uses work-context-1 as the request output cap. If the
+    provider accepts it, the result only reports that the model output limit is
+    at least that probe value. A rejected 400 that carries a model output limit
+    is converted into a suggested value, verified once, and applied only when
+    the configured request output cap exceeds the discovered model limit.
+    """
+
+    owns_gateway = gateway is None
+    runtime = gateway or LLMGateway()
+    probe_max_output_tokens = max(1, profile.work_context_tokens - 1)
+    try:
+        try:
+            _complete_output_limit_probe(
+                runtime,
+                profile,
+                max_output_tokens=probe_max_output_tokens,
+                stage="output_limit_probe",
+            )
+        except LLMCallError as exc:
+            if exc.model_output_limit is None:
+                return OutputLimitProbeResult(
+                    status=OutputLimitProbeStatus.UNPARSEABLE,
+                    probe_max_output_tokens=probe_max_output_tokens,
+                    message=f"{exc.category.value}: {exc}",
+                )
+            suggested = min(exc.model_output_limit, probe_max_output_tokens)
+            try:
+                _complete_output_limit_probe(
+                    runtime,
+                    profile,
+                    max_output_tokens=suggested,
+                    stage="output_limit_probe_retry",
+                )
+            except LLMCallError as retry_exc:
+                return OutputLimitProbeResult(
+                    status=OutputLimitProbeStatus.RETRY_FAILED,
+                    probe_max_output_tokens=probe_max_output_tokens,
+                    suggested_value=suggested,
+                    model_output_limit=exc.model_output_limit,
+                    message=f"{retry_exc.category.value}: {retry_exc}",
+                )
+            configured = profile.max_output_tokens
+            apply_suggested = (
+                configured is not None and configured > exc.model_output_limit
+            )
+            return OutputLimitProbeResult(
+                status=OutputLimitProbeStatus.SUGGESTED,
+                probe_max_output_tokens=probe_max_output_tokens,
+                suggested_value=suggested,
+                model_output_limit=exc.model_output_limit,
+                apply_suggested=apply_suggested,
+            )
+        return OutputLimitProbeResult(
+            status=OutputLimitProbeStatus.AT_LEAST_PROBE_VALUE,
+            probe_max_output_tokens=probe_max_output_tokens,
+        )
+    finally:
+        if owns_gateway:
+            runtime.close()
+
+
+def _complete_output_limit_probe(
+    runtime: LLMGateway,
+    profile: LLMModelProfile,
+    *,
+    max_output_tokens: int,
+    stage: str,
+) -> None:
+    # Adapters prefer the profile cap over the request cap, so the probe must
+    # send a temporary profile whose max_output_tokens is the probe/suggested
+    # value. The caller's original profile is left unchanged.
+    runtime.complete(
+        replace(profile, max_output_tokens=max_output_tokens),
+        LLMRequest(
+            messages=(
+                LLMMessage("system", "Return only OK."),
+                LLMMessage("user", "Confirm the output limit."),
+            ),
+            max_output_tokens=max_output_tokens,
+            cacheable_system_prefix=False,
+            metadata={"stage": stage, "role": "utility"},
+        ),
+        max_attempts=1,
+        use_cache=False,
+    )
 
 
 def check_model_profile_connection(

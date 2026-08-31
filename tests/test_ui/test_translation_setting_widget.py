@@ -13,6 +13,8 @@ from qfluentwidgets import CaptionLabel, StrongBodyLabel
 from videocaptioner.core.llm.check_llm import (
     CapabilityProbeResult,
     ModelProfileProbeResult,
+    OutputLimitProbeResult,
+    OutputLimitProbeStatus,
 )
 from videocaptioner.core.llm.models import (
     LLMModelProfile,
@@ -430,6 +432,179 @@ def test_profile_dialog_displays_independent_probe_results():
     assert "文本能力：通过" in text
     assert "结构化输出：失败" in text
     assert "4608" in text
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_fills_when_configured_value_exceeds_model_limit():
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.outputModeCombo.setCurrentIndex(dialog.outputModeCombo.findData("custom"))
+    dialog.outputTokensSpin.setValue(10_000)
+    saved_clicked = []
+    dialog.yesButton.clicked.connect(lambda: saved_clicked.append(True))
+
+    dialog.showOutputLimitProbeResult(
+        OutputLimitProbeResult(
+            status=OutputLimitProbeStatus.SUGGESTED,
+            probe_max_output_tokens=65_535,
+            suggested_value=8192,
+            model_output_limit=8192,
+            apply_suggested=True,
+        )
+    )
+
+    assert dialog.outputModeCombo.currentData() == "custom"
+    assert dialog.outputTokensSpin.value() == 8192
+    text = dialog.outputLimitProbeResultLabel.text()
+    assert "8192" in text
+    assert saved_clicked == []
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_does_not_raise_configured_value_below_model_limit():
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.outputModeCombo.setCurrentIndex(dialog.outputModeCombo.findData("custom"))
+    dialog.outputTokensSpin.setValue(4_096)
+
+    dialog.showOutputLimitProbeResult(
+        OutputLimitProbeResult(
+            status=OutputLimitProbeStatus.SUGGESTED,
+            probe_max_output_tokens=65_535,
+            suggested_value=8192,
+            model_output_limit=8192,
+            apply_suggested=False,
+        )
+    )
+
+    assert dialog.outputTokensSpin.value() == 4_096
+    assert "8192" in dialog.outputLimitProbeResultLabel.text()
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_auto_mode_displays_without_filling():
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    assert dialog.outputModeCombo.currentData() == "auto"
+
+    dialog.showOutputLimitProbeResult(
+        OutputLimitProbeResult(
+            status=OutputLimitProbeStatus.SUGGESTED,
+            probe_max_output_tokens=65_535,
+            suggested_value=8192,
+            model_output_limit=8192,
+            apply_suggested=False,
+        )
+    )
+
+    assert dialog.outputModeCombo.currentData() == "auto"
+    assert "8192" in dialog.outputLimitProbeResultLabel.text()
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_click_confirms_cost_and_disables_button(monkeypatch):
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.nameEdit.setText("探查方案")
+    dialog.baseUrlEdit.setText("https://example.test/v1")
+    dialog.modelEdit.setText("example-model")
+    emitted = []
+    dialog.outputLimitProbeRequested.connect(emitted.append)
+    monkeypatch.setattr(dialog, "_confirmOutputLimitProbeCost", lambda: True)
+
+    dialog.outputLimitProbeButton.click()
+
+    assert len(emitted) == 1
+    assert dialog.outputLimitProbeButton.isEnabled() is False
+    assert "探查中" in dialog.outputLimitProbeResultLabel.text()
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_displays_at_least_probe_value_without_changing_config():
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.outputModeCombo.setCurrentIndex(dialog.outputModeCombo.findData("custom"))
+    dialog.outputTokensSpin.setValue(4_096)
+
+    dialog.showOutputLimitProbeResult(
+        OutputLimitProbeResult(
+            status=OutputLimitProbeStatus.AT_LEAST_PROBE_VALUE,
+            probe_max_output_tokens=65_535,
+        )
+    )
+
+    assert dialog.outputTokensSpin.value() == 4_096
+    assert "不低于探查值" in dialog.outputLimitProbeResultLabel.text()
+    assert "65535" in dialog.outputLimitProbeResultLabel.text()
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_displays_unparseable_error_without_changing_config():
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.outputModeCombo.setCurrentIndex(dialog.outputModeCombo.findData("custom"))
+    dialog.outputTokensSpin.setValue(10_000)
+
+    dialog.showOutputLimitProbeResult(
+        OutputLimitProbeResult(
+            status=OutputLimitProbeStatus.UNPARSEABLE,
+            probe_max_output_tokens=65_535,
+            message="configuration: bad request",
+        )
+    )
+
+    assert dialog.outputTokensSpin.value() == 10_000
+    text = dialog.outputLimitProbeResultLabel.text()
+    assert "无法解析" in text
+    assert "configuration: bad request" in text
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_displays_retry_failure_without_changing_config():
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.outputModeCombo.setCurrentIndex(dialog.outputModeCombo.findData("custom"))
+    dialog.outputTokensSpin.setValue(10_000)
+
+    dialog.showOutputLimitProbeResult(
+        OutputLimitProbeResult(
+            status=OutputLimitProbeStatus.RETRY_FAILED,
+            probe_max_output_tokens=65_535,
+            suggested_value=8192,
+            model_output_limit=8192,
+            message="output-limit: still too large",
+        )
+    )
+
+    assert dialog.outputTokensSpin.value() == 10_000
+    text = dialog.outputLimitProbeResultLabel.text()
+    assert "验证未通过" in text
+    assert "still too large" in text
+    dialog.close()
+    parent.close()
+
+
+def test_output_limit_probe_declined_cost_confirmation_does_not_start(monkeypatch):
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.nameEdit.setText("探查方案")
+    dialog.baseUrlEdit.setText("https://example.test/v1")
+    dialog.modelEdit.setText("example-model")
+    emitted = []
+    dialog.outputLimitProbeRequested.connect(emitted.append)
+    monkeypatch.setattr(dialog, "_confirmOutputLimitProbeCost", lambda: False)
+
+    dialog.outputLimitProbeButton.click()
+
+    assert emitted == []
+    assert dialog.outputLimitProbeButton.isEnabled() is True
     dialog.close()
     parent.close()
 
