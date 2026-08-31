@@ -390,6 +390,20 @@ def test_tool_capability_fallback_never_masks_context_overflow():
     assert len(completions.bodies) == 1
 
 
+def test_tool_capability_fallback_never_masks_output_overflow():
+    completions = _RejectsForcedTool(
+        "max_tokens is too large: 32000. This model supports at most "
+        "16384 completion tokens, whereas you provided 32000."
+    )
+
+    with pytest.raises(LLMCallError) as excinfo:
+        _chat_adapter(ProviderDialect.GLM, completions).complete(_request())
+
+    assert excinfo.value.category is LLMErrorCategory.OUTPUT_LIMIT
+    assert excinfo.value.model_output_limit == 16384
+    assert len(completions.bodies) == 1
+
+
 class _OpenAIResponses:
     def __init__(self, response):
         self.response = response
@@ -1366,6 +1380,8 @@ def test_native_http_context_overflow_has_structured_category():
         adapter.complete(_request())
     except LLMCallError as exc:
         assert exc.category is LLMErrorCategory.CONTEXT_LIMIT
+        assert exc.category is not LLMErrorCategory.OUTPUT_LIMIT
+        assert exc.model_output_limit is None
         assert exc.retryable is False
         assert "SECRET_PROVIDER_BODY" not in str(exc)
         assert exc.__cause__ is None
@@ -1402,8 +1418,235 @@ def test_openai_compatible_context_overflow_has_structured_category():
         adapter.complete(_request())
     except LLMCallError as exc:
         assert exc.category is LLMErrorCategory.CONTEXT_LIMIT
+        assert exc.category is not LLMErrorCategory.OUTPUT_LIMIT
+        assert exc.model_output_limit is None
         assert exc.retryable is False
         assert "SECRET_PROVIDER_BODY" not in str(exc)
         assert exc.__cause__ is None
     else:
         raise AssertionError("context overflow should fail")
+
+
+def _openai_status_error(message: str, body: dict) -> openai.BadRequestError:
+    request = httpx.Request("POST", "https://api.openai.test/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    return openai.BadRequestError(message, response=response, body=body)
+
+
+def test_openai_compatible_output_overflow_carries_model_output_limit():
+    class OverflowCompletions:
+        def create(self, **_kwargs):
+            raise _openai_status_error(
+                "max_tokens is too large: 32000. SECRET_PROVIDER_BODY",
+                {
+                    "error": {
+                        "message": (
+                            "max_tokens is too large: 32000. This model supports at most "
+                            "16384 completion tokens, whereas you provided 32000."
+                        ),
+                        "type": "invalid_request_error",
+                        "param": "max_tokens",
+                        "code": None,
+                        "prompt": "SECRET_PROVIDER_BODY",
+                    }
+                },
+            )
+
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.OPENAI,
+            base_url="https://api.openai.test/v1",
+        ),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=OverflowCompletions())),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.category is LLMErrorCategory.OUTPUT_LIMIT
+    assert error.category is not LLMErrorCategory.CONTEXT_LIMIT
+    assert error.model_output_limit == 16384
+    assert error.retryable is False
+    assert error.status_code == 400
+    assert "SECRET_PROVIDER_BODY" not in str(error)
+    assert error.__cause__ is None
+
+
+def test_openai_compatible_unparseable_output_overflow_does_not_guess():
+    class OverflowCompletions:
+        def create(self, **_kwargs):
+            raise _openai_status_error(
+                "max_tokens is too large: SECRET_PROVIDER_BODY",
+                {
+                    "error": {
+                        "message": "max_tokens is too large",
+                        "type": "invalid_request_error",
+                        "prompt": "SECRET_PROVIDER_BODY",
+                    }
+                },
+            )
+
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.OPENAI,
+            base_url="https://api.openai.test/v1",
+        ),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=OverflowCompletions())),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.category is LLMErrorCategory.CONFIGURATION
+    assert error.model_output_limit is None
+    assert "SECRET_PROVIDER_BODY" not in str(error)
+
+
+def test_anthropic_output_overflow_carries_model_output_limit():
+    response = _Response({})
+    response.ok = False
+    response.status_code = 400
+    response.text = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": (
+                    "max_tokens: 128001 > 64000, which is the maximum allowed "
+                    "number of output tokens for claude-opus-4-5-20251101"
+                ),
+            },
+            "request_id": "req_SECRET_PROVIDER_BODY",
+        }
+    )
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+        ),
+        session=_Session(response),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.category is LLMErrorCategory.OUTPUT_LIMIT
+    assert error.category is not LLMErrorCategory.CONTEXT_LIMIT
+    assert error.model_output_limit == 64000
+    assert error.retryable is False
+    assert error.status_code == 400
+    assert "SECRET_PROVIDER_BODY" not in str(error)
+    assert error.__cause__ is None
+
+
+def test_gemini_input_overflow_stays_context_limit():
+    response = _Response({})
+    response.ok = False
+    response.status_code = 400
+    response.text = json.dumps(
+        {
+            "error": {
+                "code": 400,
+                "message": (
+                    "The input token count (8122182) exceeds the maximum "
+                    "number of tokens allowed (1048576)."
+                ),
+                "status": "INVALID_ARGUMENT",
+                "details": "SECRET_PROVIDER_BODY",
+            }
+        }
+    )
+    adapter = GeminiAdapter(
+        _profile(
+            LLMTransport.GEMINI,
+            ProviderDialect.GEMINI,
+            base_url="https://generativelanguage.test/v1beta",
+        ),
+        session=_Session(response),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.category is LLMErrorCategory.CONTEXT_LIMIT
+    assert error.model_output_limit is None
+    assert "SECRET_PROVIDER_BODY" not in str(error)
+
+
+def test_gemini_output_overflow_carries_model_output_limit():
+    response = _Response({})
+    response.ok = False
+    response.status_code = 400
+    response.text = json.dumps(
+        {
+            "error": {
+                "code": 400,
+                "message": (
+                    "Unable to submit request because it has a maxOutputTokens "
+                    "value of 761458 but the supported range is from 1 "
+                    "(inclusive) to 65537 (exclusive). Update the value and try again."
+                ),
+                "status": "INVALID_ARGUMENT",
+                "details": "SECRET_PROVIDER_BODY",
+            }
+        }
+    )
+    adapter = GeminiAdapter(
+        _profile(
+            LLMTransport.GEMINI,
+            ProviderDialect.GEMINI,
+            base_url="https://generativelanguage.test/v1beta",
+        ),
+        session=_Session(response),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.category is LLMErrorCategory.OUTPUT_LIMIT
+    assert error.category is not LLMErrorCategory.CONTEXT_LIMIT
+    assert error.model_output_limit == 65536
+    assert error.retryable is False
+    assert error.status_code == 400
+    assert "SECRET_PROVIDER_BODY" not in str(error)
+    assert error.__cause__ is None
+
+
+def test_native_http_unparseable_400_does_not_guess_model_output_limit():
+    response = _Response({})
+    response.ok = False
+    response.status_code = 400
+    response.text = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "max_tokens is too large",
+            },
+            "request_id": "req_SECRET_PROVIDER_BODY",
+        }
+    )
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+        ),
+        session=_Session(response),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    error = caught.value
+    assert error.category is LLMErrorCategory.CONFIGURATION
+    assert error.model_output_limit is None
+    assert "SECRET_PROVIDER_BODY" not in str(error)

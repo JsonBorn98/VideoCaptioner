@@ -357,6 +357,7 @@ class LLMErrorCategory(str, Enum):
     AUTHENTICATION = "authentication"
     CONFIGURATION = "configuration"
     CONTEXT_LIMIT = "context-limit"
+    OUTPUT_LIMIT = "output-limit"
     INVALID_RESPONSE = "invalid-response"
     CANCELLED = "cancelled"
 
@@ -385,6 +386,7 @@ class LLMCallError(RuntimeError):
         response_status: Optional[str] = None,
         choice_count: Optional[int] = None,
         usage: Optional[LLMUsage] = None,
+        model_output_limit: Optional[int] = None,
     ) -> None:
         super().__init__(message)
         self.category = category
@@ -396,3 +398,4 @@ class LLMCallError(RuntimeError):
         self.response_status = response_status
         self.choice_count = choice_count
         self.usage = usage
+        self.model_output_limit = model_output_limit

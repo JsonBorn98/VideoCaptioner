@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import replace
@@ -198,6 +199,15 @@ def _http_error(response: requests.Response) -> LLMCallError:
             status_code=status,
             retry_after_seconds=retry_after,
         )
+    model_output_limit = _parse_model_output_limit(status, diagnostic)
+    if model_output_limit is not None:
+        return LLMCallError(
+            message,
+            category=LLMErrorCategory.OUTPUT_LIMIT,
+            retryable=False,
+            status_code=status,
+            model_output_limit=model_output_limit,
+        )
     if _is_context_limit_error(status, diagnostic):
         return LLMCallError(
             message,
@@ -245,6 +255,43 @@ def _is_context_limit_error(status_code: Optional[int], message: str) -> bool:
         return False
     normalized = message.casefold()
     return any(marker in normalized for marker in _CONTEXT_LIMIT_MARKERS)
+
+
+_GEMINI_OUTPUT_RANGE = re.compile(
+    r"maxoutputtokens.{0,240}supported range is from \d+ \(inclusive\) to (\d+) \(exclusive\)",
+    re.DOTALL,
+)
+_ANTHROPIC_OUTPUT_LIMIT = re.compile(
+    r"max_tokens:\s*\d+\s*>\s*(\d+).{0,120}maximum allowed number of output tokens",
+    re.DOTALL,
+)
+_OPENAI_COMPLETION_CAP = re.compile(r"supports at most (\d+) completion tokens")
+
+
+def _positive_token_limit(value: int) -> Optional[int]:
+    return value if value >= 1 else None
+
+
+def _parse_model_output_limit(status_code: Optional[int], diagnostic: str) -> Optional[int]:
+    """Return the provider-stated model output cap, or None when the body has none.
+
+    Only the documented 400/422 shapes are accepted. Missing or unreadable
+    numbers stay None so callers pass the error through instead of guessing.
+    """
+
+    if status_code not in {400, 422}:
+        return None
+    normalized = diagnostic.casefold()
+    gemini = _GEMINI_OUTPUT_RANGE.search(normalized)
+    if gemini is not None:
+        return _positive_token_limit(int(gemini.group(1)) - 1)
+    anthropic = _ANTHROPIC_OUTPUT_LIMIT.search(normalized)
+    if anthropic is not None:
+        return _positive_token_limit(int(anthropic.group(1)))
+    openai_cap = _OPENAI_COMPLETION_CAP.search(normalized)
+    if openai_cap is not None:
+        return _positive_token_limit(int(openai_cap.group(1)))
+    return None
 
 
 def _exception_text(exc: BaseException) -> str:
@@ -298,7 +345,10 @@ def _rejects_forced_tool_request(exc: openai.APIStatusError) -> bool:
     status = getattr(exc, "status_code", None)
     if status not in {400, 404, 422}:
         return False
-    return not _is_context_limit_error(status, _exception_text(exc))
+    diagnostic = _exception_text(exc)
+    if _parse_model_output_limit(status, diagnostic) is not None:
+        return False
+    return not _is_context_limit_error(status, diagnostic)
 
 
 class LLMAdapter(ABC):
@@ -413,23 +463,29 @@ class OpenAICompatibleAdapter(LLMAdapter):
         except openai.APIStatusError as exc:
             status = getattr(exc, "status_code", None)
             retryable = status == 429 or (status is not None and status >= 500)
-            message = _exception_text(exc)
-            context_limit = _is_context_limit_error(status, message)
+            diagnostic = _exception_text(exc)
+            model_output_limit = _parse_model_output_limit(status, diagnostic)
+            context_limit = (
+                model_output_limit is None and _is_context_limit_error(status, diagnostic)
+            )
+            if model_output_limit is not None:
+                category = LLMErrorCategory.OUTPUT_LIMIT
+            elif context_limit:
+                category = LLMErrorCategory.CONTEXT_LIMIT
+            elif retryable:
+                category = LLMErrorCategory.TRANSIENT
+            else:
+                category = LLMErrorCategory.CONFIGURATION
             raise LLMCallError(
                 (
                     f"LLM provider returned HTTP {status}"
                     if status is not None
                     else "LLM provider returned an API error"
                 ),
-                category=(
-                    LLMErrorCategory.CONTEXT_LIMIT
-                    if context_limit
-                    else LLMErrorCategory.TRANSIENT
-                    if retryable
-                    else LLMErrorCategory.CONFIGURATION
-                ),
-                retryable=retryable and not context_limit,
+                category=category,
+                retryable=retryable and not context_limit and model_output_limit is None,
                 status_code=status,
+                model_output_limit=model_output_limit,
             ) from None
 
     def _effective_output_cap(self, request: LLMRequest) -> Optional[int]:
