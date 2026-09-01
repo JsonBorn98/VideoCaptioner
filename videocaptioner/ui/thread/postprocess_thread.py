@@ -3,6 +3,7 @@ from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from videocaptioner.core.asr.asr_data import ASRData
+from videocaptioner.core.llm import LLMGateway
 from videocaptioner.core.llm.context import clear_task_context, set_task_context
 from videocaptioner.core.postprocess.models import PostprocessTask
 from videocaptioner.core.postprocess.report import build_qa_report
@@ -66,10 +67,11 @@ class PostprocessThread(QThread):
     error = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, task: PostprocessTask):
+    def __init__(self, task: PostprocessTask, gateway: LLMGateway | None = None):
         super().__init__()
         self.task = task
         self.result = None
+        self._injected_gateway = gateway
 
     def stop(self) -> None:
         """Request cooperative cancellation at the next safe stage boundary."""
@@ -100,6 +102,7 @@ class PostprocessThread(QThread):
             self.result = run_postprocess_task(
                 self.task,
                 timing_resolver=_resolve_timing,
+                gateway=self._injected_gateway,
             )
             if self._finish_if_cancelled():
                 return

@@ -198,6 +198,9 @@ class _MockLLMGateway:
     def __init__(self, *args, **kwargs):
         del args, kwargs
 
+    def close(self):
+        return None
+
     def complete(self, profile, request, **kwargs):
         del kwargs, profile
         messages = [
@@ -249,6 +252,15 @@ def mock_llm_client(monkeypatch):
     )
     monkeypatch.setattr(
         "videocaptioner.core.translate.llm_translator.LLMGateway",
+        _MockLLMGateway,
+    )
+    # Task-level gateway owners construct here and inject into consumers.
+    monkeypatch.setattr(
+        "videocaptioner.ui.thread.subtitle_thread.LLMGateway",
+        _MockLLMGateway,
+    )
+    monkeypatch.setattr(
+        "videocaptioner.ui.thread.subtitle_pipeline_thread.LLMGateway",
         _MockLLMGateway,
     )
     return _MockLLMGateway

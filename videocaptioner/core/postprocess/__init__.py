@@ -23,6 +23,7 @@ from .report import AuditResult, QualityReport, StageReport, build_qa_report
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
+    from ..llm import LLMGateway
     from ..speed.timing_evidence import TimingEvidenceWindow
 
 logger = setup_logger("postprocess")
@@ -108,6 +109,7 @@ def run_post_stage(
     report: Optional[QualityReport] = None,
     layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP,
     timing_windows: Iterable["TimingEvidenceWindow"] = (),
+    gateway: Optional["LLMGateway"] = None,
 ) -> Tuple["ASRData", QualityReport]:
     """保存前：[必要时规范化] → [压缩重译] → 闭合间隙 → [速度优化] → [尾部补偿] → 审计。
 
@@ -127,7 +129,7 @@ def run_post_stage(
         try:
             from .compress import compress_fast_subtitles
 
-            asr_data, report = compress_fast_subtitles(asr_data, cfg, report)
+            asr_data, report = compress_fast_subtitles(asr_data, cfg, report, gateway)
         except Exception as exc:  # noqa: BLE001
             logger.warning("快速字幕压缩失败，已跳过: %s", exc)
 
@@ -172,6 +174,7 @@ def run_post_stage(
             semantic_profile=cfg.utility_llm_profile,
             semantic_window_size=cfg.speed_semantic_window,
             semantic_uncertain_review=cfg.speed_llm_uncertain_review,
+            semantic_gateway=gateway,
         )
         report.segment_count = len(asr_data.segments)
 
