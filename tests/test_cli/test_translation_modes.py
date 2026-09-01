@@ -13,6 +13,7 @@ from videocaptioner.core.llm import LLMTransport, ProviderDialect
 from videocaptioner.core.llm.models import LLMModelProfile
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.translate.enhanced.models import (
+    StageUsage,
     TermConfirmationMode,
     TranslationAuditMode,
     TranslationExecutionMode,
@@ -164,6 +165,75 @@ def test_cli_enhanced_translation_is_automatic_and_persists_artifacts(
     assert enhanced_config.review_role.user_prompt == "review role"
     assert args.glossary_path.endswith(".vcglossary.json")
     assert args.translation_audit_report_path.endswith(".md")
+
+
+def test_cli_prints_stage_wall_clock_and_request_counts(tmp_path: Path, monkeypatch, capsys, profile_store) -> None:
+    source = tmp_path / "source.srt"
+    destination = tmp_path / "initial.srt"
+
+    def fake_run(data, config, **kwargs):
+        translated = ASRData.from_json(data.to_json())
+        translated.segments[0].translated_text = "你好"
+        glossary = tmp_path / "【项目术语表】source.vcglossary.json"
+        audit = tmp_path / "【翻译审计】source.md"
+        glossary.write_text("{}", encoding="utf-8")
+        audit.write_text("# audit", encoding="utf-8")
+        return SimpleNamespace(
+            subtitle_data=translated,
+            artifacts=SimpleNamespace(glossary_path=glossary, audit_report_path=audit),
+            result=SimpleNamespace(
+                audit_report=SimpleNamespace(
+                    issues=(),
+                    usages=(
+                        StageUsage(
+                            role="main",
+                            stage="analysis_window",
+                            calls=2,
+                            input_tokens=100,
+                            output_tokens=20,
+                            cache_read_tokens=8,
+                            cache_write_tokens=1,
+                            duration_ms=1500,
+                        ),
+                        StageUsage(
+                            role="review",
+                            stage="audit",
+                            calls=1,
+                            input_tokens=40,
+                            output_tokens=10,
+                            duration_ms=800,
+                        ),
+                    ),
+                )
+            ),
+        )
+
+    import videocaptioner.core.translate.enhanced as enhanced_package
+
+    monkeypatch.setattr(enhanced_package, "run_enhanced_translation", fake_run)
+    config = build_config(
+        {
+            "llm": {
+                "profile_id": "main-profile",
+                "review_profile_id": "main-profile",
+            },
+            "subtitle": {"optimize": False, "split": False, "translate": True},
+            "translate": {
+                "mode": "enhanced_llm",
+                "source_language": "English",
+                "main_prompt": "main role",
+                "review_prompt": "review role",
+            },
+        }
+    )
+    args = _args(source, destination, quiet=False)
+
+    result = subtitle_command.run(args, config)
+
+    err = capsys.readouterr().err
+    assert result == EXIT.SUCCESS
+    assert "usage · main/analysis_window · 2 calls · 1500 ms · in 100 · out 20" in err
+    assert "usage · review/audit · 1 calls · 800 ms · in 40 · out 10" in err
 
 
 def test_enhanced_translation_uses_independent_profiles_and_warns_once_for_store(

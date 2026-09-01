@@ -365,6 +365,7 @@ class LLMResult:
     text: str
     usage: LLMUsage = field(default_factory=LLMUsage)
     raw: Any = field(default=None, repr=False, compare=False)
+    duration_ms: Optional[int] = None
 
 
 class LLMErrorCategory(str, Enum):
@@ -402,6 +403,7 @@ class LLMCallError(RuntimeError):
         choice_count: Optional[int] = None,
         usage: Optional[LLMUsage] = None,
         model_output_limit: Optional[int] = None,
+        duration_ms: Optional[int] = None,
     ) -> None:
         super().__init__(message)
         self.category = category
@@ -414,3 +416,4 @@ class LLMCallError(RuntimeError):
         self.choice_count = choice_count
         self.usage = usage
         self.model_output_limit = model_output_limit
+        self.duration_ms = duration_ms

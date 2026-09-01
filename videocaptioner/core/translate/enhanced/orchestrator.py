@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import replace
 from itertools import islice
@@ -409,13 +410,26 @@ _AUDIT_SCHEMA: Mapping[str, Any] = {
 
 class _UsageCollector:
     def __init__(self) -> None:
-        self._values: dict[tuple[str, str], tuple[int, LLMUsage]] = {}
+        self._values: dict[tuple[str, str], tuple[int, LLMUsage, int]] = {}
         self._lock = threading.Lock()
 
-    def add(self, role: str, stage: str, usage: LLMUsage) -> None:
+    def add(
+        self,
+        role: str,
+        stage: str,
+        usage: LLMUsage,
+        duration_ms: Optional[int] = None,
+    ) -> None:
+        elapsed = max(0, duration_ms or 0)
         with self._lock:
-            calls, current = self._values.get((role, stage), (0, LLMUsage()))
-            self._values[(role, stage)] = (calls + 1, current + usage)
+            calls, current, current_ms = self._values.get(
+                (role, stage), (0, LLMUsage(), 0)
+            )
+            self._values[(role, stage)] = (
+                calls + 1,
+                current + usage,
+                current_ms + elapsed,
+            )
 
     def snapshot(self) -> tuple[StageUsage, ...]:
         with self._lock:
@@ -428,8 +442,11 @@ class _UsageCollector:
                     output_tokens=usage.output_tokens,
                     cache_read_tokens=usage.cache_read_tokens,
                     cache_write_tokens=usage.cache_write_tokens,
+                    duration_ms=duration_ms,
                 )
-                for (role, stage), (calls, usage) in sorted(self._values.items())
+                for (role, stage), (calls, usage, duration_ms) in sorted(
+                    self._values.items()
+                )
             )
 
 
@@ -737,6 +754,7 @@ class EnhancedTranslationOrchestrator:
                         )
                     ),
                 )
+                started = time.perf_counter()
                 try:
                     provider_attempts += 1
                     result = self.gateway.complete(
@@ -749,8 +767,15 @@ class EnhancedTranslationOrchestrator:
                     raise
                 except LLMCallError as exc:
                     provider_attempts += max(1, exc.attempts) - 1
+                    duration_ms = getattr(exc, "duration_ms", None)
+                    if duration_ms is None:
+                        duration_ms = max(
+                            0, int((time.perf_counter() - started) * 1000)
+                        )
                     if exc.usage is not None:
-                        self._usage.add(role.role, stage, exc.usage)
+                        self._usage.add(
+                            role.role, stage, exc.usage, duration_ms=duration_ms
+                        )
                     if exc.category is LLMErrorCategory.CONTEXT_LIMIT:
                         raise _ContextLimitSignal(role, stage, exc) from exc
                     if not is_output_limit_finish_reason(exc.finish_reason):
@@ -820,7 +845,10 @@ class EnhancedTranslationOrchestrator:
                         retryable=False,
                         attempts=provider_attempts,
                     ) from exc
-            self._usage.add(role.role, stage, result.usage)
+            duration_ms = result.duration_ms
+            if duration_ms is None:
+                duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+            self._usage.add(role.role, stage, result.usage, duration_ms=duration_ms)
             try:
                 parsed = json_repair.loads(result.text)
             except (TypeError, ValueError, KeyError) as exc:

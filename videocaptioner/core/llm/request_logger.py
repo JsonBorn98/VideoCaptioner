@@ -192,13 +192,12 @@ def finish_gateway_request(
     *,
     result: Optional[LLMResult] = None,
     error: Optional[BaseException] = None,
-) -> None:
+) -> int:
     """Write one completed gateway attempt with normalized usage fields."""
 
     entry = dict(handle.entry)
-    entry["duration_ms"] = max(
-        0, int((time.perf_counter() - handle.started_at) * 1000)
-    )
+    duration_ms = max(0, int((time.perf_counter() - handle.started_at) * 1000))
+    entry["duration_ms"] = duration_ms
     if error is None and result is not None:
         entry["status"] = "success"
         entry["usage"] = _usage_entry(result)
@@ -210,6 +209,7 @@ def finish_gateway_request(
         if isinstance(error, LLMCallError) and error.usage is not None:
             entry["usage"] = _normalized_usage_entry(error.usage)
     _write_log(entry)
+    return duration_ms
 
 
 def log_gateway_cache_hit(

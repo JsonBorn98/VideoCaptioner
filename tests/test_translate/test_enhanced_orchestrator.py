@@ -146,6 +146,8 @@ class ScriptedGateway:
         value = self.responses[stage].pop(0)
         if isinstance(value, BaseException):
             raise value
+        if isinstance(value, LLMResult):
+            return value
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         return LLMResult(
             text=text,
@@ -1058,3 +1060,61 @@ def test_manual_confirmation_is_skipped_when_analysis_finds_no_terms():
 
     assert result.translations == {1: "你好。"}
     assert confirmation_calls == []
+
+
+def _timed_result(payload, duration_ms: int) -> LLMResult:
+    text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    return LLMResult(
+        text=text,
+        usage=LLMUsage(
+            input_tokens=10,
+            output_tokens=2,
+            cache_read_tokens=4,
+            cache_write_tokens=1,
+        ),
+        duration_ms=duration_ms,
+    )
+
+
+def test_usage_snapshot_accumulates_wall_clock_by_role_and_stage():
+    cues = (SubtitleCue(1, "Source"),)
+    gateway = ScriptedGateway(
+        analysis_window=[_timed_result(_analysis(), 120)],
+        translation=[_timed_result(_translations((1, "译文")), 80)],
+        audit=[_timed_result({"issues": []}, 40)],
+    )
+
+    result = EnhancedTranslationOrchestrator(_config(), gateway=gateway).run(cues)
+
+    by_key = {(usage.role, usage.stage): usage for usage in result.audit_report.usages}
+    assert by_key[("main", "analysis_window")].calls == 1
+    assert by_key[("main", "analysis_window")].duration_ms == 120
+    assert by_key[("main", "translation")].duration_ms == 80
+    assert by_key[("review", "audit")].duration_ms == 40
+    assert by_key[("main", "analysis_window")].input_tokens == 10
+
+
+def test_usage_snapshot_sums_wall_clock_across_stage_calls():
+    cues = (SubtitleCue(1, "One"), SubtitleCue(2, "Two"))
+    gateway = ScriptedGateway(
+        analysis_window=[_timed_result(_analysis(), 10)],
+        translation=[
+            _timed_result(_translations((1, "一")), 50),
+            _timed_result(_translations((2, "二")), 70),
+        ],
+        audit=[
+            _timed_result({"issues": []}, 5),
+            _timed_result({"issues": []}, 7),
+        ],
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _config(batch_size=1), gateway=gateway
+    ).run(cues)
+
+    by_key = {(usage.role, usage.stage): usage for usage in result.audit_report.usages}
+    assert by_key[("main", "translation")].calls == 2
+    assert by_key[("main", "translation")].duration_ms == 120
+    assert by_key[("main", "analysis_window")].duration_ms == 10
+    assert by_key[("review", "audit")].calls == 2
+    assert by_key[("review", "audit")].duration_ms == 12

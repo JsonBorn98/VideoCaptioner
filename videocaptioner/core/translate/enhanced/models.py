@@ -169,6 +169,7 @@ class StageUsage:
     output_tokens: Optional[int] = None
     cache_read_tokens: Optional[int] = None
     cache_write_tokens: Optional[int] = None
+    duration_ms: Optional[int] = None
 
 
 class AuditIssueDisposition(str, Enum):

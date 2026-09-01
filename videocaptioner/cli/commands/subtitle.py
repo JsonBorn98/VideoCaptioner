@@ -500,6 +500,7 @@ def run(args: Namespace, config: dict) -> int:
                 output.summary(
                     "usage · "
                     f"{usage.role}/{usage.stage} · {usage.calls} calls · "
+                    f"{_display_usage_value(usage.duration_ms)} ms · "
                     f"in {_display_usage_value(usage.input_tokens)} · "
                     f"out {_display_usage_value(usage.output_tokens)} · "
                     f"cache-read {_display_usage_value(usage.cache_read_tokens)} · "

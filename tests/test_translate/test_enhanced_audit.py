@@ -8,6 +8,7 @@ from videocaptioner.core.translate.enhanced.models import (
     AuditIssueDisposition,
     GlossaryEntry,
     GlossarySelectionSource,
+    StageUsage,
     SubtitleCue,
     TranslationAuditIssue,
     TranslationAuditReport,
@@ -157,6 +158,37 @@ def test_markdown_uses_unavailable_for_missing_usage_and_saves_atomically(tmp_pa
 
     path = save_audit_markdown(tmp_path / "audit.md", report)
     assert path.read_text(encoding="utf-8") == markdown
+
+
+def test_markdown_includes_wall_clock_duration_for_each_stage():
+    report = TranslationAuditReport(
+        usages=(
+            StageUsage(
+                role="main",
+                stage="analysis_window",
+                calls=2,
+                input_tokens=100,
+                output_tokens=20,
+                cache_read_tokens=8,
+                cache_write_tokens=1,
+                duration_ms=1500,
+            ),
+            StageUsage(
+                role="review",
+                stage="audit",
+                calls=1,
+                input_tokens=40,
+                output_tokens=10,
+                duration_ms=800,
+            ),
+        )
+    )
+
+    markdown = render_audit_markdown(report)
+
+    assert "| 角色 | 阶段 | 调用 | 墙钟 ms | 输入 token | 输出 token | 缓存读取 | 缓存写入 |" in markdown
+    assert "| 主翻译 | 全文分窗分析 | 2 | 1500 | 100 | 20 | 8 | 1 |" in markdown
+    assert "| 高级校对 | 质量审计 | 1 | 800 | 40 | 10 | 不可用 | 不可用 |" in markdown
 
 
 def test_markdown_records_review_suggestion_final_text_and_user_disposition():

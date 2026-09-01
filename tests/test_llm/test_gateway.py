@@ -183,6 +183,22 @@ def test_gateway_reuses_adapter_and_semaphore_for_same_profile():
     assert first_adapter.calls == 2
 
 
+def test_gateway_attaches_request_duration_to_successful_result():
+    class DelayedAdapter(LLMAdapter):
+        def complete(self, request):
+            time.sleep(0.02)
+            return LLMResult(text="ok")
+
+    profile = _profile()
+    result = LLMGateway(
+        adapter_factory=lambda unused: DelayedAdapter(profile)
+    ).complete(profile, REQUEST)
+
+    assert result.text == "ok"
+    assert result.duration_ms is not None
+    assert result.duration_ms >= 20
+
+
 class _SlowAdapter(LLMAdapter):
     def __init__(self, profile, *, started, release, in_flight, peak, lock):
         super().__init__(profile)

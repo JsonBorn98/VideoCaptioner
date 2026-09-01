@@ -6,6 +6,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Optional
 
 from videocaptioner.core.utils.logger import setup_logger
@@ -125,9 +126,12 @@ class LLMGateway:
                     try:
                         result = adapter.complete(request)
                     except BaseException as exc:
-                        finish_gateway_request(log_handle, error=exc)
+                        duration_ms = finish_gateway_request(log_handle, error=exc)
+                        if isinstance(exc, LLMCallError):
+                            exc.duration_ms = duration_ms
                         raise
-                    finish_gateway_request(log_handle, result=result)
+                    duration_ms = finish_gateway_request(log_handle, result=result)
+                    result = replace(result, duration_ms=duration_ms)
                     if use_cache:
                         self._response_cache.store(profile, request, result)
                     return result

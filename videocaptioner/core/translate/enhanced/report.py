@@ -79,8 +79,8 @@ def render_audit_markdown(report: TranslationAuditReport) -> str:
         "",
         "## Usage",
         "",
-        "| 角色 | 阶段 | 调用 | 输入 token | 输出 token | 缓存读取 | 缓存写入 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| 角色 | 阶段 | 调用 | 墙钟 ms | 输入 token | 输出 token | 缓存读取 | 缓存写入 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
 
     def display(value: object) -> str:
@@ -98,6 +98,7 @@ def render_audit_markdown(report: TranslationAuditReport) -> str:
                         _ROLE_LABELS.get(usage.role, usage.role),
                         _STAGE_LABELS.get(usage.stage, usage.stage),
                         str(usage.calls),
+                        display(usage.duration_ms),
                         display(usage.input_tokens),
                         display(usage.output_tokens),
                         display(usage.cache_read_tokens),
@@ -107,7 +108,7 @@ def render_audit_markdown(report: TranslationAuditReport) -> str:
                 + " |"
             )
     else:
-        lines.append("| — | — | 0 | 不可用 | 不可用 | 不可用 | 不可用 |")
+        lines.append("| — | — | 0 | 不可用 | 不可用 | 不可用 | 不可用 | 不可用 |")
 
     lines.extend(
         (

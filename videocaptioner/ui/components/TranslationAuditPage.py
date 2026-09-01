@@ -297,6 +297,7 @@ class TranslationAuditPage(QWidget):
                 stage = _STAGE_LABELS.get(usage.stage, usage.stage)
                 details.append(
                     f"{role} / {stage}  ·  调用 {usage.calls}  ·  "
+                    f"墙钟 {usage.duration_ms if usage.duration_ms is not None else unavailable} ms  ·  "
                     f"输入 {usage.input_tokens if usage.input_tokens is not None else unavailable}  ·  "
                     f"输出 {usage.output_tokens if usage.output_tokens is not None else unavailable}  ·  "
                     f"缓存读取 {usage.cache_read_tokens if usage.cache_read_tokens is not None else unavailable}  ·  "
