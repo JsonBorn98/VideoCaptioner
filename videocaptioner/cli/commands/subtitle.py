@@ -198,13 +198,11 @@ def run(args: Namespace, config: dict) -> int:
     if batch_size < 1:
         output.error("--batch-size must be at least 1")
         return EXIT.USAGE_ERROR
-    if (
-        need_translate
-        and translation_mode == "enhanced_llm"
-        and int(get(config, "translate.enhanced_batch_size", 10)) < 1
-    ):
-        output.error("translate.enhanced_batch_size must be at least 1")
-        return EXIT.USAGE_ERROR
+    if need_translate and translation_mode == "enhanced_llm":
+        enhanced_batch_size = int(get(config, "translate.enhanced_batch_size", 10))
+        if not 1 <= enhanced_batch_size <= 500:
+            output.error("translate.enhanced_batch_size must be between 1 and 500")
+            return EXIT.USAGE_ERROR
     layout_str = get(config, "synthesize.layout", "target-above")
     verbose = getattr(args, "verbose", False)
     quiet = getattr(args, "quiet", False)

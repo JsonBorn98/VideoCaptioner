@@ -148,7 +148,7 @@ class Config(QConfig):
     deeplx_endpoint = ConfigItem("Translate", "DeeplxEndpoint", "")
     batch_size = RangeConfigItem("Translate", "BatchSize", 10, RangeValidator(5, 50))
     enhanced_batch_size = RangeConfigItem(
-        "Translate", "EnhancedBatchSize", 10, RangeValidator(1, 50)
+        "Translate", "EnhancedBatchSize", 10, RangeValidator(1, 500)
     )
     term_context_radius = RangeConfigItem(
         "Translate", "TermContextRadius", 10, RangeValidator(0, 50)

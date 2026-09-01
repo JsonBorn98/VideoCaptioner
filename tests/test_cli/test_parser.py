@@ -343,6 +343,13 @@ class TestSubtitleParser:
         assert exc.value.code == 0
         assert "default: 10" in capsys.readouterr().out
 
+    def test_batch_size_flag_accepts_five_hundred(self):
+        args = build_parser().parse_args(
+            ["subtitle", "input.srt", "--batch-size", "500"]
+        )
+        overrides = _build_cli_overrides(args)
+        assert overrides["translate"]["enhanced_batch_size"] == 500
+
     def test_llm_profile_flags_build_partial_overrides(self):
         args = build_parser().parse_args(
             [

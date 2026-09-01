@@ -483,7 +483,11 @@ def _build_subtitle_parser(subparsers) -> None:
         "--thread-num", type=int, metavar="N", help="Number of concurrent requests (default: 10)"
     )
     sub.add_argument(
-        "--batch-size", type=int, metavar="N", help="Batch size for processing (default: 20)"
+        "--batch-size",
+        type=int,
+        metavar="N",
+        help="Batch size for processing (enhanced LLM 1-500, default: 10)",
+
     )
 
     layout = p.add_argument_group("Layout options")

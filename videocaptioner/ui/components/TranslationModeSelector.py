@@ -423,7 +423,7 @@ class TranslationModeSelector(QWidget):
 
         grid.addWidget(BodyLabel(self.tr("每批字幕"), panel), 3, 0)
         self.enhanced_batch_spin = SpinBox(panel)
-        self.enhanced_batch_spin.setRange(1, 50)
+        self.enhanced_batch_spin.setRange(1, 500)
         self.enhanced_batch_spin.setValue(int(cfg.enhanced_batch_size.value))
         self.enhanced_batch_spin.valueChanged.connect(
             lambda value: cfg.set(cfg.enhanced_batch_size, value)

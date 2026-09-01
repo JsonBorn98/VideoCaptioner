@@ -4,6 +4,10 @@ from collections import defaultdict
 import pytest
 
 import videocaptioner.core.translate.enhanced.orchestrator as orchestrator_module
+from videocaptioner.core.llm.adapters import (
+    DEFAULT_TIMEOUT_SECONDS,
+    request_timeout_seconds,
+)
 from videocaptioner.core.llm.models import (
     LLMCallError,
     LLMErrorCategory,
@@ -29,7 +33,10 @@ from videocaptioner.core.translate.enhanced.models import (
 from videocaptioner.core.translate.enhanced.orchestrator import (
     EnhancedTranslationOrchestrator,
 )
-from videocaptioner.core.translate.enhanced.token_planner import TokenBudgetExceeded
+from videocaptioner.core.translate.enhanced.token_planner import (
+    TokenBudgetExceeded,
+    estimate_cues_tokens,
+)
 
 
 def _profile(
@@ -178,9 +185,14 @@ def test_enhanced_planners_and_requests_use_each_role_output_cap(monkeypatch):
         return real_analysis_planner(*args, **kwargs)
 
     def track_translation_planner(*args, **kwargs):
-        translation_plans.append(
-            (kwargs["working_context_tokens"], kwargs["output_reserve_tokens"])
+        cues = args[0]
+        estimator = kwargs.get("output_reserve_estimator")
+        reserve = (
+            estimator(cues)
+            if estimator is not None
+            else kwargs.get("output_reserve_tokens")
         )
+        translation_plans.append((kwargs["working_context_tokens"], reserve))
         return real_translation_planner(*args, **kwargs)
 
     monkeypatch.setattr(orchestrator_module, "plan_analysis_windows", track_analysis_planner)
@@ -197,8 +209,11 @@ def test_enhanced_planners_and_requests_use_each_role_output_cap(monkeypatch):
         _config(main_profile=main_profile, review_profile=review_profile), gateway=gateway
     ).run((SubtitleCue(1, "Source"),))
 
+    subject_tokens = estimate_cues_tokens((SubtitleCue(1, "Source"),))
+    translation_reserve = min(int(subject_tokens * 1.2) + 256, 4_000)
+    audit_reserve = min(int(subject_tokens * 1.3) + 256, 2_000)
     assert analysis_plans == [(65_536, 4_000)]
-    assert translation_plans == [(65_536, 4_000), (32_768, 2_000)]
+    assert translation_plans == [(65_536, translation_reserve), (32_768, audit_reserve)]
     assert gateway.stage_calls["analysis_window"][0].max_output_tokens == 4_000
     assert gateway.stage_calls["translation"][0].max_output_tokens == 4_000
     assert gateway.stage_calls["audit"][0].max_output_tokens == 2_000
@@ -326,6 +341,55 @@ def test_256k_api_cap_is_not_used_as_the_planner_output_reserve():
         1_000,
         stage="translation",
     ) == (256_000,)
+
+
+def test_planning_output_reserve_scales_with_subject_input_not_fixed_ceiling():
+    role = TranslationRoleSnapshot(
+        "main",
+        _profile("main", work_context_tokens=65_536),
+    )
+    small = EnhancedTranslationOrchestrator._planning_output_reserve(
+        role, 65_536, stage="translation", subject_input_tokens=100
+    )
+    large = EnhancedTranslationOrchestrator._planning_output_reserve(
+        role, 65_536, stage="translation", subject_input_tokens=10_000
+    )
+    audit = EnhancedTranslationOrchestrator._planning_output_reserve(
+        role, 65_536, stage="audit", subject_input_tokens=10_000
+    )
+
+    assert small == int(100 * 1.2) + 256
+    assert large == int(10_000 * 1.2) + 256
+    assert large > 8_192
+    assert audit == int(10_000 * 1.3) + 256
+    assert audit > large
+
+
+def test_small_translation_batch_keeps_near_baseline_timeout():
+    cues = (SubtitleCue(1, "Source"),)
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((1, "译文"))],
+        audit=[{"issues": []}],
+    )
+    main_profile = _profile("main", work_context_tokens=65_536)
+    review_profile = _profile("review", work_context_tokens=65_536)
+
+    EnhancedTranslationOrchestrator(
+        _config(main_profile=main_profile, review_profile=review_profile),
+        gateway=gateway,
+    ).run(cues)
+
+    request = gateway.stage_calls["translation"][0]
+    reserve = EnhancedTranslationOrchestrator._planning_output_reserve(
+        TranslationRoleSnapshot("main", main_profile),
+        65_536,
+        stage="translation",
+        subject_input_tokens=estimate_cues_tokens(cues),
+    )
+    assert request.timeout == request_timeout_seconds(reserve)
+    assert request.timeout < DEFAULT_TIMEOUT_SECONDS + 30
+    assert request.max_output_tokens == 32_768
 
 
 def test_main_output_limit_raises_cap_and_reduces_reasoning_together():

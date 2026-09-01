@@ -37,6 +37,7 @@ old = (
     cfg.review_llm_profile_id.value,
     cfg.source_language.value,
     cfg.target_language.value,
+    cfg.enhanced_batch_size.value,
 )
 store = LLMModelProfileStore({profile_path})
 store.save(LLMModelProfile(
@@ -53,6 +54,8 @@ try:
     assert isinstance(widget.enhanced_llm_panel, SimpleCardWidget)
     assert isinstance(widget.main_profile_combo, ComboBox)
     assert isinstance(widget.enhanced_batch_spin, SpinBox)
+    widget.enhanced_batch_spin.setValue(500)
+    assert cfg.enhanced_batch_size.value == 500
     assert isinstance(widget.reflect_checkbox, SwitchButton)
     assert widget.source_language_combo.itemData(0) == 'auto'
     assert all(
@@ -105,6 +108,7 @@ finally:
     cfg.set(cfg.review_llm_profile_id, old[2])
     cfg.set(cfg.source_language, old[3])
     cfg.set(cfg.target_language, old[4])
+    cfg.set(cfg.enhanced_batch_size, old[5])
 """
     )
 

@@ -106,3 +106,33 @@ def test_translation_planner_accepts_stage_specific_input_estimator() -> None:
     )
 
     assert [batch.subject_ids for batch in batches] == [(1, 2), (3, 4)]
+
+
+def test_translation_planner_accepts_per_batch_output_reserve_estimator() -> None:
+    cues = tuple(SubtitleCue(index, f"cue {index}") for index in range(1, 7))
+
+    batches = plan_translation_batches(
+        cues,
+        batch_size=6,
+        working_context_tokens=400,
+        context_radius=0,
+        batch_input_estimator=lambda _before, subjects, _after: len(subjects) * 40,
+        output_reserve_estimator=lambda subjects: len(subjects) * 20,
+    )
+
+    assert [batch.subject_ids for batch in batches] == [(1, 2, 3, 4, 5, 6)]
+
+
+def test_fixed_output_reserve_can_force_the_same_cues_into_smaller_batches() -> None:
+    cues = tuple(SubtitleCue(index, f"cue {index}") for index in range(1, 7))
+
+    batches = plan_translation_batches(
+        cues,
+        batch_size=6,
+        working_context_tokens=400,
+        context_radius=0,
+        output_reserve_tokens=200,
+        batch_input_estimator=lambda _before, subjects, _after: len(subjects) * 40,
+    )
+
+    assert [len(batch.subjects) for batch in batches] == [5, 1]

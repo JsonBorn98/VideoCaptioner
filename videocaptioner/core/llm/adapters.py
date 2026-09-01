@@ -41,6 +41,19 @@ StructuredChatStrategy = Literal["json_schema", "tool", "json_object"]
 # the OpenAI SDK's own default is Timeout(connect=5.0, read=600, ...).
 # LLMRequest.timeout overrides the adapter default for a single request.
 DEFAULT_TIMEOUT_SECONDS = 120.0
+TIMEOUT_SECONDS_PER_OUTPUT_TOKEN = 0.015
+
+
+def request_timeout_seconds(
+    max_output_tokens: Optional[int],
+    *,
+    baseline: float = DEFAULT_TIMEOUT_SECONDS,
+) -> float:
+    """Scale the request deadline with the output cap; small batches keep the baseline."""
+
+    if max_output_tokens is None:
+        return baseline
+    return baseline + max_output_tokens * TIMEOUT_SECONDS_PER_OUTPUT_TOKEN
 
 # Every transport labels the structured contract it sends, as a schema name or as
 # a tool name.  Anthropic also matches the label when reading the reply back, so
@@ -370,7 +383,7 @@ class LLMAdapter(ABC):
 
         if request.timeout is not None:
             return request.timeout
-        return self.timeout
+        return request_timeout_seconds(request.max_output_tokens, baseline=self.timeout)
 
     def _effective_profile(self, request: LLMRequest) -> LLMModelProfile:
         if request.request_options_override is None:
@@ -498,9 +511,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
     def _transport_options(self, request: LLMRequest) -> dict[str, Any]:
         """Per-request transport options that never enter the HTTP body."""
 
-        if request.timeout is None:
-            return {}
-        return {"timeout": request.timeout}
+        return {"timeout": self._effective_timeout(request)}
 
     def _structured_chat_strategy(self) -> StructuredChatStrategy:
         """Pick how to transmit ``response_schema`` on the chat completions API.

@@ -132,6 +132,7 @@ def plan_translation_batches(
             int,
         ]
     ] = None,
+    output_reserve_estimator: Optional[Callable[[Sequence[SubtitleCue]], int]] = None,
 ) -> tuple[TranslationBatch, ...]:
     """Plan formal translation batches with strictly separated boundary context.
 
@@ -149,6 +150,14 @@ def plan_translation_batches(
         raise ValueError("token reserves and context_radius must not be negative")
     if context_radius > 3:
         raise ValueError("boundary context cannot exceed three cues per side")
+
+    def reserve_for(subjects: Sequence[SubtitleCue]) -> int:
+        if output_reserve_estimator is None:
+            return output_reserve_tokens
+        estimated = output_reserve_estimator(subjects)
+        if estimated < 0:
+            raise ValueError("output_reserve_estimator must not return a negative value")
+        return estimated
 
     def make_candidate(
         start: int, subject_count: int, radius: int
@@ -175,7 +184,7 @@ def plan_translation_batches(
         # Preserve all requested boundary context while shrinking subjects.
         for subject_count in range(max_subjects, 0, -1):
             candidate = make_candidate(cursor, subject_count, context_radius)
-            if candidate[3] + output_reserve_tokens <= working_context_tokens:
+            if candidate[3] + reserve_for(candidate[1]) <= working_context_tokens:
                 selected = candidate
                 break
 
@@ -183,14 +192,14 @@ def plan_translation_batches(
         if selected is None:
             for radius in range(context_radius - 1, -1, -1):
                 candidate = make_candidate(cursor, 1, radius)
-                if candidate[3] + output_reserve_tokens <= working_context_tokens:
+                if candidate[3] + reserve_for(candidate[1]) <= working_context_tokens:
                     selected = candidate
                     break
 
         if selected is None:
             cue = cues[cursor]
             _, _, _, required_input = make_candidate(cursor, 1, 0)
-            required = required_input + output_reserve_tokens
+            required = required_input + reserve_for((cue,))
             raise TokenBudgetExceeded(
                 f"cue {cue.cue_id} requires approximately {required} tokens, "
                 f"budget is {working_context_tokens}"

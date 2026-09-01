@@ -77,6 +77,10 @@ def test_default_thread_num_is_ten():
     assert DEFAULTS["subtitle"]["thread_num"] == 10
 
 
+def test_default_enhanced_batch_size_is_ten():
+    assert DEFAULTS["translate"]["enhanced_batch_size"] == 10
+
+
 class TestDeepMerge:
     def test_flat_override(self):
         assert _deep_merge({"a": 1}, {"a": 2}) == {"a": 2}

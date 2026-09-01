@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
 import json_repair
 
 from videocaptioner.core.llm import LLMGateway, LLMMessage, LLMRequest, LLMUsage
+from videocaptioner.core.llm.adapters import request_timeout_seconds
 from videocaptioner.core.llm.models import (
     LLMCallError,
     LLMErrorCategory,
@@ -56,6 +57,7 @@ from .models import (
 from .prompt_assembler import assemble_prompt, translation_batch_payload
 from .token_planner import (
     TokenBudgetExceeded,
+    estimate_cues_tokens,
     estimate_tokens,
     plan_analysis_windows,
     plan_translation_batches,
@@ -689,6 +691,7 @@ class EnhancedTranslationOrchestrator:
         schema: Mapping[str, Any],
         validator: Callable[[Any], T],
         mechanical_attempts: int = 3,
+        timeout_output_tokens: Optional[int] = None,
     ) -> T:
         structured_instruction = (
             f"{instruction}\n\n{_structured_output_instruction(schema)}"
@@ -726,6 +729,13 @@ class EnhancedTranslationOrchestrator:
                     request_options_override=request_options_override,
                     response_schema=schema,
                     metadata={"stage": stage, "role": role.role},
+                    timeout=request_timeout_seconds(
+                        timeout_output_tokens
+                        if timeout_output_tokens is not None
+                        else self._planning_output_reserve(
+                            role, self._runtime_budget(role), stage=stage
+                        )
+                    ),
                 )
                 try:
                     provider_attempts += 1
@@ -858,14 +868,20 @@ class EnhancedTranslationOrchestrator:
         work_context_tokens: int,
         *,
         stage: str,
+        subject_input_tokens: Optional[int] = None,
     ) -> int:
         """Estimate output for batching without treating the API hard cap as usage."""
 
-        ceiling = 4096 if stage == "audit" else 8192
-        reserve = min(ceiling, max(1024, work_context_tokens // 8))
+        if subject_input_tokens is None:
+            ceiling = 4096 if stage == "audit" else 8192
+            reserve = min(ceiling, max(1024, work_context_tokens // 8))
+        else:
+            ratio = 1.3 if stage == "audit" else 1.2
+            reserve = int(subject_input_tokens * ratio) + 256
+            reserve = min(reserve, work_context_tokens - 1)
         if role.profile.max_output_tokens is not None:
             reserve = min(reserve, role.profile.max_output_tokens)
-        return reserve
+        return max(reserve, 1)
 
     @staticmethod
     def _request_output_caps(
@@ -1357,10 +1373,13 @@ class EnhancedTranslationOrchestrator:
                 batch_size=self.config.batch_size,
                 working_context_tokens=budget,
                 fixed_prompt_tokens=fixed,
-                output_reserve_tokens=self._planning_output_reserve(
-                    role, budget, stage="translation"
-                ),
                 context_radius=self.config.boundary_context_radius,
+                output_reserve_estimator=lambda subjects: self._planning_output_reserve(
+                    role,
+                    budget,
+                    stage="translation",
+                    subject_input_tokens=estimate_cues_tokens(subjects),
+                ),
             )
         except TokenBudgetExceeded as exc:
             raise EnhancedTranslationError(
@@ -1434,6 +1453,12 @@ class EnhancedTranslationOrchestrator:
                 payload=translation_batch_payload(batch),
                 schema=_TRANSLATION_SCHEMA,
                 validator=lambda value: self._parse_translations(value, expected),
+                timeout_output_tokens=self._planning_output_reserve(
+                    self.config.main_role,
+                    self._runtime_budget(self.config.main_role),
+                    stage="translation",
+                    subject_input_tokens=estimate_cues_tokens(batch.subjects),
+                ),
             )
         except EnhancedTranslationError as exc:
             if exc.category != "output_limit" or len(batch.subjects) == 1:
@@ -1555,11 +1580,14 @@ class EnhancedTranslationOrchestrator:
                 batch_size=self.config.batch_size,
                 working_context_tokens=budget,
                 fixed_prompt_tokens=0,
-                output_reserve_tokens=self._planning_output_reserve(
-                    role, budget, stage="audit"
-                ),
                 context_radius=self.config.boundary_context_radius,
                 batch_input_estimator=estimate_audit_input,
+                output_reserve_estimator=lambda subjects: self._planning_output_reserve(
+                    role,
+                    budget,
+                    stage="audit",
+                    subject_input_tokens=estimate_cues_tokens(subjects),
+                ),
             )
         except TokenBudgetExceeded as exc:
             raise EnhancedTranslationError(
@@ -1588,6 +1616,12 @@ class EnhancedTranslationOrchestrator:
                     schema=_AUDIT_SCHEMA,
                     validator=lambda value, allowed=allowed: self._parse_audit_issues(
                         value, allowed, cues, translations
+                    ),
+                    timeout_output_tokens=self._planning_output_reserve(
+                        role,
+                        budget,
+                        stage="audit",
+                        subject_input_tokens=estimate_cues_tokens(batch.subjects),
                     ),
                 )
             except EnhancedTranslationError as exc:

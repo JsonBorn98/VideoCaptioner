@@ -221,6 +221,21 @@ def test_translation_settings_expose_task_concurrency_knob(tmp_path):
     widget.close()
 
 
+def test_enhanced_batch_limit_control_accepts_five_hundred(tmp_path):
+    old = cfg.enhanced_batch_size.value
+    widget = TranslationSettingWidget(
+        profile_store=LLMModelProfileStore(tmp_path / "profiles.json")
+    )
+    try:
+        assert cfg.enhanced_batch_size.defaultValue == 10
+        assert cfg.enhanced_batch_size.range == (1, 500)
+        widget.enhancedBatchCard.setValue(500)
+        assert cfg.enhanced_batch_size.value == 500
+    finally:
+        cfg.set(cfg.enhanced_batch_size, old)
+        widget.close()
+
+
 def test_profile_dialog_round_trips_responses_options_and_output_cap():
     parent = QWidget()
     profile = LLMModelProfile(

@@ -7,8 +7,11 @@ import pytest
 
 from videocaptioner.core.llm.adapters import (
     AnthropicMessagesAdapter,
+    DEFAULT_TIMEOUT_SECONDS,
     GeminiAdapter,
     OpenAICompatibleAdapter,
+    TIMEOUT_SECONDS_PER_OUTPUT_TOKEN,
+    request_timeout_seconds,
 )
 from videocaptioner.core.llm.models import (
     LLMCallError,
@@ -685,6 +688,12 @@ def test_request_options_override_is_request_scoped_and_preserves_profile():
     assert profile.request_options["metadata"]["mode"] == "profile"
 
 
+def test_request_timeout_scales_with_output_cap_and_keeps_small_batch_baseline():
+    assert request_timeout_seconds(None) == DEFAULT_TIMEOUT_SECONDS
+    assert request_timeout_seconds(100) == DEFAULT_TIMEOUT_SECONDS + 100 * TIMEOUT_SECONDS_PER_OUTPUT_TOKEN
+    assert request_timeout_seconds(32_768) > DEFAULT_TIMEOUT_SECONDS
+
+
 def test_llm_request_rejects_invalid_timeouts():
     for invalid in (0, -1, -0.5, float("inf"), float("nan")):
         with pytest.raises(ValueError, match="timeout"):
@@ -712,6 +721,24 @@ def test_anthropic_request_timeout_overrides_constructor_default():
     assert session.calls[1][1]["timeout"] == 17
 
 
+def test_anthropic_scales_timeout_from_request_output_cap():
+    session = _Session(_Response({"content": [{"type": "text", "text": "ok"}]}))
+    adapter = AnthropicMessagesAdapter(
+        _profile(
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            base_url="https://api.anthropic.test/v1",
+        ),
+        session=session,
+    )
+
+    adapter.complete(
+        LLMRequest(messages=(LLMMessage("user", "Hi"),), max_output_tokens=8_000)
+    )
+
+    assert session.calls[0][1]["timeout"] == request_timeout_seconds(8_000)
+
+
 def test_gemini_request_timeout_overrides_constructor_default():
     session = _Session(
         _Response({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
@@ -733,6 +760,26 @@ def test_gemini_request_timeout_overrides_constructor_default():
 
     assert session.calls[0][1]["timeout"] == 60.0
     assert session.calls[1][1]["timeout"] == 19
+
+
+def test_gemini_scales_timeout_from_request_output_cap():
+    session = _Session(
+        _Response({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
+    )
+    adapter = GeminiAdapter(
+        _profile(
+            LLMTransport.GEMINI,
+            ProviderDialect.GEMINI,
+            base_url="https://generativelanguage.test/v1beta",
+        ),
+        session=session,
+    )
+
+    adapter.complete(
+        LLMRequest(messages=(LLMMessage("user", "Hi"),), max_output_tokens=8_000)
+    )
+
+    assert session.calls[0][1]["timeout"] == request_timeout_seconds(8_000)
 
 
 def test_openai_chat_request_timeout_overrides_client_default():
@@ -769,7 +816,41 @@ def test_openai_chat_request_timeout_overrides_client_default():
     # The request deadline is a transport option, never part of the HTTP body.
     assert calls[0]["timeout"] == 30.0
     assert calls[0]["extra_body"] == {"store": False}
-    assert "timeout" not in calls[1]
+    assert calls[1]["timeout"] == DEFAULT_TIMEOUT_SECONDS
+    assert "timeout" in calls[1]
+
+
+def test_openai_chat_scales_timeout_from_request_output_cap():
+    calls = []
+
+    class RecordingCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="ok"), finish_reason="stop"
+                    )
+                ],
+                usage=None,
+            )
+
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.OPENAI,
+            base_url="https://api.openai.test/v1",
+        ),
+        client=SimpleNamespace(
+            chat=SimpleNamespace(completions=RecordingCompletions())
+        ),
+    )
+
+    adapter.complete(
+        LLMRequest(messages=(LLMMessage("user", "Translate this"),), max_output_tokens=8_000)
+    )
+
+    assert calls[0]["timeout"] == request_timeout_seconds(8_000)
 
 
 def test_openai_responses_request_timeout_overrides_client_default():
@@ -923,7 +1004,7 @@ def test_anthropic_maps_request_cache_hint_and_usage():
     url, kwargs = session.calls[0]
     assert url == "https://api.anthropic.test/v1/messages"
     assert kwargs["headers"]["x-api-key"] == "test-key"
-    assert kwargs["timeout"] == 17
+    assert kwargs["timeout"] == request_timeout_seconds(321, baseline=17)
     assert kwargs["json"] == {
         "model": "test-model",
         "system": [
@@ -1133,7 +1214,7 @@ def test_gemini_maps_request_schema_and_usage():
         "gemini%2Ftest%20model:generateContent"
     )
     assert kwargs["params"] == {"key": "test-key"}
-    assert kwargs["timeout"] == 19
+    assert kwargs["timeout"] == request_timeout_seconds(321, baseline=19)
     assert kwargs["json"] == {
         "contents": [
             {"role": "user", "parts": [{"text": "Translate this"}]},
