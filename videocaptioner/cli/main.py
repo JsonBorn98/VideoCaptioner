@@ -480,7 +480,7 @@ def _build_subtitle_parser(subparsers) -> None:
         "--prompt", metavar="TEXT", help="Custom prompt for LLM optimization/translation"
     )
     sub.add_argument(
-        "--thread-num", type=int, metavar="N", help="Number of concurrent threads (default: 4)"
+        "--thread-num", type=int, metavar="N", help="Number of concurrent requests (default: 10)"
     )
     sub.add_argument(
         "--batch-size", type=int, metavar="N", help="Batch size for processing (default: 20)"

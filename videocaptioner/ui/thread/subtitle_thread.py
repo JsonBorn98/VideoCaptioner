@@ -88,11 +88,7 @@ def create_translator_from_config(
 
     return TranslatorFactory.create_translator(
         translator_type=SERVICE_TO_TYPE[translator_service],
-        thread_num=(
-            config.main_llm_profile.max_concurrency
-            if config.main_llm_profile is not None and is_llm_mode
-            else config.thread_num
-        ),
+        thread_num=config.thread_num,
         batch_num=config.batch_size,
         source_language=config.source_language,
         target_language=config.target_language,
@@ -236,6 +232,7 @@ class SubtitleThread(QThread):
             source_language=subtitle_config.source_language,
             target_language=subtitle_config.target_language.value,
             batch_size=subtitle_config.enhanced_batch_size,
+            max_concurrency=subtitle_config.thread_num,
             term_context_radius=subtitle_config.term_context_radius,
             boundary_context_radius=subtitle_config.boundary_context_radius,
             term_confirmation=self._enum(

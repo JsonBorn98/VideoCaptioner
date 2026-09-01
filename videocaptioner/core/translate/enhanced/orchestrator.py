@@ -454,7 +454,7 @@ class EnhancedTranslationOrchestrator:
                     retryable=False,
                 ) from exc
         self.config = config
-        self.gateway = gateway or LLMGateway()
+        self.gateway = gateway or LLMGateway(max_concurrency=config.max_concurrency)
         self.cancellation = cancellation or CancellationToken()
         self.progress = progress
         self._usage = _UsageCollector()
@@ -1378,7 +1378,7 @@ class EnhancedTranslationOrchestrator:
         remaining = list(batches[1:])
         if not remaining:
             return translations
-        limit = max(1, role.profile.max_concurrency)
+        limit = role.profile.clamped_concurrency(self.config.max_concurrency)
         with ThreadPoolExecutor(max_workers=limit) as executor:
             pending: dict[Future[dict[int, str]], TranslationBatch] = {}
             iterator = iter(remaining)

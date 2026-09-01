@@ -64,7 +64,7 @@ def test_legacy_llm_migrates_to_enhanced_with_one_profile_bound_to_both_roles(
     assert profile.base_url == "https://api.deepseek.example/v1"
     assert profile.api_key == "legacy-secret"
     assert profile.model == "deepseek-chat"
-    assert profile.max_concurrency == 6
+    assert profile.max_concurrency is None
 
 
 def test_legacy_non_llm_keeps_service_and_selects_non_llm_mode(tmp_path) -> None:

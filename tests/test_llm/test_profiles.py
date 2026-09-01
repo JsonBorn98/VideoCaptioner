@@ -164,6 +164,13 @@ def test_profile_from_dict_is_strict_v2():
             LLMModelProfile.from_dict(candidate)
 
 
+def test_profile_allows_null_concurrency_clamp():
+    profile = _profile(max_concurrency=None)
+    restored = LLMModelProfile.from_dict(profile.to_dict())
+    assert restored.max_concurrency is None
+    assert profile.to_dict()["max_concurrency"] is None
+
+
 def test_v1_collection_migrates_in_memory_and_only_writes_v2_on_mutation(tmp_path):
     path = tmp_path / "profiles.json"
     v2_profile = _profile(
@@ -192,10 +199,33 @@ def test_v1_collection_migrates_in_memory_and_only_writes_v2_on_mutation(tmp_pat
 
     store.save(replace(migrated, request_options={"reasoning_effort": "medium"}))
     written = json.loads(path.read_text(encoding="utf-8"))
-    assert written["version"] == PROFILE_SCHEMA_VERSION == 2
+    assert written["version"] == PROFILE_SCHEMA_VERSION == 3
     assert written["profiles"][0]["openai_endpoint"] == "chat_completions"
     assert written["profiles"][0]["request_options"] == {"reasoning_effort": "medium"}
     assert written["profiles"][0]["max_output_tokens"] is None
+
+
+def test_v2_legacy_default_concurrency_clears_to_no_clamp(tmp_path):
+    path = tmp_path / "profiles.json"
+    v2_profile = _profile(max_concurrency=4).to_dict()
+    path.write_text(
+        json.dumps(
+            {"schema": PROFILE_SCHEMA, "version": 2, "profiles": [v2_profile]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = LLMModelProfileStore(path).get("primary")
+    assert migrated.max_concurrency is None
+
+
+def test_v3_explicit_concurrency_clamp_is_kept(tmp_path):
+    path = tmp_path / "profiles.json"
+    store = LLMModelProfileStore(path)
+    stored = store.save(_profile(max_concurrency=4))
+    assert stored.max_concurrency == 4
+    assert LLMModelProfileStore(path).get("primary").max_concurrency == 4
 
 
 def test_store_rejects_duplicate_name_case_insensitively(tmp_path):

@@ -146,7 +146,9 @@ class SubtitleSplitter:
         self.thread_num = thread_num
         self.model = model
         self.profile = profile
-        self.gateway = gateway or (LLMGateway() if profile is not None else None)
+        self.gateway = gateway or (
+            LLMGateway(max_concurrency=thread_num) if profile is not None else None
+        )
         self.max_word_count_cjk = max_word_count_cjk
         self.max_word_count_english = max_word_count_english
         self.use_llm = use_llm

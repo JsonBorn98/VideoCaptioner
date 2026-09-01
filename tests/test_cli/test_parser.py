@@ -337,6 +337,12 @@ class TestSubtitleParser:
         assert "--speed-optimize" not in out
         assert "--normalize-quotes" not in out
 
+    def test_thread_num_help_defaults_to_ten(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["subtitle", "--help"])
+        assert exc.value.code == 0
+        assert "default: 10" in capsys.readouterr().out
+
     def test_llm_profile_flags_build_partial_overrides(self):
         args = build_parser().parse_args(
             [

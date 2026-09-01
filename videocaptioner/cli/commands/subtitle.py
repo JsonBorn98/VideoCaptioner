@@ -188,7 +188,7 @@ def run(args: Namespace, config: dict) -> int:
     if (prompt_arg or prompt_file_arg) and not llm_translation:
         output.warn("--prompt/--prompt-file only configures LLM translation")
 
-    thread_num = get(config, "subtitle.thread_num", 4)
+    thread_num = get(config, "subtitle.thread_num", 10)
     batch_size = get(config, "subtitle.batch_size", 20)
 
     # Validate numeric ranges
@@ -409,6 +409,7 @@ def run(args: Namespace, config: dict) -> int:
                     source_language=source_language,
                     target_language=target_language.value,
                     batch_size=int(get(config, "translate.enhanced_batch_size", 10)),
+                    max_concurrency=thread_num,
                     term_context_radius=int(get(config, "translate.term_context_radius", 10)),
                     boundary_context_radius=int(
                         get(config, "translate.boundary_context_radius", 3)

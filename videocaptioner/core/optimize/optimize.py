@@ -69,7 +69,9 @@ class SubtitleOptimizer:
         self.update_callback = update_callback
         self.extra_rules = extra_rules
         self.profile = profile
-        self.gateway = gateway or (LLMGateway() if profile is not None else None)
+        self.gateway = gateway or (
+            LLMGateway(max_concurrency=thread_num) if profile is not None else None
+        )
 
         self.is_running = True
         self.executor: Optional[ThreadPoolExecutor] = None

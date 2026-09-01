@@ -15,7 +15,8 @@ from .models import LLMModelProfile, OpenAIEndpoint
 from .request_options import validate_profile_request_options
 
 PROFILE_SCHEMA = "videocaptioner.llm-model-profile-collection"
-PROFILE_SCHEMA_VERSION = 2
+PROFILE_SCHEMA_VERSION = 3
+_LEGACY_DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_LLM_PROFILES_PATH = APPDATA_PATH / "llm_model_profiles.json"
 
 _PROFILE_V1_FIELDS = {
@@ -90,7 +91,7 @@ class LLMModelProfileStore:
         if type(value["schema"]) is not str or value["schema"] != PROFILE_SCHEMA:
             raise LLMProfileError("unsupported model profile collection")
         version = value["version"]
-        if type(version) is not int or version not in {1, PROFILE_SCHEMA_VERSION}:
+        if type(version) is not int or version not in {1, 2, PROFILE_SCHEMA_VERSION}:
             raise LLMProfileError("unsupported model profile collection")
         if type(value["profiles"]) is not list:
             raise LLMProfileError("profiles must be an array")
@@ -105,6 +106,13 @@ class LLMModelProfileStore:
                     if version == 1
                     else LLMModelProfile.from_dict(item)
                 )
+                if (
+                    version < PROFILE_SCHEMA_VERSION
+                    and profile.max_concurrency == _LEGACY_DEFAULT_MAX_CONCURRENCY
+                ):
+                    profile = LLMModelProfile.from_dict(
+                        {**profile.to_dict(), "max_concurrency": None}
+                    )
                 if profile.profile_id in profiles or profile.name.casefold() in names:
                     raise LLMProfileConflictError("duplicate model profile id or name")
                 profiles[profile.profile_id] = profile

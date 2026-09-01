@@ -46,10 +46,14 @@ class LLMGateway:
         sleep: Callable[[float], None] = time.sleep,
         random_source: Callable[[], float] = random.random,
         response_cache: Optional[GatewayResponseCache] = None,
+        max_concurrency: int = 10,
     ) -> None:
+        if type(max_concurrency) is not int or max_concurrency < 1:
+            raise ValueError("max_concurrency must be a positive integer")
         self._adapter_factory = adapter_factory or self._default_adapter
         self._sleep = sleep
         self._random = random_source
+        self._max_concurrency = max_concurrency
         self._response_cache = (
             _shared_response_cache if response_cache is None else response_cache
         )
@@ -78,7 +82,7 @@ class LLMGateway:
                 adapter = self._adapter_factory(profile)
                 self._adapters[profile.profile_id] = adapter
                 self._semaphores[profile.profile_id] = threading.BoundedSemaphore(
-                    profile.max_concurrency
+                    profile.clamped_concurrency(self._max_concurrency)
                 )
             return adapter, self._semaphores[profile.profile_id]
 

@@ -286,6 +286,7 @@ class EnhancedTranslationConfig:
     source_language: str
     target_language: str
     batch_size: int = 10
+    max_concurrency: int = 10
     term_context_radius: int = 10
     boundary_context_radius: int = 3
     term_confirmation: TermConfirmationMode = TermConfirmationMode.AUTOMATIC
@@ -299,6 +300,8 @@ class EnhancedTranslationConfig:
             raise ValueError("review_role.role must be 'review'")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
         if self.term_context_radius < 0 or self.boundary_context_radius < 0:
             raise ValueError("context radii must not be negative")
         if (

@@ -130,7 +130,7 @@ class LLMModelProfile:
     api_key: str
     model: str
     work_context_tokens: int = 65_536
-    max_concurrency: int = 4
+    max_concurrency: Optional[int] = None
     openai_endpoint: OpenAIEndpoint = OpenAIEndpoint.CHAT_COMPLETIONS
     request_options: Mapping[str, JSONValue] = field(default_factory=dict)
     max_output_tokens: Optional[int] = None
@@ -172,10 +172,11 @@ class LLMModelProfile:
             raise ValueError("work_context_tokens must be an integer")
         if self.work_context_tokens < 16_384:
             raise ValueError("work_context_tokens must be at least 16384")
-        if type(self.max_concurrency) is not int:
-            raise ValueError("max_concurrency must be an integer")
-        if not 1 <= self.max_concurrency <= 50:
-            raise ValueError("max_concurrency must be between 1 and 50")
+        if self.max_concurrency is not None:
+            if type(self.max_concurrency) is not int:
+                raise ValueError("max_concurrency must be an integer or None")
+            if not 1 <= self.max_concurrency <= 50:
+                raise ValueError("max_concurrency must be between 1 and 50")
         if self.max_output_tokens is not None:
             if type(self.max_output_tokens) is not int:
                 raise ValueError("max_output_tokens must be an integer or None")
@@ -188,6 +189,19 @@ class LLMModelProfile:
         object.__setattr__(self, "base_url", self.base_url.strip())
         object.__setattr__(self, "model", self.model.strip())
         object.__setattr__(self, "request_options", request_options)
+
+    def clamped_concurrency(self, task_concurrency: int) -> int:
+        """Return the effective gate size for one task against this profile.
+
+        The task-level concurrency request count is the source of truth. An
+        explicit profile clamp only lowers that value; ``None`` does not clamp.
+        """
+
+        if type(task_concurrency) is not int or task_concurrency < 1:
+            raise ValueError("task_concurrency must be a positive integer")
+        if self.max_concurrency is None:
+            return task_concurrency
+        return min(task_concurrency, self.max_concurrency)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -239,8 +253,9 @@ class LLMModelProfile:
             raise ValueError("model profile string fields must be strings")
         if type(value["work_context_tokens"]) is not int:
             raise ValueError("work_context_tokens must be an integer")
-        if type(value["max_concurrency"]) is not int:
-            raise ValueError("max_concurrency must be an integer")
+        max_concurrency = value["max_concurrency"]
+        if max_concurrency is not None and type(max_concurrency) is not int:
+            raise ValueError("max_concurrency must be an integer or null")
         if not isinstance(value["request_options"], Mapping):
             raise ValueError("request_options must be a JSON object")
         max_output_tokens = value["max_output_tokens"]
@@ -255,7 +270,7 @@ class LLMModelProfile:
             api_key=value["api_key"],
             model=value["model"],
             work_context_tokens=value["work_context_tokens"],
-            max_concurrency=value["max_concurrency"],
+            max_concurrency=max_concurrency,
             openai_endpoint=OpenAIEndpoint(value["openai_endpoint"]),
             request_options=value["request_options"],
             max_output_tokens=max_output_tokens,

@@ -147,7 +147,7 @@ DEFAULTS: Dict[str, Any] = {
         "split": True,
         "max_word_count_cjk": 18,
         "max_word_count_english": 12,
-        "thread_num": 4,
+        "thread_num": 10,
         "batch_size": 20,
         "optimization_prompt": "",
     },
@@ -604,7 +604,7 @@ def _llm_profile_guidance(reason: str) -> str:
         "  A profile object looks like: "
         '{"id": "...", "name": "...", "transport": "openai-compatible", '
         '"dialect": "generic", "base_url": "...", "api_key": "...", '
-        '"model": "...", "work_context_tokens": 65536, "max_concurrency": 4, '
+        '"model": "...", "work_context_tokens": 65536, "max_concurrency": null, '
         '"openai_endpoint": "chat_completions", "request_options": {}, '
         '"max_output_tokens": null}\n'
         f"  {available_text}"

@@ -245,7 +245,7 @@ class _ProfileDialog(MessageBoxBase):
         self.outputModeCombo.addItem(self.tr("自定义"), userData="custom")
         self.contextSpin.setRange(16_384, 2_000_000)
         self.contextSpin.setSingleStep(1024)
-        self.concurrencySpin.setRange(1, 50)
+        self.concurrencySpin.setRange(0, 50)
         self.outputTokensSpin.setRange(1, 1_999_999)
         self.outputTokensSpin.setSingleStep(512)
         self.outputTokensSpin.setValue(4096)
@@ -278,7 +278,7 @@ class _ProfileDialog(MessageBoxBase):
             self.apiKeyEdit.setText(profile.api_key)
             self.modelEdit.setText(profile.model)
             self.contextSpin.setValue(profile.work_context_tokens)
-            self.concurrencySpin.setValue(profile.max_concurrency)
+            self.concurrencySpin.setValue(profile.max_concurrency or 0)
             if profile.max_output_tokens is None:
                 self.outputModeCombo.setCurrentIndex(0)
             else:
@@ -297,7 +297,7 @@ class _ProfileDialog(MessageBoxBase):
             )
             self.dialectCombo.setCurrentText(ProviderDialect.GENERIC.value)
             self.contextSpin.setValue(65_536)
-            self.concurrencySpin.setValue(4)
+            self.concurrencySpin.setValue(0)
             self.requestOptionsEdit.setPlainText("{}")
 
         outputRow = QWidget(self)
@@ -364,7 +364,10 @@ class _ProfileDialog(MessageBoxBase):
         form.addRow(BodyLabel(self.tr("模型"), formWidget), modelRow)
         form.addRow(BodyLabel(self.tr("工作上下文"), formWidget), self.contextSpin)
         form.addRow(BodyLabel(self.tr("最大输出 token"), formWidget), outputWidget)
-        form.addRow(BodyLabel(self.tr("最大并发"), formWidget), self.concurrencySpin)
+        form.addRow(
+            BodyLabel(self.tr("并发上限（0 表示不限制）"), formWidget),
+            self.concurrencySpin,
+        )
         form.addRow(self.advancedButton)
         form.addRow(self.advancedWidget)
         form.addRow(BodyLabel(self.tr("能力测试"), formWidget), probeWidget)
@@ -523,7 +526,9 @@ class _ProfileDialog(MessageBoxBase):
             "api_key": self.apiKeyEdit.text(),
             "model": self.modelEdit.text().strip(),
             "work_context_tokens": self.contextSpin.value(),
-            "max_concurrency": self.concurrencySpin.value(),
+            "max_concurrency": (
+                self.concurrencySpin.value() if self.concurrencySpin.value() > 0 else None
+            ),
             "openai_endpoint": endpoint,
             "request_options": self.requestOptions(),
             "max_output_tokens": (
@@ -967,6 +972,14 @@ class TranslationSettingWidget(QWidget):
         self.rootLayout.addWidget(self.titleLabel)
         self.rootLayout.addWidget(self.subtitleLabel)
         self.rootLayout.addWidget(self.utilityProfileCard)
+        self.threadNumCard = RangeSettingCard(
+            cfg.thread_num,
+            FIF.SPEED_HIGH,
+            self.tr("并发请求数"),
+            self.tr("同时发出的 LLM 请求数；模型方案里的并发上限仅在显式设置时作为保护夹钳"),
+            self,
+        )
+        self.rootLayout.addWidget(self.threadNumCard)
         self.rootLayout.addWidget(self.pivot, 0, Qt.AlignLeft)  # type: ignore
         self.rootLayout.addWidget(self.stackedWidget)
         self.stackedWidget.currentChanged.connect(self._onPageChanged)

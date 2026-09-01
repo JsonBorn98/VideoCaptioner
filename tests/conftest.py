@@ -195,6 +195,9 @@ class _MockLLMGateway:
     environment-variable relays or symbol patching.
     """
 
+    def __init__(self, *args, **kwargs):
+        del args, kwargs
+
     def complete(self, profile, request, **kwargs):
         del kwargs, profile
         messages = [

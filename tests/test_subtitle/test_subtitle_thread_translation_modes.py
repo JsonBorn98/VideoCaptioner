@@ -273,7 +273,8 @@ def test_single_llm_profile_uses_gateway_and_keeps_reflect_mode(
         "videocaptioner.core.translate.base.get_translate_cache", lambda: _NullCache()
     )
     monkeypatch.setattr(
-        "videocaptioner.core.translate.llm_translator.LLMGateway", lambda: gateway
+        "videocaptioner.core.translate.llm_translator.LLMGateway",
+        lambda *args, **kwargs: gateway,
     )
     monkeypatch.setattr(
         thread_module,

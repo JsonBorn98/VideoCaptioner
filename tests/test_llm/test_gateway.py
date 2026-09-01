@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 
 from videocaptioner.core.llm.adapters import LLMAdapter
@@ -14,17 +17,19 @@ from videocaptioner.core.llm.models import (
 )
 
 
-def _profile() -> LLMModelProfile:
-    return LLMModelProfile(
-        profile_id="shared",
-        name="Shared profile",
-        transport=LLMTransport.OPENAI_COMPATIBLE,
-        dialect=ProviderDialect.GENERIC,
-        base_url="https://example.test/v1",
-        api_key="secret",
-        model="example-model",
-        max_concurrency=2,
-    )
+def _profile(**overrides) -> LLMModelProfile:
+    values = {
+        "profile_id": "shared",
+        "name": "Shared profile",
+        "transport": LLMTransport.OPENAI_COMPATIBLE,
+        "dialect": ProviderDialect.GENERIC,
+        "base_url": "https://example.test/v1",
+        "api_key": "secret",
+        "model": "example-model",
+        "max_concurrency": 2,
+    }
+    values.update(overrides)
+    return LLMModelProfile(**values)
 
 
 REQUEST = LLMRequest(messages=(LLMMessage("user", "hello"),))
@@ -176,3 +181,125 @@ def test_gateway_reuses_adapter_and_semaphore_for_same_profile():
     assert gateway.complete(profile, REQUEST).text == "ok"
     assert created == [first_adapter]
     assert first_adapter.calls == 2
+
+
+class _SlowAdapter(LLMAdapter):
+    def __init__(self, profile, *, started, release, in_flight, peak, lock):
+        super().__init__(profile)
+        self._started = started
+        self._release = release
+        self._in_flight = in_flight
+        self._peak = peak
+        self._lock = lock
+
+    def complete(self, request):
+        with self._lock:
+            current = self._in_flight.get(self.profile.profile_id, 0) + 1
+            self._in_flight[self.profile.profile_id] = current
+            self._peak[self.profile.profile_id] = max(
+                self._peak.get(self.profile.profile_id, 0), current
+            )
+        self._started.release()
+        self._release.wait()
+        with self._lock:
+            self._in_flight[self.profile.profile_id] -= 1
+        return LLMResult(text="ok")
+
+
+def _run_concurrent(gateway, profile, count, *, started, release, expected_in_flight):
+    threads = [
+        threading.Thread(target=gateway.complete, args=(profile, REQUEST))
+        for _ in range(count)
+    ]
+    for thread in threads:
+        thread.start()
+    for _ in range(expected_in_flight):
+        assert started.acquire(timeout=1)
+    time.sleep(0.05)
+    release.set()
+    for thread in threads:
+        thread.join(timeout=2)
+    return threads
+
+
+def test_gateway_gate_follows_task_concurrency_when_profile_does_not_clamp():
+    started = threading.Semaphore(0)
+    release = threading.Event()
+    in_flight = {}
+    peak = {}
+    lock = threading.Lock()
+    profile = _profile(max_concurrency=None)
+    adapter = _SlowAdapter(
+        profile, started=started, release=release, in_flight=in_flight, peak=peak, lock=lock
+    )
+    gateway = LLMGateway(adapter_factory=lambda unused: adapter, max_concurrency=3)
+
+    _run_concurrent(
+        gateway, profile, 6, started=started, release=release, expected_in_flight=3
+    )
+
+    assert peak[profile.profile_id] == 3
+
+
+def test_gateway_explicit_profile_clamp_caps_task_concurrency():
+    started = threading.Semaphore(0)
+    release = threading.Event()
+    in_flight = {}
+    peak = {}
+    lock = threading.Lock()
+    profile = _profile(max_concurrency=2)
+    adapter = _SlowAdapter(
+        profile, started=started, release=release, in_flight=in_flight, peak=peak, lock=lock
+    )
+    gateway = LLMGateway(adapter_factory=lambda unused: adapter, max_concurrency=5)
+
+    _run_concurrent(
+        gateway, profile, 5, started=started, release=release, expected_in_flight=2
+    )
+
+    assert peak[profile.profile_id] == 2
+
+
+def test_gateway_profiles_keep_independent_gates():
+    started = threading.Semaphore(0)
+    release = threading.Event()
+    in_flight = {}
+    peak = {}
+    lock = threading.Lock()
+    adapters = {}
+
+    def factory(profile):
+        adapter = adapters.get(profile.profile_id)
+        if adapter is None:
+            adapter = _SlowAdapter(
+                profile,
+                started=started,
+                release=release,
+                in_flight=in_flight,
+                peak=peak,
+                lock=lock,
+            )
+            adapters[profile.profile_id] = adapter
+        return adapter
+
+    gateway = LLMGateway(adapter_factory=factory, max_concurrency=4)
+    main = _profile(profile_id="main", name="Main", max_concurrency=None)
+    review = _profile(profile_id="review", name="Review", max_concurrency=2)
+    threads = [
+        threading.Thread(target=gateway.complete, args=(main, REQUEST))
+        for _ in range(4)
+    ] + [
+        threading.Thread(target=gateway.complete, args=(review, REQUEST))
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for _ in range(6):
+        assert started.acquire(timeout=1)
+    time.sleep(0.05)
+    release.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert peak["main"] == 4
+    assert peak["review"] == 2

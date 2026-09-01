@@ -194,6 +194,33 @@ def test_profile_dialog_lists_and_maps_all_interface_formats():
     parent.close()
 
 
+def test_profile_dialog_defaults_concurrency_clamp_unset():
+    parent = QWidget()
+    dialog = _ProfileDialog(parent=parent)
+    dialog.nameEdit.setText("新方案")
+    dialog.baseUrlEdit.setText("https://example.test/v1")
+    dialog.modelEdit.setText("model")
+
+    assert dialog.concurrencySpin.value() == 0
+    assert dialog.temporaryProfile().max_concurrency is None
+
+    dialog.concurrencySpin.setValue(4)
+    assert dialog.temporaryProfile().max_concurrency == 4
+    dialog.close()
+    parent.close()
+
+
+def test_translation_settings_expose_task_concurrency_knob(tmp_path):
+    widget = TranslationSettingWidget(
+        profile_store=LLMModelProfileStore(tmp_path / "profiles.json")
+    )
+    assert widget.threadNumCard.titleLabel.text() == "并发请求数"
+    assert widget.rootLayout.indexOf(widget.threadNumCard) < widget.rootLayout.indexOf(
+        widget.pivot
+    )
+    widget.close()
+
+
 def test_profile_dialog_round_trips_responses_options_and_output_cap():
     parent = QWidget()
     profile = LLMModelProfile(

@@ -52,7 +52,9 @@ class LLMTranslator(BaseTranslator):
         self.custom_prompt = custom_prompt
         self.is_reflect = is_reflect
         self.profile = profile
-        self.gateway = gateway or (LLMGateway() if profile is not None else None)
+        self.gateway = gateway or (
+            LLMGateway(max_concurrency=thread_num) if profile is not None else None
+        )
 
     def _translate_chunk(
         self, subtitle_chunk: List[SubtitleProcessData]

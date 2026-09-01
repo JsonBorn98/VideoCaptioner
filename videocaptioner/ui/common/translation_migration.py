@@ -137,7 +137,7 @@ def migrate_legacy_translation_settings(
             api_key=str(llm.get(api_key, "")),
             model=str(llm.get(model_key, "") or "unconfigured"),
             work_context_tokens=65_536,
-            max_concurrency=max(1, min(50, int(translate.get("ThreadNum", 10) or 10))),
+            max_concurrency=None,
         )
         store = profile_store or LLMModelProfileStore()
         try:
