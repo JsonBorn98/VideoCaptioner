@@ -6,7 +6,6 @@ import hashlib
 import json
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import replace
 from itertools import islice
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
@@ -28,6 +27,7 @@ from videocaptioner.core.llm.request_options import (
 from videocaptioner.core.utils.logger import setup_logger
 
 from .audit import apply_review_fixes, local_audit_issues
+from .batch_executor import execute_batches
 from .glossary import (
     classify_glossary_import,
     normalize_term,
@@ -1420,38 +1420,14 @@ class EnhancedTranslationOrchestrator:
             return {}
 
         translations: dict[int, str] = {}
-        # Warm the stable provider prefix before parallel requests.
-        translations.update(self._translate_batch(batches[0], brief, glossary))
-        remaining = list(batches[1:])
-        if not remaining:
-            return translations
         limit = role.profile.clamped_concurrency(self.config.max_concurrency)
-        with ThreadPoolExecutor(max_workers=limit) as executor:
-            pending: dict[Future[dict[int, str]], TranslationBatch] = {}
-            iterator = iter(remaining)
-
-            def submit_next() -> bool:
-                try:
-                    batch = next(iterator)
-                except StopIteration:
-                    return False
-                pending[executor.submit(self._translate_batch, batch, brief, glossary)] = batch
-                return True
-
-            for _ in range(min(limit, len(remaining))):
-                submit_next()
-            try:
-                while pending:
-                    self.cancellation.raise_if_cancelled()
-                    completed, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
-                    for future in completed:
-                        pending.pop(future)
-                        translations.update(future.result())
-                        submit_next()
-            except BaseException:
-                for future in pending:
-                    future.cancel()
-                raise
+        execute_batches(
+            batches,
+            lambda batch: self._translate_batch(batch, brief, glossary),
+            concurrency=limit,
+            cancellation=self.cancellation,
+            on_complete=translations.update,
+        )
         if set(translations) != {cue.cue_id for cue in cues}:
             raise EnhancedTranslationError(
                 "formal translation did not cover every subtitle ID",
