@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from ..asr.asr_data import ASRData
 from ..entities import SubtitleLayoutEnum
@@ -18,6 +18,7 @@ from .profiles import PostprocessProfileStore
 from .report import QualityReport
 
 if TYPE_CHECKING:
+    from ..llm import LLMGateway
     from ..speed.timing_evidence import TimingEvidenceWindow
 
 logger = setup_logger("postprocess.runner")
@@ -133,6 +134,7 @@ def run_postprocess_task(
     profile_store: PostprocessProfileStore | None = None,
     timing_windows: Iterable["TimingEvidenceWindow"] = (),
     timing_resolver: TimingResolver | None = None,
+    gateway: Optional["LLMGateway"] = None,
 ) -> PostprocessResult:
     """Run one isolated stage and fall back to its immutable initial subtitle.
 
@@ -226,6 +228,7 @@ def run_postprocess_task(
             report,
             layout=layout,
             timing_windows=evidence,
+            gateway=gateway,
         )
         task.status = "completed"
         task.postprocessed_subtitle_path = None
@@ -256,6 +259,7 @@ def run_postprocess_task(
             report,
             layout=layout,
             timing_windows=evidence,
+            gateway=gateway,
         )
         _validate_output(working)
         output = Path(task.postprocessed_subtitle_path or task.default_output_path()).with_suffix(

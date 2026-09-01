@@ -246,8 +246,12 @@ class _NullCache:
 
 
 class _SingleLLMGateway:
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
+        del args, kwargs
         self.calls = []
+
+    def close(self):
+        return None
 
     def complete(self, profile, request, **kwargs):
         self.calls.append((profile, request))
@@ -273,7 +277,8 @@ def test_single_llm_profile_uses_gateway_and_keeps_reflect_mode(
         "videocaptioner.core.translate.base.get_translate_cache", lambda: _NullCache()
     )
     monkeypatch.setattr(
-        "videocaptioner.core.translate.llm_translator.LLMGateway",
+        thread_module,
+        "LLMGateway",
         lambda *args, **kwargs: gateway,
     )
     monkeypatch.setattr(

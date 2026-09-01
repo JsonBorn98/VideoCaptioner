@@ -13,6 +13,7 @@ from videocaptioner.core.entities import (
     SubtitleTask,
     TranslatorServiceEnum,
 )
+from videocaptioner.core.llm import LLMGateway
 from videocaptioner.core.llm.context import (
     clear_task_context,
     generate_task_id,
@@ -69,6 +70,7 @@ def create_translator_from_config(
     config: SubtitleConfig,
     custom_prompt: str = "",
     callback=None,
+    gateway: LLMGateway | None = None,
 ):
     """根据 SubtitleConfig 创建翻译器"""
     translator_service = config.translator_service
@@ -105,6 +107,7 @@ def create_translator_from_config(
         ),
         update_callback=callback,
         profile=(config.main_llm_profile if is_llm_mode else None),
+        gateway=gateway,
     )
 
 
@@ -119,7 +122,7 @@ class SubtitleThread(QThread):
     audit_confirmation_required = pyqtSignal(object)
     audit_ready = pyqtSignal(object)
 
-    def __init__(self, task: SubtitleTask):
+    def __init__(self, task: SubtitleTask, gateway: LLMGateway | None = None):
         super().__init__()
         self.task: SubtitleTask = task
         self.subtitle_length = 0
@@ -132,6 +135,7 @@ class SubtitleThread(QThread):
         self._confirmed_terms: Sequence[TermCandidate] | None = None
         self._audit_condition = threading.Condition()
         self._accepted_audit_ids: tuple[int, ...] | None = None
+        self._injected_gateway = gateway
 
     def set_custom_prompt_text(self, text: str):
         self.custom_prompt_text = text
@@ -211,7 +215,10 @@ class SubtitleThread(QThread):
             return self._accepted_audit_ids
 
     def _run_enhanced_translation(
-        self, asr_data: ASRData, subtitle_config: SubtitleConfig
+        self,
+        asr_data: ASRData,
+        subtitle_config: SubtitleConfig,
+        gateway: LLMGateway | None = None,
     ) -> ASRData:
         if subtitle_config.main_llm_profile is None or subtitle_config.review_llm_profile is None:
             missing = ", ".join(subtitle_config.missing_translation_roles())
@@ -252,6 +259,7 @@ class SubtitleThread(QThread):
             output_dir=output_path.parent,
             base_name=self.task.workflow_base_name or output_path.stem,
             imported_glossary_path=subtitle_config.imported_glossary_path,
+            gateway=gateway,
             cancellation=self.cancellation,
             progress=lambda value, message: self.progress.emit(value, self.tr(message)),
             confirm_terms=(
@@ -289,6 +297,7 @@ class SubtitleThread(QThread):
             stage="subtitle",
         )
 
+        owned_gateway = None
         try:
             logger.info(f"\n{self.task.subtitle_config.print_config()}")
 
@@ -299,6 +308,10 @@ class SubtitleThread(QThread):
             subtitle_config = self.task.subtitle_config
             assert subtitle_config is not None, self.tr("字幕配置为空")
             self._validate_enhanced_profile_compatibility(subtitle_config)
+            gateway = self._injected_gateway
+            if gateway is None:
+                gateway = LLMGateway(max_concurrency=subtitle_config.thread_num)
+                owned_gateway = gateway
             if self.task.input_data is not None:
                 asr_data = clone_subtitle_data(self.task.input_data)
             elif self.task.editor_data_json is not None:
@@ -334,6 +347,7 @@ class SubtitleThread(QThread):
                     if subtitle_config.utility_llm_profile
                     else "",
                     profile=subtitle_config.utility_llm_profile,
+                    gateway=gateway,
                     max_word_count_cjk=subtitle_config.max_word_count_cjk,
                     max_word_count_english=subtitle_config.max_word_count_english,
                     use_llm=use_llm_split,
@@ -374,6 +388,7 @@ class SubtitleThread(QThread):
                     batch_num=subtitle_config.batch_size,
                     model=subtitle_config.utility_llm_profile.model,
                     profile=subtitle_config.utility_llm_profile,
+                    gateway=gateway,
                     custom_prompt=optimization_prompt or "",
                     update_callback=self.callback,
                 )
@@ -401,12 +416,14 @@ class SubtitleThread(QThread):
                     subtitle_config.effective_translation_mode()
                     == TranslationMode.ENHANCED_LLM.value
                 ):
-                    asr_data = self._run_enhanced_translation(asr_data, subtitle_config)
+                    asr_data = self._run_enhanced_translation(
+                        asr_data, subtitle_config, gateway=gateway
+                    )
                     translator = None
                 else:
                     main_prompt = context_info + subtitle_config.main_translation_prompt + "\n"
                     translator = create_translator_from_config(
-                        subtitle_config, main_prompt, self.callback
+                        subtitle_config, main_prompt, self.callback, gateway=gateway
                     )
                     self.translator = translator
                     try:
@@ -451,6 +468,8 @@ class SubtitleThread(QThread):
             self.error.emit(str(e))
             self.progress.emit(100, self.tr("字幕处理失败"))
         finally:
+            if owned_gateway is not None:
+                owned_gateway.close()
             clear_task_context()
 
     def need_legacy_llm(self, subtitle_config: SubtitleConfig, asr_data: ASRData):

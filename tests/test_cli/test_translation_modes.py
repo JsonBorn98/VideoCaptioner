@@ -450,3 +450,191 @@ def test_process_does_not_postprocess_after_translation_failure(
 
     assert result == EXIT.RUNTIME_ERROR
     assert calls["postprocess"] == 0
+
+
+class _TrackingGateway:
+    def __init__(self, *args, **kwargs) -> None:
+        self.max_concurrency = kwargs.get("max_concurrency")
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_cli_subtitle_constructs_one_gateway_and_injects_it(
+    tmp_path: Path, monkeypatch, profile_store
+) -> None:
+    constructed = []
+    captured = {}
+
+    class OwnedGateway(_TrackingGateway):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            constructed.append(self)
+
+    def fake_run(data, config, **kwargs):
+        captured["gateway"] = kwargs.get("gateway")
+        translated = ASRData.from_json(data.to_json())
+        translated.segments[0].translated_text = "你好"
+        glossary = tmp_path / "【项目术语表】source.vcglossary.json"
+        audit = tmp_path / "【翻译审计】source.md"
+        glossary.write_text("{}", encoding="utf-8")
+        audit.write_text("# audit", encoding="utf-8")
+        return SimpleNamespace(
+            subtitle_data=translated,
+            artifacts=SimpleNamespace(glossary_path=glossary, audit_report_path=audit),
+            result=SimpleNamespace(audit_report=SimpleNamespace(issues=(), usages=())),
+        )
+
+    import videocaptioner.core.translate.enhanced as enhanced_package
+
+    monkeypatch.setattr(enhanced_package, "run_enhanced_translation", fake_run)
+    monkeypatch.setattr("videocaptioner.core.llm.LLMGateway", OwnedGateway)
+    source = tmp_path / "source.srt"
+    destination = tmp_path / "initial.srt"
+    config = build_config(
+        {
+            "llm": {
+                "profile_id": "main-profile",
+                "review_profile_id": "review-profile",
+            },
+            "subtitle": {"optimize": False, "split": False, "translate": True, "thread_num": 8},
+            "translate": {"mode": "enhanced_llm"},
+        }
+    )
+
+    result = subtitle_command.run(_args(source, destination), config)
+
+    assert result == EXIT.SUCCESS
+    assert len(constructed) == 1
+    assert captured["gateway"] is constructed[0]
+    assert constructed[0].max_concurrency == 8
+    assert constructed[0].closed == 1
+
+
+def test_cli_process_shares_one_gateway_with_postprocess(tmp_path: Path, monkeypatch) -> None:
+    from videocaptioner.cli.commands import postprocess, process, transcribe
+
+    constructed = []
+    captured = {}
+
+    class OwnedGateway(_TrackingGateway):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            constructed.append(self)
+
+    def fake_transcribe(args, config):
+        Path(args.output).write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8"
+        )
+        return EXIT.SUCCESS
+
+    def fake_subtitle(args, config):
+        captured["subtitle"] = getattr(args, "gateway", None)
+        Path(args.output).write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8"
+        )
+        return EXIT.SUCCESS
+
+    def fake_postprocess(args, config):
+        captured["postprocess"] = getattr(args, "gateway", None)
+        Path(args.output).write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8"
+        )
+        return EXIT.SUCCESS
+
+    monkeypatch.setattr("videocaptioner.core.llm.LLMGateway", OwnedGateway)
+    monkeypatch.setattr(transcribe, "run", fake_transcribe)
+    monkeypatch.setattr(subtitle_command, "run", fake_subtitle)
+    monkeypatch.setattr(postprocess, "run", fake_postprocess)
+    media = tmp_path / "talk.mp3"
+    media.write_bytes(b"fake")
+    config = build_config(
+        {
+            "subtitle": {"optimize": False, "split": False, "translate": True, "thread_num": 6},
+            "translate": {"mode": "non_llm", "service": "bing"},
+        }
+    )
+    args = Namespace(
+        input=str(media),
+        output=str(tmp_path),
+        verbose=False,
+        quiet=True,
+        no_synthesize=True,
+        dub=False,
+        dub_only=False,
+        no_postprocess=False,
+        translator=None,
+        translation_mode=None,
+        target_language=None,
+        config=None,
+    )
+
+    result = process.run(args, config)
+
+    assert result == EXIT.SUCCESS
+    assert len(constructed) == 1
+    gateway = constructed[0]
+    assert captured["subtitle"] is gateway
+    assert captured["postprocess"] is gateway
+    assert gateway.max_concurrency == 6
+    assert gateway.closed == 1
+
+
+def test_cli_standalone_postprocess_does_not_construct_task_gateway(
+    tmp_path: Path, monkeypatch, profile_store
+) -> None:
+    from videocaptioner.cli.commands import postprocess as postprocess_command
+
+    constructed = []
+    captured_gateway = {}
+
+    class OwnedGateway(_TrackingGateway):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            constructed.append(self)
+
+    def fake_run_postprocess_task(task, **kwargs):
+        captured_gateway["gateway"] = kwargs.get("gateway")
+
+        class Result:
+            succeeded = True
+            used_fallback = False
+            warnings = ()
+            output_data = ASRData([ASRDataSeg("你好", 0, 1000)])
+            report = SimpleNamespace(speed=None)
+            precise_timing_outcome = None
+            layout = None
+
+            @property
+            def task(self_inner):
+                return task
+
+        task.status = "completed"
+        task.active_subtitle_path = str(tmp_path / "【后处理字幕】sample.srt")
+        return Result()
+
+    monkeypatch.setattr("videocaptioner.core.llm.LLMGateway", OwnedGateway)
+    monkeypatch.setattr(
+        "videocaptioner.core.postprocess.run_postprocess_task",
+        fake_run_postprocess_task,
+    )
+    source = tmp_path / "sample.srt"
+    source.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    args = Namespace(
+        input=str(source),
+        output=None,
+        layout="source-only",
+        profile="balanced",
+        speed_profile=None,
+        media=None,
+        speed_media=None,
+        quiet=True,
+        verbose=False,
+    )
+
+    result = postprocess_command.run(args, build_config({"llm": {"profile_id": "main-profile"}}))
+
+    assert result == EXIT.SUCCESS
+    assert constructed == []
+    assert captured_gateway["gateway"] is None
