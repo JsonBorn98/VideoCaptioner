@@ -48,9 +48,11 @@ docs/.vitepress/dist/
 /*.mp4
 *.log
 
-# Claude Code
+# AI agent tooling (Claude Code, Codex, ...)
 .claude/
 CLAUDE.md
+/.codex/
+/.agents/
 videocaptioner/_version.py
 
 # Matt-flow local issue tracker (public fork — maps/tickets may reference
