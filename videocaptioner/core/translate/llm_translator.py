@@ -113,6 +113,8 @@ class LLMTranslator(BaseTranslator):
         except openai.NotFoundError as e:
             logger.error(f"OpenAI NotFound Error: {str(e)}")
             raise
+        except InterruptedError:
+            raise
         except Exception as e:
             logger.error(f"LLM translation error: {e}")
             raise

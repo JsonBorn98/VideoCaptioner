@@ -6,11 +6,11 @@ import openai
 import pytest
 
 from videocaptioner.core.llm.adapters import (
-    AnthropicMessagesAdapter,
     DEFAULT_TIMEOUT_SECONDS,
+    TIMEOUT_SECONDS_PER_OUTPUT_TOKEN,
+    AnthropicMessagesAdapter,
     GeminiAdapter,
     OpenAICompatibleAdapter,
-    TIMEOUT_SECONDS_PER_OUTPUT_TOKEN,
     request_timeout_seconds,
 )
 from videocaptioner.core.llm.models import (
@@ -903,12 +903,7 @@ def test_adapter_reports_protected_request_option_as_non_retryable_configuration
 
 
 def test_status_error_message_carries_provider_reason():
-    """400 等客户端错误的 LLMCallError 必须透传 provider 真实原因（ADR-0017）。
-
-    复现 2026-09-02 deepseek 连接测试现场：结构化探针被 400 拒绝，但错误
-    文本只剩 "LLM provider returned HTTP 400"，用户看不到 provider 的
-    真实拒绝原因（如余额不足、模型名错误），连接测试无法诊断。
-    """
+    """400 等客户端错误的 LLMCallError 必须透传 provider 真实原因（ADR-0017）。"""
     http_request = httpx.Request(
         "POST", "https://api.deepseek.test/v1/chat/completions"
     )
@@ -939,6 +934,68 @@ def test_status_error_message_carries_provider_reason():
     assert caught.value.category is LLMErrorCategory.CONFIGURATION
     assert caught.value.status_code == 400
     # 错误文本必须携带 provider 声明的真实原因，而不是只有状态码。
+    assert "Insufficient Balance" in str(caught.value)
+
+
+def _insufficient_balance_response(transport: LLMTransport) -> "_Response":
+    """Build a 400 response whose error.message carries the provider reason."""
+    body = (
+        # Anthropic nests the message under error.message with type: error.
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Insufficient Balance, please top up.",
+            },
+        }
+        if transport is LLMTransport.ANTHROPIC_MESSAGES
+        # Gemini nests it under error.message with code/status.
+        else {
+            "error": {
+                "code": 400,
+                "message": "Insufficient Balance, please top up.",
+                "status": "INVALID_ARGUMENT",
+            }
+        }
+    )
+    response = _Response({})
+    response.ok = False
+    response.status_code = 400
+    response.text = json.dumps(body)
+    return response
+
+
+@pytest.mark.parametrize(
+    ("transport", "dialect", "base_url", "adapter_class"),
+    [
+        (
+            LLMTransport.ANTHROPIC_MESSAGES,
+            ProviderDialect.ANTHROPIC,
+            "https://api.anthropic.test/v1",
+            AnthropicMessagesAdapter,
+        ),
+        (
+            LLMTransport.GEMINI,
+            ProviderDialect.GEMINI,
+            "https://generativelanguage.test/v1beta",
+            GeminiAdapter,
+        ),
+    ],
+)
+def test_native_status_error_message_carries_provider_reason(
+    transport, dialect, base_url, adapter_class
+):
+    """原生 transport 的 400 同样必须透传 provider 真实原因（ADR-0017，用户故事 4/6）。"""
+    adapter = adapter_class(
+        _profile(transport, dialect, base_url=base_url),
+        session=_Session(_insufficient_balance_response(transport)),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    assert caught.value.category is LLMErrorCategory.CONFIGURATION
+    assert caught.value.status_code == 400
     assert "Insufficient Balance" in str(caught.value)
 
 

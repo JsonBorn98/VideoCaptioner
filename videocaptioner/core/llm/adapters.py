@@ -190,7 +190,8 @@ def _endpoint(base_url: str, suffix: str) -> str:
 def _http_error(response: requests.Response) -> LLMCallError:
     status = response.status_code
     diagnostic = response.text.strip()
-    message = f"LLM provider returned HTTP {status}"
+    reason = _response_error_reason(response)
+    message = _status_error_message(status, reason)
     if status in {401, 403}:
         return LLMCallError(
             message,
@@ -322,24 +323,37 @@ def _exception_text(exc: BaseException) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _provider_error_reason(exc: BaseException) -> Optional[str]:
-    """Extract the provider's stated failure reason from a status error body.
+def _error_reason_from_body(body: Any) -> Optional[str]:
+    """Read the provider's stated failure reason from a parsed error body.
 
     连接测试只透传服务端真实报错文本（ADR-0017）：余额不足、模型名错误等
-    provider 侧原因写在 ``body["error"]["message"]``，丢弃它会让 400 只剩
-    状态码、无法诊断。
+    provider 侧原因写在 ``error.message``，丢弃它会让 400 只剩状态码、无法诊断。
     """
-    body = getattr(exc, "body", None)
-    if isinstance(body, Mapping):
-        error = body.get("error")
-        if isinstance(error, Mapping):
-            message = error.get("message")
-            if isinstance(message, str) and message.strip():
-                return message.strip()
-        message = body.get("message")
+    if not isinstance(body, Mapping):
+        return None
+    error = body.get("error")
+    if isinstance(error, Mapping):
+        message = error.get("message")
         if isinstance(message, str) and message.strip():
             return message.strip()
+    message = body.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
     return None
+
+
+def _provider_error_reason(exc: BaseException) -> Optional[str]:
+    """OpenAI SDK 状态错误的 body 已是解析好的对象。"""
+    return _error_reason_from_body(getattr(exc, "body", None))
+
+
+def _response_error_reason(response: requests.Response) -> Optional[str]:
+    """原生 requests 错误响应的原因从响应文本解析，与 _http_error 的 diagnostic 同源。"""
+    try:
+        body = json.loads(response.text)
+    except ValueError:
+        return None
+    return _error_reason_from_body(body)
 
 
 def _status_error_message(status: Optional[int], reason: Optional[str]) -> str:

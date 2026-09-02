@@ -127,6 +127,8 @@ class SubtitleOptimizer:
 
             return ASRData(new_segments)
 
+        except InterruptedError:
+            raise
         except Exception as e:
             logger.error(f"Optimization failed: {str(e)}")
             raise RuntimeError(f"Optimization failed: {str(e)}")
@@ -174,6 +176,8 @@ class SubtitleOptimizer:
             try:
                 result = future.result()
                 optimized_dict.update(result)
+            except InterruptedError:
+                raise
             except Exception as e:
                 logger.error(f"Optimization batch failed: {str(e)}")
                 with self._stat_lock:
@@ -211,6 +215,8 @@ class SubtitleOptimizer:
 
             return result
 
+        except InterruptedError:
+            raise
         except Exception as e:
             logger.error(f"Optimization failed: {str(e)}")
             with self._stat_lock:

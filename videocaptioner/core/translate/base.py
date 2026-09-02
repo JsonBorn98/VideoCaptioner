@@ -66,6 +66,8 @@ class BaseTranslator(ABC):
             )
 
             return ASRData(new_segments)
+        except InterruptedError:
+            raise
         except Exception as e:
             logger.error(f"Translation failed: {str(e)}")
             raise RuntimeError(f"Translation failed: {str(e)}")
@@ -98,6 +100,8 @@ class BaseTranslator(ABC):
             try:
                 result = future.result()
                 translated_list.extend(result)
+            except InterruptedError:
+                raise
             except Exception as e:
                 logger.error(f"Translation chunk failed: {e}")
                 failed_count += len(future_to_chunk[future])
@@ -160,6 +164,8 @@ class BaseTranslator(ABC):
             self._cache.set(cache_key, result, expire=86400 * 7)
             return result
 
+        except InterruptedError:
+            raise
         except Exception as e:
             logger.exception(f"Translation failed: {str(e)}")
             raise

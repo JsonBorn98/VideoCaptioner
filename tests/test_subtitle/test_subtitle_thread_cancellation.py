@@ -1,12 +1,5 @@
-"""停止门与停止可达性回归测试。
+"""停止门与停止可达性回归：取消后 run() 不得推进到下一阶段，stop() 必须触达在跑的消费者。"""
 
-复现 2026-09-02 12:22 停止失效现场（app.log「正在优化字幕...」出现在停止警告
-之后、llm_requests.jsonl 在停止点击后仍出现新的 llm_optimize / llm_split 请求）：
-- 取消后 run() 不得继续推进到下一阶段（优化/翻译）发起新请求；
-- stop() 必须能触达正在运行的消费者（self.optimizer 此前从未赋值，是死代码）。
-"""
-
-import pytest
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import (
