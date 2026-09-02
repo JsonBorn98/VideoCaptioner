@@ -35,6 +35,7 @@ from .glossary import (
     subtitle_fingerprint,
 )
 from .models import (
+    AnalysisWindow,
     AuthoritativeGlossary,
     CancellationToken,
     EnhancedTranslationConfig,
@@ -478,6 +479,7 @@ class EnhancedTranslationOrchestrator:
         self.progress = progress
         self._usage = _UsageCollector()
         self._warnings: list[str] = []
+        self._warnings_lock = threading.Lock()
         self._runtime_context_tokens = {
             config.main_role.profile.profile_id: config.main_role.profile.work_context_tokens,
             config.review_role.profile.profile_id: config.review_role.profile.work_context_tokens,
@@ -514,7 +516,7 @@ class EnhancedTranslationOrchestrator:
             imported_mode = classified.mode
             imported = classified.glossary
             if classified.reason:
-                self._warnings.append(f"导入术语表：{classified.reason}")
+                self._warn(f"导入术语表：{classified.reason}")
 
         if imported_mode is GlossaryImportMode.EXACT and imported is not None:
             glossary = imported
@@ -543,9 +545,10 @@ class EnhancedTranslationOrchestrator:
                 reviewed = tuple(confirm_terms(reviewed))
             for candidate in reviewed:
                 if candidate.ignored or not candidate.is_term:
-                    warning = f"候选未纳入权威术语表：{candidate.source_term}"
-                    if warning not in self._warnings:
-                        self._warnings.append(warning)
+                    self._warn(
+                        f"候选未纳入权威术语表：{candidate.source_term}",
+                        unique=True,
+                    )
             glossary = AuthoritativeGlossary(
                 source_language=self.config.source_language,
                 target_language=self.config.target_language,
@@ -576,7 +579,7 @@ class EnhancedTranslationOrchestrator:
             issues=issues,
             authoritative_terms=glossary.entries,
             usages=self._usage.snapshot(),
-            warnings=tuple(self._warnings),
+            warnings=self._warning_snapshot(),
         )
         if self.config.audit_mode is TranslationAuditMode.AUTO_APPLY_REVIEW:
             translations, issues = apply_review_fixes(
@@ -626,6 +629,16 @@ class EnhancedTranslationOrchestrator:
     def _emit(self, value: int, message: str) -> None:
         if self.progress is not None:
             self.progress(value, message)
+
+    def _warn(self, warning: str, *, unique: bool = False) -> None:
+        with self._warnings_lock:
+            if unique and warning in self._warnings:
+                return
+            self._warnings.append(warning)
+
+    def _warning_snapshot(self) -> tuple[str, ...]:
+        with self._warnings_lock:
+            return tuple(self._warnings)
 
     def _runtime_budget(self, role: TranslationRoleSnapshot) -> int:
         return self._runtime_context_tokens[role.profile.profile_id]
@@ -694,7 +707,7 @@ class EnhancedTranslationOrchestrator:
                     f"已回退到 {lowered} token；保存的模型方案未被修改。"
                 )
                 logger.warning(warning)
-                self._warnings.append(warning)
+                self._warn(warning)
 
     def _call_json(
         self,
@@ -993,8 +1006,13 @@ class EnhancedTranslationOrchestrator:
             ),
             overlap_cues=2,
         )
-        analyses = [
-            self._call_json(
+        limit = role.profile.clamped_concurrency(self.config.max_concurrency)
+
+        def analyze_window(
+            window: AnalysisWindow,
+        ) -> tuple[TranslationContextBrief, tuple[TermCandidate, ...]]:
+            valid = {cue.cue_id for cue in window.cues}
+            return self._call_json(
                 role,
                 stage="analysis_window",
                 brief="",
@@ -1002,19 +1020,24 @@ class EnhancedTranslationOrchestrator:
                 instruction=_ANALYSIS_INSTRUCTION,
                 payload=[{"id": cue.cue_id, "text": cue.text} for cue in window.cues],
                 schema=_ANALYSIS_SCHEMA,
-                validator=lambda value, valid={cue.cue_id for cue in window.cues}: self._parse_analysis(
-                    value, valid
-                ),
+                validator=lambda value, valid=valid: self._parse_analysis(value, valid),
             )
-            for window in windows
-        ]
+
+        analyses = execute_batches(
+            windows,
+            analyze_window,
+            concurrency=limit,
+            cancellation=self.cancellation,
+        )
         all_candidates = [candidate for _, candidates in analyses for candidate in candidates]
         briefs = [brief for brief, _ in analyses]
         while len(briefs) > 1:
             groups = self._group_briefs(role, briefs, budget)
-            summaries: list[TranslationContextBrief] = []
-            for group in groups:
-                summary = self._call_json(
+
+            def summarize_group(
+                group: tuple[TranslationContextBrief, ...],
+            ) -> TranslationContextBrief:
+                return self._call_json(
                     role,
                     stage="analysis_summary",
                     brief="",
@@ -1027,8 +1050,13 @@ class EnhancedTranslationOrchestrator:
                     schema=_ANALYSIS_SCHEMA,
                     validator=lambda value: self._parse_analysis(value, set())[0],
                 )
-                summaries.append(summary)
-            briefs = summaries
+
+            briefs = execute_batches(
+                groups,
+                summarize_group,
+                concurrency=limit,
+                cancellation=self.cancellation,
+            )
         brief = briefs[0] if briefs else TranslationContextBrief()
         return brief, self._deduplicate_candidates(all_candidates)
 
@@ -1180,113 +1208,117 @@ class EnhancedTranslationOrchestrator:
         brief: TranslationContextBrief,
         candidates: Sequence[TermCandidate],
     ) -> tuple[TermCandidate, ...]:
-        resolved: list[TermCandidate] = []
-        for candidate in candidates:
-            self.cancellation.raise_if_cancelled()
-            contexts = self._representative_contexts(cues, candidate, maximum=5)
+        if not candidates:
+            return ()
+        limit = self.config.main_role.profile.clamped_concurrency(
+            self.config.max_concurrency
+        )
+        return tuple(
+            execute_batches(
+                tuple(candidates),
+                lambda candidate: self._resolve_term_candidate(cues, brief, candidate),
+                concurrency=limit,
+                cancellation=self.cancellation,
+            )
+        )
+
+    def _resolve_term_candidate(
+        self,
+        cues: Sequence[SubtitleCue],
+        brief: TranslationContextBrief,
+        candidate: TermCandidate,
+    ) -> TermCandidate:
+        contexts = self._representative_contexts(cues, candidate, maximum=5)
+        representative_context_ids = tuple(
+            int(context["anchor_id"]) for context in contexts
+        )
+        main_value = self._call_json(
+            self.config.main_role,
+            stage="term_proposal",
+            brief=brief,
+            glossary_entries=(),
+            instruction=_TERM_PROPOSE_INSTRUCTION,
+            payload={"candidate": self._candidate_payload(candidate), "contexts": contexts},
+            schema=_TERM_PROPOSAL_SCHEMA,
+            validator=self._parse_term_proposal,
+        )
+        main_translation = main_value["translation"]
+        review_value = self._call_json(
+            self.config.review_role,
+            stage="term_review",
+            brief=brief,
+            glossary_entries=(),
+            instruction=_TERM_REVIEW_INSTRUCTION,
+            payload={
+                "candidate": self._candidate_payload(candidate),
+                "main_translation": main_translation,
+                "contexts": contexts,
+            },
+            schema=_TERM_REVIEW_SCHEMA,
+            validator=self._parse_term_review,
+        )
+        if not review_value["is_term"]:
+            self._warn(f"高级校对判定不是术语：{candidate.source_term}")
+            return replace(
+                candidate,
+                representative_context_ids=representative_context_ids,
+                is_term=False,
+                ignored=True,
+            )
+        decision = TermReviewDecision(review_value["decision"])
+        high_risk = False
+        if decision is TermReviewDecision.UNCERTAIN:
+            high_risk = True
+            expanded = self._representative_contexts(cues, candidate, maximum=10)
             representative_context_ids = tuple(
-                int(context["anchor_id"]) for context in contexts
+                int(context["anchor_id"]) for context in expanded
             )
-            main_value = self._call_json(
-                self.config.main_role,
-                stage="term_proposal",
-                brief=brief,
-                glossary_entries=(),
-                instruction=_TERM_PROPOSE_INSTRUCTION,
-                payload={"candidate": self._candidate_payload(candidate), "contexts": contexts},
-                schema=_TERM_PROPOSAL_SCHEMA,
-                validator=self._parse_term_proposal,
-            )
-            main_translation = main_value["translation"]
-            review_value = self._call_json(
-                self.config.review_role,
-                stage="term_review",
-                brief=brief,
-                glossary_entries=(),
-                instruction=_TERM_REVIEW_INSTRUCTION,
-                payload={
-                    "candidate": self._candidate_payload(candidate),
-                    "main_translation": main_translation,
-                    "contexts": contexts,
-                },
-                schema=_TERM_REVIEW_SCHEMA,
-                validator=self._parse_term_review,
-            )
-            if not review_value["is_term"]:
-                self._warnings.append(
-                    f"高级校对判定不是术语：{candidate.source_term}"
+            try:
+                review_value = self._call_json(
+                    self.config.review_role,
+                    stage="term_review_final",
+                    brief=brief,
+                    glossary_entries=(),
+                    instruction=_TERM_REVIEW_FINAL_INSTRUCTION,
+                    payload={
+                        "candidate": self._candidate_payload(candidate),
+                        "main_translation": main_translation,
+                        "contexts": expanded,
+                    },
+                    schema=_TERM_REVIEW_FINAL_SCHEMA,
+                    validator=self._parse_term_review_final,
                 )
-                resolved.append(
-                    replace(
-                        candidate,
-                        representative_context_ids=representative_context_ids,
-                        is_term=False,
-                        ignored=True,
-                    )
-                )
-                continue
-            decision = TermReviewDecision(review_value["decision"])
-            high_risk = False
-            if decision is TermReviewDecision.UNCERTAIN:
-                high_risk = True
-                expanded = self._representative_contexts(cues, candidate, maximum=10)
-                representative_context_ids = tuple(
-                    int(context["anchor_id"]) for context in expanded
-                )
-                try:
-                    review_value = self._call_json(
-                        self.config.review_role,
-                        stage="term_review_final",
-                        brief=brief,
-                        glossary_entries=(),
-                        instruction=_TERM_REVIEW_FINAL_INSTRUCTION,
-                        payload={
-                            "candidate": self._candidate_payload(candidate),
-                            "main_translation": main_translation,
-                            "contexts": expanded,
-                        },
-                        schema=_TERM_REVIEW_FINAL_SCHEMA,
-                        validator=self._parse_term_review_final,
-                    )
-                    decision = TermReviewDecision(review_value["decision"])
-                except EnhancedTranslationError as exc:
-                    if not _is_invalid_response_error(exc):
-                        raise
-                    self._warnings.append(
-                        f"术语校对响应无效，已保留原文：{candidate.source_term}"
-                    )
-                    resolved.append(
-                        replace(
-                            candidate,
-                            representative_context_ids=representative_context_ids,
-                            main_translation=main_translation,
-                            review_translation=candidate.source_term,
-                            review_decision=TermReviewDecision.CORRECT,
-                            final_translation=candidate.source_term,
-                            selection_source=GlossarySelectionSource.SOURCE_FALLBACK,
-                            high_risk=True,
-                        )
-                    )
-                    continue
-            if decision is TermReviewDecision.ACCEPT:
-                final = main_translation
-                source = GlossarySelectionSource.REVIEW_MODEL_ACCEPTED
-            else:
-                final = str(review_value["translation"])
-                source = GlossarySelectionSource.REVIEW_MODEL_CORRECTED
-            resolved.append(
-                replace(
+                decision = TermReviewDecision(review_value["decision"])
+            except EnhancedTranslationError as exc:
+                if not _is_invalid_response_error(exc):
+                    raise
+                self._warn(f"术语校对响应无效，已保留原文：{candidate.source_term}")
+                return replace(
                     candidate,
                     representative_context_ids=representative_context_ids,
                     main_translation=main_translation,
-                    review_translation=final,
-                    review_decision=decision,
-                    final_translation=final,
-                    selection_source=source,
-                    high_risk=high_risk,
+                    review_translation=candidate.source_term,
+                    review_decision=TermReviewDecision.CORRECT,
+                    final_translation=candidate.source_term,
+                    selection_source=GlossarySelectionSource.SOURCE_FALLBACK,
+                    high_risk=True,
                 )
-            )
-        return tuple(resolved)
+        if decision is TermReviewDecision.ACCEPT:
+            final = main_translation
+            source = GlossarySelectionSource.REVIEW_MODEL_ACCEPTED
+        else:
+            final = str(review_value["translation"])
+            source = GlossarySelectionSource.REVIEW_MODEL_CORRECTED
+        return replace(
+            candidate,
+            representative_context_ids=representative_context_ids,
+            main_translation=main_translation,
+            review_translation=final,
+            review_decision=decision,
+            final_translation=final,
+            selection_source=source,
+            high_risk=high_risk,
+        )
 
     @staticmethod
     def _candidate_payload(candidate: TermCandidate) -> dict[str, Any]:
@@ -1510,46 +1542,6 @@ class EnhancedTranslationOrchestrator:
         role = self.config.review_role
         budget = self._runtime_budget(role)
 
-        def build_payload(batch: TranslationBatch) -> dict[str, Any]:
-            allowed = set(batch.subject_ids)
-            return {
-                "boundary_context_read_only": {
-                    "before": [
-                        {
-                            "id": cue.cue_id,
-                            "source": cue.text,
-                            "translation": translations.get(cue.cue_id, ""),
-                        }
-                        for cue in batch.context_before
-                    ],
-                    "after": [
-                        {
-                            "id": cue.cue_id,
-                            "source": cue.text,
-                            "translation": translations.get(cue.cue_id, ""),
-                        }
-                        for cue in batch.context_after
-                    ],
-                },
-                "audit_subjects": [
-                    {
-                        "id": cue.cue_id,
-                        "source": cue.text,
-                        "translation": translations.get(cue.cue_id, ""),
-                    }
-                    for cue in batch.subjects
-                ],
-                "local_warnings": [
-                    {
-                        "id": issue.cue_id,
-                        "category": issue.category,
-                        "message": issue.message,
-                    }
-                    for issue in local
-                    if issue.cue_id in allowed
-                ],
-            }
-
         structured_audit_instruction = (
             f"{_AUDIT_INSTRUCTION}\n\n{_structured_output_instruction(_AUDIT_SCHEMA)}"
         )
@@ -1573,7 +1565,7 @@ class EnhancedTranslationOrchestrator:
                 context_brief=brief,
                 glossary_entries=relevant,
                 stage_instruction=structured_audit_instruction,
-                dynamic_subtitles=build_payload(candidate),
+                dynamic_subtitles=self._audit_payload(candidate, translations, local),
                 glossary_version="1",
             )
             return estimate_tokens(assembly.full_prompt)
@@ -1601,69 +1593,17 @@ class EnhancedTranslationOrchestrator:
                 retryable=False,
             ) from exc
         model_issues: list[TranslationAuditIssue] = []
-        pending_batches = list(batches)
-        while pending_batches:
-            batch = pending_batches.pop(0)
-            relevant = select_relevant_entries(
-                glossary, (*batch.context_before, *batch.subjects, *batch.context_after)
-            )
-            allowed = set(batch.subject_ids)
-            payload = build_payload(batch)
-            try:
-                batch_issues = self._call_json(
-                    role,
-                    stage="audit",
-                    brief=brief,
-                    glossary_entries=relevant,
-                    instruction=_AUDIT_INSTRUCTION,
-                    payload=payload,
-                    schema=_AUDIT_SCHEMA,
-                    validator=lambda value, allowed=allowed: self._parse_audit_issues(
-                        value, allowed, cues, translations
-                    ),
-                    timeout_output_tokens=self._planning_output_reserve(
-                        role,
-                        budget,
-                        stage="audit",
-                        subject_input_tokens=estimate_cues_tokens(batch.subjects),
-                    ),
-                )
-            except EnhancedTranslationError as exc:
-                if exc.category == "output_limit" and len(batch.subjects) > 1:
-                    left, right = self._split_batch(batch)
-                    pending_batches[0:0] = [left, right]
-                    logger.warning(
-                        "Audit output remained truncated for subtitles %s-%s; "
-                        "splitting the batch",
-                        batch.subject_ids[0],
-                        batch.subject_ids[-1],
-                    )
-                    continue
-                if exc.category == "output_limit":
-                    subject_ids = batch.subject_ids
-                    warning = (
-                        f"高级校对对字幕 {subject_ids[0]} 的输出额度仍不足，"
-                        "已跳过该字幕模型审校；译文和本地审计结果已保留。"
-                    )
-                    logger.warning("%s 诊断：%s", warning, exc)
-                    self._warnings.append(warning)
-                    continue
-                if not _is_invalid_response_error(exc):
-                    raise
-                subject_ids = batch.subject_ids
-                batch_label = (
-                    str(subject_ids[0])
-                    if len(subject_ids) == 1
-                    else f"{subject_ids[0]}-{subject_ids[-1]}"
-                )
-                warning = (
-                    f"高级校对对字幕 {batch_label} 的响应结构无效，已跳过该批次模型审校；"
-                    "译文和本地审计结果已保留。"
-                )
-                logger.warning("%s 诊断：%s", warning, exc)
-                self._warnings.append(warning)
-                continue
-            model_issues.extend(batch_issues)
+        if batches:
+            limit = role.profile.clamped_concurrency(self.config.max_concurrency)
+            for batch_issues in execute_batches(
+                batches,
+                lambda batch: self._audit_batch(
+                    batch, brief, glossary, translations, local, cues
+                ),
+                concurrency=limit,
+                cancellation=self.cancellation,
+            ):
+                model_issues.extend(batch_issues)
         local_by_id: dict[int, list[TranslationAuditIssue]] = {}
         for issue in local:
             local_by_id.setdefault(issue.cue_id, []).append(issue)
@@ -1702,6 +1642,126 @@ class EnhancedTranslationOrchestrator:
                 )
             )
         return dict(translations), tuple(issues)
+
+    @staticmethod
+    def _audit_payload(
+        batch: TranslationBatch,
+        translations: Mapping[int, str],
+        local: Sequence[TranslationAuditIssue],
+    ) -> dict[str, Any]:
+        allowed = set(batch.subject_ids)
+        return {
+            "boundary_context_read_only": {
+                "before": [
+                    {
+                        "id": cue.cue_id,
+                        "source": cue.text,
+                        "translation": translations.get(cue.cue_id, ""),
+                    }
+                    for cue in batch.context_before
+                ],
+                "after": [
+                    {
+                        "id": cue.cue_id,
+                        "source": cue.text,
+                        "translation": translations.get(cue.cue_id, ""),
+                    }
+                    for cue in batch.context_after
+                ],
+            },
+            "audit_subjects": [
+                {
+                    "id": cue.cue_id,
+                    "source": cue.text,
+                    "translation": translations.get(cue.cue_id, ""),
+                }
+                for cue in batch.subjects
+            ],
+            "local_warnings": [
+                {
+                    "id": issue.cue_id,
+                    "category": issue.category,
+                    "message": issue.message,
+                }
+                for issue in local
+                if issue.cue_id in allowed
+            ],
+        }
+
+    def _audit_batch(
+        self,
+        batch: TranslationBatch,
+        brief: TranslationContextBrief,
+        glossary: AuthoritativeGlossary,
+        translations: Mapping[int, str],
+        local: Sequence[TranslationAuditIssue],
+        cues: Sequence[SubtitleCue],
+    ) -> tuple[TranslationAuditIssue, ...]:
+        role = self.config.review_role
+        relevant = select_relevant_entries(
+            glossary, (*batch.context_before, *batch.subjects, *batch.context_after)
+        )
+        allowed = set(batch.subject_ids)
+        try:
+            return self._call_json(
+                role,
+                stage="audit",
+                brief=brief,
+                glossary_entries=relevant,
+                instruction=_AUDIT_INSTRUCTION,
+                payload=self._audit_payload(batch, translations, local),
+                schema=_AUDIT_SCHEMA,
+                validator=lambda value, allowed=allowed: self._parse_audit_issues(
+                    value, allowed, cues, translations
+                ),
+                timeout_output_tokens=self._planning_output_reserve(
+                    role,
+                    self._runtime_budget(role),
+                    stage="audit",
+                    subject_input_tokens=estimate_cues_tokens(batch.subjects),
+                ),
+            )
+        except EnhancedTranslationError as exc:
+            if exc.category == "output_limit" and len(batch.subjects) > 1:
+                left, right = self._split_batch(batch)
+                logger.warning(
+                    "Audit output remained truncated for subtitles %s-%s; "
+                    "splitting the batch",
+                    batch.subject_ids[0],
+                    batch.subject_ids[-1],
+                )
+                return (
+                    *self._audit_batch(
+                        left, brief, glossary, translations, local, cues
+                    ),
+                    *self._audit_batch(
+                        right, brief, glossary, translations, local, cues
+                    ),
+                )
+            if exc.category == "output_limit":
+                subject_ids = batch.subject_ids
+                warning = (
+                    f"高级校对对字幕 {subject_ids[0]} 的输出额度仍不足，"
+                    "已跳过该字幕模型审校；译文和本地审计结果已保留。"
+                )
+                logger.warning("%s 诊断：%s", warning, exc)
+                self._warn(warning)
+                return ()
+            if not _is_invalid_response_error(exc):
+                raise
+            subject_ids = batch.subject_ids
+            batch_label = (
+                str(subject_ids[0])
+                if len(subject_ids) == 1
+                else f"{subject_ids[0]}-{subject_ids[-1]}"
+            )
+            warning = (
+                f"高级校对对字幕 {batch_label} 的响应结构无效，已跳过该批次模型审校；"
+                "译文和本地审计结果已保留。"
+            )
+            logger.warning("%s 诊断：%s", warning, exc)
+            self._warn(warning)
+            return ()
 
     @staticmethod
     def _parse_audit_issues(
