@@ -150,7 +150,11 @@ def test_optimize_request_defaults_timeout_and_carries_labels():
     assert len(gateway.requests) >= 1
     used_profile, request, cancelled = gateway.requests[0]
     assert used_profile is profile
-    assert cancelled is None
+    # 停止门随请求下发：取消回调必须反映优化器的运行状态。
+    assert callable(cancelled)
+    assert cancelled() is False
+    optimizer.stop()
+    assert cancelled() is True
     # 字幕优化不传 timeout：落 adapter 构造默认 120 秒，由 gateway 重试兜底。
     assert request.timeout is None
     assert request.metadata == {"stage": "llm_optimize", "role": "utility"}

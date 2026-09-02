@@ -334,6 +334,8 @@ class SubtitleThread(QThread):
 
             # 字词级字幕按用户选择执行语义断句或本地快速合并。
             if asr_data.is_word_timestamp():
+                # 取消门：停止后不得进入断句阶段发起新请求。
+                self.cancellation.raise_if_cancelled()
                 update_stage("split")
                 use_llm_split = subtitle_config.need_split
                 split_message = (
@@ -377,6 +379,8 @@ class SubtitleThread(QThread):
             self.subtitle_length = len(asr_data.segments)
 
             if subtitle_config.need_optimize:
+                # 取消门：停止后不得推进到下一阶段发起新请求。
+                self.cancellation.raise_if_cancelled()
                 update_stage("optimize")
                 self.progress.emit(0, self.tr("优化字幕..."))
                 logger.info("正在优化字幕...")
@@ -392,7 +396,13 @@ class SubtitleThread(QThread):
                     custom_prompt=optimization_prompt or "",
                     update_callback=self.callback,
                 )
-                asr_data = optimizer.optimize_subtitle(asr_data)
+                # 挂到 self.optimizer 让 stop() 能触达在跑的优化器。
+                self.optimizer = optimizer
+                try:
+                    asr_data = optimizer.optimize_subtitle(asr_data)
+                finally:
+                    optimizer.stop()
+                    self.optimizer = None
                 self.update_all.emit(asr_data.to_json())
                 publish_stage_summary(
                     build_optimize_stage_summary(
@@ -404,6 +414,8 @@ class SubtitleThread(QThread):
 
             # 4. 翻译字幕
             if subtitle_config.need_translate:
+                # 取消门：停止后不得推进到下一阶段发起新请求。
+                self.cancellation.raise_if_cancelled()
                 update_stage("translate")
                 self.progress.emit(0, self.tr("翻译字幕..."))
                 logger.info("正在翻译字幕...")
@@ -440,6 +452,8 @@ class SubtitleThread(QThread):
                 )
 
             # 5. 发布内存快照，并强制保存当前阶段唯一的规范 SRT。
+            # 取消门：用户已停止时不落地本次任务的输出文件。
+            self.cancellation.raise_if_cancelled()
             self.task.result_data = clone_subtitle_data(asr_data)
             canonical, exported, warning = TaskFactory.save_stage_subtitle(
                 asr_data,

@@ -113,7 +113,11 @@ def test_profile_single_llm_forwards_configured_max_output_tokens():
     assert len(gateway.requests) == 1
     used_profile, request, cancelled = gateway.requests[0]
     assert used_profile is profile
-    assert cancelled is None
+    # 停止门随请求下发：取消回调必须反映翻译器的运行状态。
+    assert callable(cancelled)
+    assert cancelled() is False
+    translator.stop()
+    assert cancelled() is True
     assert request.max_output_tokens == 777
     assert request.metadata == {"stage": "single_llm_translation", "role": "main"}
 

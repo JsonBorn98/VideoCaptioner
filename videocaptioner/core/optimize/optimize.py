@@ -254,6 +254,9 @@ class SubtitleOptimizer:
 
         # Agent loop
         for step in range(MAX_STEPS):
+            # 停止后不得再发出新的优化请求（含 agent-loop 反馈步与网关重试）。
+            if not self.is_running:
+                return subtitle_chunk
             # 调用LLM
             assert self.profile is not None
             assert self.gateway is not None
@@ -263,6 +266,7 @@ class SubtitleOptimizer:
                     messages=llm_messages_from_dicts(messages),
                     metadata={"stage": "llm_optimize", "role": "utility"},
                 ),
+                cancelled=lambda: not self.is_running,
             ).text
             if not result_text:
                 raise ValueError("LLM returned empty result")

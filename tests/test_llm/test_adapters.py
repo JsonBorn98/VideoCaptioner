@@ -902,6 +902,46 @@ def test_adapter_reports_protected_request_option_as_non_retryable_configuration
     assert caught.value.retryable is False
 
 
+def test_status_error_message_carries_provider_reason():
+    """400 等客户端错误的 LLMCallError 必须透传 provider 真实原因（ADR-0017）。
+
+    复现 2026-09-02 deepseek 连接测试现场：结构化探针被 400 拒绝，但错误
+    文本只剩 "LLM provider returned HTTP 400"，用户看不到 provider 的
+    真实拒绝原因（如余额不足、模型名错误），连接测试无法诊断。
+    """
+    http_request = httpx.Request(
+        "POST", "https://api.deepseek.test/v1/chat/completions"
+    )
+    failure = openai.APIStatusError(
+        "Error code: 400",
+        response=httpx.Response(400, request=http_request),
+        body={"error": {"message": "Insufficient Balance, please top up."}},
+    )
+
+    class _FailingCompletions:
+        def create(self, **kwargs):
+            raise failure
+
+    adapter = OpenAICompatibleAdapter(
+        _profile(
+            LLMTransport.OPENAI_COMPATIBLE,
+            ProviderDialect.DEEPSEEK,
+            base_url="https://api.deepseek.test/v1",
+        ),
+        client=SimpleNamespace(
+            chat=SimpleNamespace(completions=_FailingCompletions())
+        ),
+    )
+
+    with pytest.raises(LLMCallError) as caught:
+        adapter.complete(_request())
+
+    assert caught.value.category is LLMErrorCategory.CONFIGURATION
+    assert caught.value.status_code == 400
+    # 错误文本必须携带 provider 声明的真实原因，而不是只有状态码。
+    assert "Insufficient Balance" in str(caught.value)
+
+
 def test_openai_sdk_extra_body_produces_the_expected_final_http_json():
     captured = {}
 

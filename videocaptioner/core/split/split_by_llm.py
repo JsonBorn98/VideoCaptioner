@@ -1,7 +1,7 @@
 import difflib
 import re
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from ..llm import (
     LLMGateway,
@@ -28,6 +28,7 @@ def split_by_llm(
     max_word_count_english: int = 12,
     profile: Optional[LLMModelProfile] = None,
     gateway: Optional[LLMGateway] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     """使用LLM进行文本断句（固定使用句子Segments）
 
@@ -38,11 +39,14 @@ def split_by_llm(
         max_word_count_english: 英文最大单词数
         profile: 工具角色模型配置方案；存在时请求一律经 LLMGateway 发出
         gateway: 可注入的 gateway 实例（None 且 profile 存在时惰性构造）
+        cancelled: 可选的取消查询回调；置位后不再发出新请求
 
     Returns:
         断句后的文本列表
     """
     for attempt in range(LLM_SPLIT_MAX_ATTEMPTS):
+        if cancelled is not None and cancelled():
+            return [text]
         try:
             return _split_with_agent_loop(
                 text,
@@ -51,7 +55,11 @@ def split_by_llm(
                 max_word_count_english,
                 profile=profile,
                 gateway=gateway,
+                cancelled=cancelled,
             )
+        except InterruptedError:
+            # 停止请求：立即退出，不做退避重试。
+            return [text]
         except Exception as e:
             if attempt >= LLM_SPLIT_MAX_ATTEMPTS - 1:
                 logger.error(f"Sentence splitting failed: {e}")
@@ -77,6 +85,7 @@ def _split_with_agent_loop(
     max_word_count_english: int,
     profile: Optional[LLMModelProfile] = None,
     gateway: Optional[LLMGateway] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     """使用agent loop 建立反馈循环进行文本断句，自动验证和修正"""
     prompt_path = "split/sentence"
@@ -100,6 +109,8 @@ def _split_with_agent_loop(
     last_result = None
 
     for step in range(MAX_STEPS):
+        if cancelled is not None and cancelled():
+            return last_result if last_result else [text]
         assert profile is not None and active_gateway is not None
         result_text = active_gateway.complete(
             profile,
@@ -108,6 +119,7 @@ def _split_with_agent_loop(
                 timeout=LLM_SPLIT_REQUEST_TIMEOUT_SECONDS,
                 metadata={"stage": "llm_split", "role": "utility"},
             ),
+            cancelled=cancelled,
         ).text
 
         # 解析结果
@@ -130,8 +142,8 @@ def _split_with_agent_loop(
         if is_valid:
             return split_result
 
-        # 添加反馈到对话
-        logger.warning(
+        # 添加反馈到对话（常规自愈：agent-loop 会重试修正，非真实故障，见 ADR-0009）
+        logger.debug(
             f"Split validation failed. Feedback loop (第{step + 1}次尝试):\n {error_message}\n\n"
         )
         messages.append({"role": "assistant", "content": result_text})

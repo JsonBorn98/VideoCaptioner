@@ -370,6 +370,8 @@ class SubtitleSplitter:
             max_word_count_english=self.max_word_count_english,
             profile=self.profile,
             gateway=self.gateway,
+            # 停止后不得再发出新的断句请求（含 agent-loop 反馈步与网关重试）。
+            cancelled=lambda: not self.is_running,
         )
 
         return self._merge_segments_based_on_sentences(segments, sentences)

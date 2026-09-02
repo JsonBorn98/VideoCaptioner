@@ -322,6 +322,39 @@ def _exception_text(exc: BaseException) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _provider_error_reason(exc: BaseException) -> Optional[str]:
+    """Extract the provider's stated failure reason from a status error body.
+
+    连接测试只透传服务端真实报错文本（ADR-0017）：余额不足、模型名错误等
+    provider 侧原因写在 ``body["error"]["message"]``，丢弃它会让 400 只剩
+    状态码、无法诊断。
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, Mapping):
+        error = body.get("error")
+        if isinstance(error, Mapping):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        message = body.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
+
+
+def _status_error_message(status: Optional[int], reason: Optional[str]) -> str:
+    """Compose the API-status error text: status code plus provider reason."""
+
+    prefix = (
+        f"LLM provider returned HTTP {status}"
+        if status is not None
+        else "LLM provider returned an API error"
+    )
+    if reason:
+        return f"{prefix}: {reason}"
+    return prefix
+
+
 def _structured_tool_arguments(message: Any) -> Optional[str]:
     """Return the forced structured tool call's arguments as a JSON document.
 
@@ -490,11 +523,8 @@ class OpenAICompatibleAdapter(LLMAdapter):
             else:
                 category = LLMErrorCategory.CONFIGURATION
             raise LLMCallError(
-                (
-                    f"LLM provider returned HTTP {status}"
-                    if status is not None
-                    else "LLM provider returned an API error"
-                ),
+                # 透传 provider 声明的真实拒绝原因（ADR-0017），没有则保持原状。
+                _status_error_message(status, _provider_error_reason(exc)),
                 category=category,
                 retryable=retryable and not context_limit and model_output_limit is None,
                 status_code=status,

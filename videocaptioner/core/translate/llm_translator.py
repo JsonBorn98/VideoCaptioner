@@ -228,6 +228,8 @@ class LLMTranslator(BaseTranslator):
                 max_output_tokens=self.profile.max_output_tokens,
                 metadata={"stage": "single_llm_translation", "role": "main"},
             ),
+            # 停止后不得再发出新的翻译请求（含网关重试）。
+            cancelled=lambda: not self.is_running,
         )
         return result.text.strip()
 
