@@ -28,7 +28,6 @@ from qfluentwidgets import (
     MessageBoxBase,
     PasswordLineEdit,
     PushButton,
-    RangeSettingCard,
     ScrollArea,
     SegmentedWidget,
     SettingCard,
@@ -58,6 +57,7 @@ from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.llm.request_options import validate_profile_request_options
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
+from videocaptioner.ui.components.SpinBoxSettingCard import SliderSpinBoxSettingCard
 
 _REQUEST_OPTION_TEMPLATES: dict[str, tuple[str, str, dict]] = {
     "blank": ("空白", "适用于所有接口；清空高级参数。", {}),
@@ -972,7 +972,7 @@ class TranslationSettingWidget(QWidget):
         self.rootLayout.addWidget(self.titleLabel)
         self.rootLayout.addWidget(self.subtitleLabel)
         self.rootLayout.addWidget(self.utilityProfileCard)
-        self.threadNumCard = RangeSettingCard(
+        self.threadNumCard = self._rangeCard(
             cfg.thread_num,
             FIF.SPEED_HIGH,
             self.tr("并发请求数"),
@@ -988,6 +988,21 @@ class TranslationSettingWidget(QWidget):
         self._syncContentHeight()
         self.profilesChanged.connect(self.refreshProfiles)
         self.refreshProfiles()
+
+    def _rangeCard(self, item, icon, title: str, content: str, parent) -> SliderSpinBoxSettingCard:
+        """从配置项校验范围构造滑块+输入框卡片；大范围滑块用 10 步进保持可拖。"""
+        low, high = item.range
+        step = 1 if high - low <= 50 else 10
+        return SliderSpinBoxSettingCard(
+            item,
+            icon,
+            title,
+            content,
+            minimum=low,
+            maximum=high,
+            step=step,
+            parent=parent,
+        )
 
     def _addPage(self, route_key: str, title: str) -> tuple[QWidget, QVBoxLayout]:
         page = QWidget(self)
@@ -1043,7 +1058,7 @@ class TranslationSettingWidget(QWidget):
             cfg.need_reflect_translate,
             group,
         )
-        self.singleBatchCard = RangeSettingCard(
+        self.singleBatchCard = self._rangeCard(
             cfg.batch_size,
             FIF.ALIGNMENT,
             self.tr("批处理大小"),
@@ -1087,14 +1102,14 @@ class TranslationSettingWidget(QWidget):
             self.tr("约束术语裁决和质量审计标准"),
             group,
         )
-        self.enhancedBatchCard = RangeSettingCard(
+        self.enhancedBatchCard = self._rangeCard(
             cfg.enhanced_batch_size,
             FIF.ALIGNMENT,
             self.tr("正式翻译批处理上限"),
             self.tr("每批最多翻译的字幕数量；超出上下文时自动减少"),
             group,
         )
-        self.termContextCard = RangeSettingCard(
+        self.termContextCard = self._rangeCard(
             cfg.term_context_radius,
             FIF.DOCUMENT,
             self.tr("术语上下文范围"),

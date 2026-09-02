@@ -236,6 +236,42 @@ def test_enhanced_batch_limit_control_accepts_five_hundred(tmp_path):
         widget.close()
 
 
+def test_numeric_setting_cards_pair_slider_with_spin_box(tmp_path):
+    """范围类设置卡片必须同时提供滑块与精确输入框（大范围纯滑块步进过粗）。"""
+    widget = TranslationSettingWidget(
+        profile_store=LLMModelProfileStore(tmp_path / "profiles.json")
+    )
+    old_values = {
+        item: item.value
+        for item in (
+            cfg.thread_num,
+            cfg.batch_size,
+            cfg.enhanced_batch_size,
+            cfg.term_context_radius,
+        )
+    }
+    try:
+        for card, item in (
+            (widget.threadNumCard, cfg.thread_num),
+            (widget.singleBatchCard, cfg.batch_size),
+            (widget.enhancedBatchCard, cfg.enhanced_batch_size),
+            (widget.termContextCard, cfg.term_context_radius),
+        ):
+            low, high = item.range
+            # 滑块与输入框都存在，且范围来自配置项校验范围。
+            assert card.slider.minimum() == low
+            assert card.slider.maximum() == high
+            assert card.spinBox.minimum() == low
+            assert card.spinBox.maximum() == high
+            # 精确键入大值必须直达配置（拖动条步进过粗的替代路径）。
+            card.spinBox.setValue(high)
+            assert item.value == high
+    finally:
+        for item, value in old_values.items():
+            cfg.set(item, value)
+        widget.close()
+
+
 def test_profile_dialog_round_trips_responses_options_and_output_cap():
     parent = QWidget()
     profile = LLMModelProfile(
