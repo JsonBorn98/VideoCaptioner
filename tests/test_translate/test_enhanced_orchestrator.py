@@ -21,6 +21,7 @@ from videocaptioner.core.llm.models import (
 )
 from videocaptioner.core.translate.enhanced.glossary import subtitle_fingerprint
 from videocaptioner.core.translate.enhanced.models import (
+    AnalysisWindow,
     AuditIssueDisposition,
     AuthoritativeGlossary,
     CancellationToken,
@@ -98,12 +99,18 @@ def _config(
     )
 
 
-def _unclamped_config(*, batch_size: int = 1, max_concurrency: int = 2) -> EnhancedTranslationConfig:
+def _unclamped_config(
+    *,
+    batch_size: int = 1,
+    max_concurrency: int = 2,
+    term_confirmation: TermConfirmationMode = TermConfirmationMode.AUTOMATIC,
+) -> EnhancedTranslationConfig:
     return _config(
         batch_size=batch_size,
         max_concurrency=max_concurrency,
         main_profile=_profile("main", concurrency=None),
         review_profile=_profile("review", concurrency=None),
+        term_confirmation=term_confirmation,
     )
 
 
@@ -194,15 +201,38 @@ def _translation_subject_ids(request) -> tuple[int, ...]:
     return tuple(item["id"] for item in _dynamic_payload(request)["translation_subjects"])
 
 
+def _analysis_cue_ids(request) -> tuple[int, ...]:
+    payload = _dynamic_payload(request)
+    return tuple(item["id"] for item in payload)
+
+
+def _audit_subject_ids(request) -> tuple[int, ...]:
+    return tuple(item["id"] for item in _dynamic_payload(request)["audit_subjects"])
+
+
+def _term_candidate_id(request) -> str:
+    return str(_dynamic_payload(request)["candidate"]["id"])
+
+
+def _one_cue_analysis_windows(cues, **kwargs):
+    return tuple(AnalysisWindow(cues=(cue,), estimated_input_tokens=1) for cue in cues)
+
+
+_TERM_STAGES = frozenset({"term_proposal", "term_review", "term_review_final"})
+
+
 class ConcurrentScriptedGateway:
-    """Thread-safe scripted gateway that records in-flight translation shape."""
+    """Thread-safe scripted gateway that records in-flight batch shape."""
 
     def __init__(
         self,
         *,
-        delays: dict[int, float] | None = None,
+        delays: dict | None = None,
         translation_overrides: dict[int, object] | None = None,
         default_delay: float = 0.05,
+        delayed_stages: frozenset[str] | None = None,
+        cancel_stage: str = "translation",
+        analysis_candidates=(),
     ) -> None:
         self._lock = threading.Lock()
         self.calls = []
@@ -210,14 +240,38 @@ class ConcurrentScriptedGateway:
         self.delays = delays or {}
         self.translation_overrides = translation_overrides or {}
         self.default_delay = default_delay
+        self.delayed_stages = (
+            set(delayed_stages) if delayed_stages is not None else {"translation"}
+        )
+        self.cancel_stage = cancel_stage
+        self.analysis_candidates = list(analysis_candidates)
         self._in_flight: dict[str, int] = defaultdict(int)
         self.max_in_flight: dict[str, int] = defaultdict(int)
         self.started: dict[int, float] = {}
         self.finished: dict[int, float] = {}
+        self.stage_started: dict[str, dict] = defaultdict(dict)
+        self.stage_finished: dict[str, dict] = defaultdict(dict)
         self.completed_subject_ids: list[int] = []
         self.abandoned_subject_ids: list[int] = []
+        self.completed_keys: dict[str, list] = defaultdict(list)
+        self.abandoned_keys: dict[str, list] = defaultdict(list)
         self.ready_to_cancel = threading.Event()
         self._first_translation_done = False
+        self._first_cancel_stage_done = False
+
+    def _stable_id(self, stage, request):
+        if stage == "translation":
+            subject_ids = _translation_subject_ids(request)
+            return subject_ids[0] if subject_ids else 0
+        if stage == "analysis_window":
+            cue_ids = _analysis_cue_ids(request)
+            return cue_ids[0] if cue_ids else 0
+        if stage == "audit":
+            subject_ids = _audit_subject_ids(request)
+            return subject_ids[0] if subject_ids else 0
+        if stage in _TERM_STAGES:
+            return _term_candidate_id(request)
+        return stage
 
     def complete(self, profile, request, *, cancelled=None):
         stage = request.metadata["stage"]
@@ -225,8 +279,11 @@ class ConcurrentScriptedGateway:
             _translation_subject_ids(request) if stage == "translation" else ()
         )
         first_id = subject_ids[0] if subject_ids else 0
-        delay = self.delays.get(
-            first_id, self.default_delay if stage == "translation" else 0.0
+        stable_id = self._stable_id(stage, request)
+        delay = (
+            self.delays.get(stable_id, self.default_delay)
+            if stage in self.delayed_stages
+            else 0.0
         )
         with self._lock:
             self.calls.append((profile, request))
@@ -235,10 +292,21 @@ class ConcurrentScriptedGateway:
             self.max_in_flight[stage] = max(
                 self.max_in_flight[stage], self._in_flight[stage]
             )
+            if stage in _TERM_STAGES:
+                term_in_flight = sum(self._in_flight[name] for name in _TERM_STAGES)
+                self.max_in_flight["term"] = max(
+                    self.max_in_flight["term"], term_in_flight
+                )
+            now = time.perf_counter()
+            self.stage_started[stage][stable_id] = now
             if stage == "translation":
-                self.started[first_id] = time.perf_counter()
-                if self._first_translation_done and self._in_flight[stage] >= 2:
-                    self.ready_to_cancel.set()
+                self.started[first_id] = now
+            if (
+                stage == self.cancel_stage
+                and self._first_cancel_stage_done
+                and self._in_flight[stage] >= 2
+            ):
+                self.ready_to_cancel.set()
         abandoned = False
         try:
             deadline = time.perf_counter() + delay
@@ -250,10 +318,22 @@ class ConcurrentScriptedGateway:
             if cancelled is not None and cancelled():
                 abandoned = True
                 raise InterruptedError("LLM request cancelled")
-            if stage == "analysis_window":
-                value = _analysis()
+            if stage in {"analysis_window", "analysis_summary"}:
+                value = _analysis(candidates=self.analysis_candidates)
             elif stage == "audit":
                 value = {"issues": []}
+            elif stage == "term_proposal":
+                source = _dynamic_payload(request)["candidate"]["source_term"]
+                value = {"translation": f"{source}译", "reason": "ok"}
+            elif stage == "term_review":
+                value = {
+                    "is_term": True,
+                    "decision": "accept",
+                    "translation": "",
+                    "reason": "ok",
+                }
+            elif stage == "term_review_final":
+                value = {"decision": "accept", "translation": "", "reason": "ok"}
             elif stage == "translation":
                 if first_id in self.translation_overrides:
                     value = self.translation_overrides[first_id]
@@ -278,8 +358,14 @@ class ConcurrentScriptedGateway:
         finally:
             with self._lock:
                 self._in_flight[stage] -= 1
+                finished_at = time.perf_counter()
+                self.stage_finished[stage][stable_id] = finished_at
+                if abandoned:
+                    self.abandoned_keys[stage].append(stable_id)
+                else:
+                    self.completed_keys[stage].append(stable_id)
                 if stage == "translation":
-                    self.finished[first_id] = time.perf_counter()
+                    self.finished[first_id] = finished_at
                     if abandoned:
                         self.abandoned_subject_ids.extend(subject_ids)
                     elif not isinstance(
@@ -287,6 +373,8 @@ class ConcurrentScriptedGateway:
                     ):
                         self.completed_subject_ids.extend(subject_ids)
                         self._first_translation_done = True
+                if stage == self.cancel_stage and not abandoned:
+                    self._first_cancel_stage_done = True
 
     @property
     def stages(self):
@@ -1348,3 +1436,327 @@ def test_later_translation_batch_failure_fails_task_without_audit():
     assert raised.value.retryable is True
     assert raised.value.attempts == 4
     assert "audit" not in gateway.stage_calls
+
+
+def _term_candidate(candidate_id: str, source_term: str, occurrence_id: int):
+    return {
+        "id": candidate_id,
+        "source_term": source_term,
+        "sense": f"{source_term} sense",
+        "aliases": [],
+        "occurrence_ids": [occurrence_id],
+    }
+
+
+def test_analysis_windows_never_exceed_task_concurrency(monkeypatch):
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 6))
+    monkeypatch.setattr(
+        orchestrator_module, "plan_analysis_windows", _one_cue_analysis_windows
+    )
+    gateway = ConcurrentScriptedGateway(
+        delayed_stages={"analysis_window"},
+        default_delay=0.08,
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+    ).run(cues)
+
+    assert result.translations == {cue_id: f"译文 {cue_id}" for cue_id in range(1, 6)}
+    assert gateway.max_in_flight["analysis_window"] == 2
+    assert sorted(gateway.completed_keys["analysis_window"]) == [1, 2, 3, 4, 5]
+
+
+def test_term_candidates_stay_serial_inside_and_bounded_across():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 4))
+    candidates = (
+        _term_candidate("term-a", "Alpha", 1),
+        _term_candidate("term-b", "Beta", 2),
+        _term_candidate("term-c", "Gamma", 3),
+    )
+    gateway = ConcurrentScriptedGateway(
+        delayed_stages={"term_proposal", "term_review"},
+        default_delay=0.08,
+        analysis_candidates=candidates,
+    )
+
+    result = EnhancedTranslationOrchestrator(
+        _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+    ).run(cues)
+
+    assert gateway.max_in_flight["term"] == 2
+    assert gateway.max_in_flight["term_proposal"] <= 2
+    assert gateway.max_in_flight["term_review"] <= 2
+    for candidate_id in ("term-a", "term-b", "term-c"):
+        assert (
+            gateway.stage_started["term_proposal"][candidate_id]
+            < gateway.stage_started["term_review"][candidate_id]
+        )
+        assert (
+            gateway.stage_finished["term_proposal"][candidate_id]
+            <= gateway.stage_started["term_review"][candidate_id]
+        )
+    assert {entry.source_term for entry in result.glossary.entries} == {
+        "Alpha",
+        "Beta",
+        "Gamma",
+    }
+
+
+def test_manual_term_confirmation_waits_until_every_candidate_is_resolved():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 4))
+    candidates = (
+        _term_candidate("term-a", "Alpha", 1),
+        _term_candidate("term-b", "Beta", 2),
+        _term_candidate("term-c", "Gamma", 3),
+    )
+    gateway = ConcurrentScriptedGateway(
+        delayed_stages={"term_proposal", "term_review"},
+        default_delay=0.05,
+        analysis_candidates=candidates,
+    )
+    confirmation_calls = []
+
+    def confirm_terms(values):
+        confirmation_calls.append(tuple(item.candidate_id for item in values))
+        assert len(gateway.stage_calls["term_proposal"]) == 3
+        assert len(gateway.stage_calls["term_review"]) == 3
+        return values
+
+    result = EnhancedTranslationOrchestrator(
+        _unclamped_config(
+            batch_size=1,
+            max_concurrency=2,
+            term_confirmation=TermConfirmationMode.MANUAL,
+        ),
+        gateway=gateway,
+    ).run(cues, confirm_terms=confirm_terms)
+
+    assert confirmation_calls == [("term-a", "term-b", "term-c")]
+    assert len(result.glossary.entries) == 3
+    assert "translation" in gateway.stage_calls
+    assert confirmation_calls and gateway.stage_calls["term_review"]
+
+
+def test_analysis_cancel_abandons_in_flight_and_skips_later_stages(monkeypatch):
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 5))
+    monkeypatch.setattr(
+        orchestrator_module, "plan_analysis_windows", _one_cue_analysis_windows
+    )
+    token = CancellationToken()
+    gateway = ConcurrentScriptedGateway(
+        delays={1: 0.05, 2: 2.0, 3: 2.0, 4: 2.0},
+        delayed_stages={"analysis_window"},
+        cancel_stage="analysis_window",
+        default_delay=0.05,
+    )
+    caught: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            EnhancedTranslationOrchestrator(
+                _unclamped_config(batch_size=1, max_concurrency=2),
+                gateway=gateway,
+                cancellation=token,
+            ).run(cues)
+        except BaseException as exc:
+            caught.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert gateway.ready_to_cancel.wait(timeout=2)
+    token.cancel()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert len(caught) == 1
+    assert isinstance(caught[0], InterruptedError)
+    assert gateway.completed_keys["analysis_window"] == [1]
+    assert set(gateway.abandoned_keys["analysis_window"]) >= {2, 3}
+    assert 4 not in gateway.completed_keys["analysis_window"]
+    assert "term_proposal" not in gateway.stage_calls
+    assert "translation" not in gateway.stage_calls
+    assert "audit" not in gateway.stage_calls
+
+
+def test_audit_cancel_abandons_in_flight_and_skips_nothing_already_translated():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 5))
+    token = CancellationToken()
+    gateway = ConcurrentScriptedGateway(
+        delays={1: 0.05, 2: 2.0, 3: 2.0, 4: 2.0},
+        delayed_stages={"audit"},
+        cancel_stage="audit",
+        default_delay=0.05,
+    )
+    caught: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            EnhancedTranslationOrchestrator(
+                _unclamped_config(batch_size=1, max_concurrency=2),
+                gateway=gateway,
+                cancellation=token,
+            ).run(cues)
+        except BaseException as exc:
+            caught.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert gateway.ready_to_cancel.wait(timeout=2)
+    token.cancel()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert len(caught) == 1
+    assert isinstance(caught[0], InterruptedError)
+    assert gateway.completed_keys["audit"] == [1]
+    assert set(gateway.abandoned_keys["audit"]) >= {2, 3}
+    assert 4 not in gateway.completed_keys["audit"]
+    assert "translation" in gateway.stage_calls
+
+
+def _stage_values(recorded: list[tuple[int, str]], start: int, end: int) -> list[int]:
+    return [value for value, _ in recorded if start <= value <= end]
+
+
+def test_progress_slides_inside_multi_batch_translation_and_audit():
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[
+            _translations((1, "译文 1")),
+            _translations((2, "译文 2")),
+        ],
+        audit=[{"issues": []}, {"issues": []}],
+    )
+    recorded: list[tuple[int, str]] = []
+
+    result = EnhancedTranslationOrchestrator(
+        _config(batch_size=1),
+        gateway=gateway,
+        progress=lambda value, message: recorded.append((value, message)),
+    ).run(cues)
+
+    values = [value for value, _ in recorded]
+    assert values == sorted(values)
+    translation_values = _stage_values(recorded, 40, 80)
+    audit_values = _stage_values(recorded, 80, 99)
+    assert len(set(translation_values)) > 1
+    assert len(set(audit_values)) > 1
+    assert recorded[0] == (1, "Analyzing complete source subtitles")
+    assert recorded[-1] == (100, "Enhanced translation completed")
+    assert result.translations == {1: "译文 1", 2: "译文 2"}
+
+
+def test_progress_slides_inside_multi_window_analysis(monkeypatch):
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    real_planner = orchestrator_module.plan_analysis_windows
+
+    def two_windows(*args, **kwargs):
+        windows = real_planner(*args, **kwargs)
+        if len(windows) == 1:
+            first, second = cues
+            return (
+                type(windows[0])(cues=(first,), estimated_input_tokens=1),
+                type(windows[0])(cues=(second,), estimated_input_tokens=1),
+            )
+        return windows
+
+    monkeypatch.setattr(orchestrator_module, "plan_analysis_windows", two_windows)
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis(), _analysis()],
+        analysis_summary=[_analysis()],
+        translation=[
+            _translations((1, "译文 1")),
+            _translations((2, "译文 2")),
+        ],
+        audit=[{"issues": []}, {"issues": []}],
+    )
+    recorded: list[tuple[int, str]] = []
+
+    EnhancedTranslationOrchestrator(
+        _config(batch_size=1),
+        gateway=gateway,
+        progress=lambda value, message: recorded.append((value, message)),
+    ).run(cues)
+
+    values = [value for value, _ in recorded]
+    assert values == sorted(values)
+    analysis_values = _stage_values(recorded, 1, 20)
+    assert len(set(analysis_values)) > 1
+    assert any(1 < value < 20 for value in analysis_values)
+
+
+def test_progress_slides_inside_term_resolution():
+    cues = (
+        SubtitleCue(1, "Mercury is the closest planet to the Sun."),
+        SubtitleCue(2, "Now compare it with Venus."),
+    )
+    second = {
+        "id": "venus-planet",
+        "source_term": "Venus",
+        "sense": "the planet",
+        "aliases": [],
+        "occurrence_ids": [2],
+    }
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis(candidates=[_candidate(), second])],
+        term_proposal=[
+            {"translation": "水星", "reason": "planet"},
+            {"translation": "金星", "reason": "planet"},
+        ],
+        term_review=[
+            {
+                "is_term": True,
+                "decision": "accept",
+                "translation": "水星",
+                "reason": "ok",
+            },
+            {
+                "is_term": True,
+                "decision": "accept",
+                "translation": "金星",
+                "reason": "ok",
+            },
+        ],
+        translation=[
+            _translations((1, "水星是离太阳最近的行星。"), (2, "现在将它与金星比较。"))
+        ],
+        audit=[{"issues": []}],
+    )
+    recorded: list[tuple[int, str]] = []
+
+    result = EnhancedTranslationOrchestrator(
+        _config(),
+        gateway=gateway,
+        progress=lambda value, message: recorded.append((value, message)),
+    ).run(cues)
+
+    values = [value for value, _ in recorded]
+    assert values == sorted(values)
+    term_values = _stage_values(recorded, 20, 40)
+    assert len(set(term_values)) > 1
+    assert any(20 < value < 40 for value in term_values)
+    assert {entry.source_term for entry in result.glossary.entries} == {"Mercury", "Venus"}
+
+
+def test_incremental_on_translations_keeps_first_batch_when_later_batch_fails():
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    failure = LLMCallError(
+        "provider unavailable",
+        category=LLMErrorCategory.TRANSIENT,
+        retryable=True,
+        attempts=4,
+    )
+    gateway = ConcurrentScriptedGateway(
+        delays={1: 0.02, 2: 0.2}, translation_overrides={2: failure}
+    )
+    persisted: list[dict[int, str]] = []
+
+    with pytest.raises(EnhancedTranslationError):
+        EnhancedTranslationOrchestrator(
+            _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+        ).run(cues, on_translations=persisted.append)
+
+    assert persisted
+    assert persisted[0] == {1: "译文 1"}
+    assert all(2 not in batch for batch in persisted)
+
