@@ -45,14 +45,20 @@ class EnhancedTranslationRun:
 
 
 def _translated_copy(
-    subtitle_data: ASRData, translations: Mapping[int, str]
+    subtitle_data: ASRData,
+    translations: Mapping[int, str],
+    *,
+    require_complete: bool = True,
 ) -> ASRData:
     translated = ASRData.from_json(subtitle_data.to_json())
     expected = set(range(1, len(translated.segments) + 1))
-    if set(translations) != expected:
+    extra = set(translations) - expected
+    if extra:
+        raise ValueError("translation checkpoint contains unknown subtitle IDs")
+    if require_complete and set(translations) != expected:
         raise ValueError("translation checkpoint does not cover every subtitle ID")
     for index, segment in enumerate(translated.segments, 1):
-        segment.translated_text = translations[index]
+        segment.translated_text = translations.get(index, "")
     return translated
 
 
@@ -120,12 +126,19 @@ def run_enhanced_translation(
         save_glossary(glossary_path, glossary)
 
     checkpoint_written = False
+    accumulated_translations: dict[int, str] = {}
 
     def persist_translations(translations: Mapping[int, str]) -> None:
         nonlocal checkpoint_written
+        accumulated_translations.update(translations)
         try:
             _save_checkpoint(
-                checkpoint_path, _translated_copy(subtitle_data, translations)
+                checkpoint_path,
+                _translated_copy(
+                    subtitle_data,
+                    accumulated_translations,
+                    require_complete=False,
+                ),
             )
         except OSError as exc:
             logger.warning("无法保存增强翻译检查点 %s: %s", checkpoint_path, exc)
