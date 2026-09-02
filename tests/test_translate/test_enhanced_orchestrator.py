@@ -1611,3 +1611,152 @@ def test_audit_cancel_abandons_in_flight_and_skips_nothing_already_translated():
     assert set(gateway.abandoned_keys["audit"]) >= {2, 3}
     assert 4 not in gateway.completed_keys["audit"]
     assert "translation" in gateway.stage_calls
+
+
+def _stage_values(recorded: list[tuple[int, str]], start: int, end: int) -> list[int]:
+    return [value for value, _ in recorded if start <= value <= end]
+
+
+def test_progress_slides_inside_multi_batch_translation_and_audit():
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[
+            _translations((1, "译文 1")),
+            _translations((2, "译文 2")),
+        ],
+        audit=[{"issues": []}, {"issues": []}],
+    )
+    recorded: list[tuple[int, str]] = []
+
+    result = EnhancedTranslationOrchestrator(
+        _config(batch_size=1),
+        gateway=gateway,
+        progress=lambda value, message: recorded.append((value, message)),
+    ).run(cues)
+
+    values = [value for value, _ in recorded]
+    assert values == sorted(values)
+    translation_values = _stage_values(recorded, 40, 80)
+    audit_values = _stage_values(recorded, 80, 99)
+    assert len(set(translation_values)) > 1
+    assert len(set(audit_values)) > 1
+    assert recorded[0] == (1, "Analyzing complete source subtitles")
+    assert recorded[-1] == (100, "Enhanced translation completed")
+    assert result.translations == {1: "译文 1", 2: "译文 2"}
+
+
+def test_progress_slides_inside_multi_window_analysis(monkeypatch):
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    real_planner = orchestrator_module.plan_analysis_windows
+
+    def two_windows(*args, **kwargs):
+        windows = real_planner(*args, **kwargs)
+        if len(windows) == 1:
+            first, second = cues
+            return (
+                type(windows[0])(cues=(first,), estimated_input_tokens=1),
+                type(windows[0])(cues=(second,), estimated_input_tokens=1),
+            )
+        return windows
+
+    monkeypatch.setattr(orchestrator_module, "plan_analysis_windows", two_windows)
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis(), _analysis()],
+        analysis_summary=[_analysis()],
+        translation=[
+            _translations((1, "译文 1")),
+            _translations((2, "译文 2")),
+        ],
+        audit=[{"issues": []}, {"issues": []}],
+    )
+    recorded: list[tuple[int, str]] = []
+
+    EnhancedTranslationOrchestrator(
+        _config(batch_size=1),
+        gateway=gateway,
+        progress=lambda value, message: recorded.append((value, message)),
+    ).run(cues)
+
+    values = [value for value, _ in recorded]
+    assert values == sorted(values)
+    analysis_values = _stage_values(recorded, 1, 20)
+    assert len(set(analysis_values)) > 1
+    assert any(1 < value < 20 for value in analysis_values)
+
+
+def test_progress_slides_inside_term_resolution():
+    cues = (
+        SubtitleCue(1, "Mercury is the closest planet to the Sun."),
+        SubtitleCue(2, "Now compare it with Venus."),
+    )
+    second = {
+        "id": "venus-planet",
+        "source_term": "Venus",
+        "sense": "the planet",
+        "aliases": [],
+        "occurrence_ids": [2],
+    }
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis(candidates=[_candidate(), second])],
+        term_proposal=[
+            {"translation": "水星", "reason": "planet"},
+            {"translation": "金星", "reason": "planet"},
+        ],
+        term_review=[
+            {
+                "is_term": True,
+                "decision": "accept",
+                "translation": "水星",
+                "reason": "ok",
+            },
+            {
+                "is_term": True,
+                "decision": "accept",
+                "translation": "金星",
+                "reason": "ok",
+            },
+        ],
+        translation=[
+            _translations((1, "水星是离太阳最近的行星。"), (2, "现在将它与金星比较。"))
+        ],
+        audit=[{"issues": []}],
+    )
+    recorded: list[tuple[int, str]] = []
+
+    result = EnhancedTranslationOrchestrator(
+        _config(),
+        gateway=gateway,
+        progress=lambda value, message: recorded.append((value, message)),
+    ).run(cues)
+
+    values = [value for value, _ in recorded]
+    assert values == sorted(values)
+    term_values = _stage_values(recorded, 20, 40)
+    assert len(set(term_values)) > 1
+    assert any(20 < value < 40 for value in term_values)
+    assert {entry.source_term for entry in result.glossary.entries} == {"Mercury", "Venus"}
+
+
+def test_incremental_on_translations_keeps_first_batch_when_later_batch_fails():
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    failure = LLMCallError(
+        "provider unavailable",
+        category=LLMErrorCategory.TRANSIENT,
+        retryable=True,
+        attempts=4,
+    )
+    gateway = ConcurrentScriptedGateway(
+        delays={1: 0.02, 2: 0.2}, translation_overrides={2: failure}
+    )
+    persisted: list[dict[int, str]] = []
+
+    with pytest.raises(EnhancedTranslationError):
+        EnhancedTranslationOrchestrator(
+            _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+        ).run(cues, on_translations=persisted.append)
+
+    assert persisted
+    assert persisted[0] == {1: "译文 1"}
+    assert all(2 not in batch for batch in persisted)
+

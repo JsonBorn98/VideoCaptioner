@@ -477,6 +477,7 @@ class EnhancedTranslationOrchestrator:
         self.gateway = gateway or LLMGateway(max_concurrency=config.max_concurrency)
         self.cancellation = cancellation or CancellationToken()
         self.progress = progress
+        self._progress_high_water = 0
         self._usage = _UsageCollector()
         self._warnings: list[str] = []
         self._warnings_lock = threading.Lock()
@@ -566,7 +567,7 @@ class EnhancedTranslationOrchestrator:
         self.cancellation.raise_if_cancelled()
         self._emit(40, "Translating subtitles")
         translations = self._with_context_fallback(
-            self._translate, ordered, brief, glossary
+            self._translate, ordered, brief, glossary, on_translations
         )
         if on_translations is not None:
             on_translations(dict(translations))
@@ -627,6 +628,10 @@ class EnhancedTranslationOrchestrator:
             raise ValueError("subtitle cues must have unique ascending IDs")
 
     def _emit(self, value: int, message: str) -> None:
+        value = max(0, min(100, int(value)))
+        if value < self._progress_high_water:
+            value = self._progress_high_water
+        self._progress_high_water = value
         if self.progress is not None:
             self.progress(value, message)
 
@@ -639,6 +644,15 @@ class EnhancedTranslationOrchestrator:
     def _warning_snapshot(self) -> tuple[str, ...]:
         with self._warnings_lock:
             return tuple(self._warnings)
+
+    def _stage_progress(
+        self, start: int, end: int, completed: int, total: int, message: str
+    ) -> None:
+        if total <= 0:
+            self._emit(end, message)
+            return
+        completed = max(0, min(completed, total))
+        self._emit(start + ((end - start) * completed) // total, message)
 
     def _runtime_budget(self, role: TranslationRoleSnapshot) -> int:
         return self._runtime_context_tokens[role.profile.profile_id]
@@ -1007,6 +1021,7 @@ class EnhancedTranslationOrchestrator:
             overlap_cues=2,
         )
         limit = role.profile.clamped_concurrency(self.config.max_concurrency)
+        completed_windows = 0
 
         def analyze_window(
             window: AnalysisWindow,
@@ -1023,11 +1038,19 @@ class EnhancedTranslationOrchestrator:
                 validator=lambda value, valid=valid: self._parse_analysis(value, valid),
             )
 
+        def on_window_complete(_result: tuple[TranslationContextBrief, tuple[TermCandidate, ...]]) -> None:
+            nonlocal completed_windows
+            completed_windows += 1
+            self._stage_progress(
+                1, 20, completed_windows, len(windows), "Analyzing complete source subtitles"
+            )
+
         analyses = execute_batches(
             windows,
             analyze_window,
             concurrency=limit,
             cancellation=self.cancellation,
+            on_complete=on_window_complete if windows else None,
         )
         all_candidates = [candidate for _, candidates in analyses for candidate in candidates]
         briefs = [brief for brief, _ in analyses]
@@ -1213,12 +1236,26 @@ class EnhancedTranslationOrchestrator:
         limit = self.config.main_role.profile.clamped_concurrency(
             self.config.max_concurrency
         )
+        completed_candidates = 0
+
+        def on_term_complete(_result: TermCandidate) -> None:
+            nonlocal completed_candidates
+            completed_candidates += 1
+            self._stage_progress(
+                20,
+                40,
+                completed_candidates,
+                len(candidates),
+                "Resolving ambiguous terms",
+            )
+
         return tuple(
             execute_batches(
                 tuple(candidates),
                 lambda candidate: self._resolve_term_candidate(cues, brief, candidate),
                 concurrency=limit,
                 cancellation=self.cancellation,
+                on_complete=on_term_complete,
             )
         )
 
@@ -1416,6 +1453,7 @@ class EnhancedTranslationOrchestrator:
         cues: Sequence[SubtitleCue],
         brief: TranslationContextBrief,
         glossary: AuthoritativeGlossary,
+        on_translations: Optional[Callable[[Mapping[int, str]], None]] = None,
     ) -> dict[int, str]:
         role = self.config.main_role
         budget = self._runtime_budget(role)
@@ -1453,12 +1491,25 @@ class EnhancedTranslationOrchestrator:
 
         translations: dict[int, str] = {}
         limit = role.profile.clamped_concurrency(self.config.max_concurrency)
+        total_batches = len(batches)
+        completed_batches = 0
+
+        def on_complete(batch_translations: Mapping[int, str]) -> None:
+            nonlocal completed_batches
+            translations.update(batch_translations)
+            completed_batches += 1
+            if on_translations is not None:
+                on_translations(dict(batch_translations))
+            self._stage_progress(
+                40, 80, completed_batches, total_batches, "Translating subtitles"
+            )
+
         execute_batches(
             batches,
             lambda batch: self._translate_batch(batch, brief, glossary),
             concurrency=limit,
             cancellation=self.cancellation,
-            on_complete=translations.update,
+            on_complete=on_complete,
         )
         if set(translations) != {cue.cue_id for cue in cues}:
             raise EnhancedTranslationError(
@@ -1595,6 +1646,21 @@ class EnhancedTranslationOrchestrator:
         model_issues: list[TranslationAuditIssue] = []
         if batches:
             limit = role.profile.clamped_concurrency(self.config.max_concurrency)
+            completed_batches = 0
+
+            def on_audit_complete(
+                batch_issues: tuple[TranslationAuditIssue, ...],
+            ) -> None:
+                nonlocal completed_batches
+                completed_batches += 1
+                self._stage_progress(
+                    80,
+                    99,
+                    completed_batches,
+                    len(batches),
+                    "Auditing translated subtitles",
+                )
+
             for batch_issues in execute_batches(
                 batches,
                 lambda batch: self._audit_batch(
@@ -1602,6 +1668,7 @@ class EnhancedTranslationOrchestrator:
                 ),
                 concurrency=limit,
                 cancellation=self.cancellation,
+                on_complete=on_audit_complete,
             ):
                 model_issues.extend(batch_issues)
         local_by_id: dict[int, list[TranslationAuditIssue]] = {}
