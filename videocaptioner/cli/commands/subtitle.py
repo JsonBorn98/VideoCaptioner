@@ -287,6 +287,7 @@ def run(args: Namespace, config: dict) -> int:
     stage_summaries: list[StageSummary] = []
     enhanced_usages = ()
     enhanced_artifact_paths: tuple[str, str] | None = None
+    owned_gateway = None
 
     def callback(result):
         nonlocal _done_count
@@ -296,6 +297,13 @@ def run(args: Namespace, config: dict) -> int:
             progress.update(pct)
 
     try:
+        injected_gateway = getattr(args, "gateway", None)
+        gateway = injected_gateway
+        if gateway is None:
+            from videocaptioner.core.llm import LLMGateway
+
+            gateway = LLMGateway(max_concurrency=thread_num)
+            owned_gateway = gateway
         # 1. Preserve the original subtitle optimization behavior: ordinary cue-level
         # subtitles are first expanded to estimated word timestamps, then re-segmented.
         if need_split and not asr_data.is_word_timestamp():
@@ -311,6 +319,7 @@ def run(args: Namespace, config: dict) -> int:
                 thread_num=thread_num,
                 model=_profile_model(utility_profile),
                 profile=utility_profile,
+                gateway=gateway,
                 max_word_count_cjk=get(config, "subtitle.max_word_count_cjk", 18),
                 max_word_count_english=get(config, "subtitle.max_word_count_english", 12),
                 use_llm=need_split,
@@ -336,6 +345,7 @@ def run(args: Namespace, config: dict) -> int:
                 batch_num=batch_size,
                 model=_profile_model(utility_profile),
                 profile=utility_profile,
+                gateway=gateway,
                 custom_prompt=get(config, "subtitle.optimization_prompt", ""),
                 update_callback=callback,
                 extra_rules="",
@@ -421,6 +431,7 @@ def run(args: Namespace, config: dict) -> int:
                     output_dir=Path(output_path).parent,
                     base_name=clean_stem,
                     imported_glossary_path=glossary_path or None,
+                    gateway=gateway,
                     progress=(
                         (lambda value, message: progress.update(value, message))
                         if progress
@@ -475,6 +486,7 @@ def run(args: Namespace, config: dict) -> int:
                     is_reflect=need_reflect,
                     update_callback=callback,
                     profile=profile,
+                    gateway=gateway,
                 )
                 asr_data = translator.translate_subtitle(asr_data)
                 failed = getattr(translator, "failed_count", 0)
@@ -526,3 +538,6 @@ def run(args: Namespace, config: dict) -> int:
 
             traceback.print_exc()
         return EXIT.RUNTIME_ERROR
+    finally:
+        if owned_gateway is not None:
+            owned_gateway.close()

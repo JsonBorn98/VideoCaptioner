@@ -7,6 +7,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from videocaptioner.core.entities import (
     FullProcessTask,
 )
+from videocaptioner.core.llm import LLMGateway
 from videocaptioner.core.translate.enhanced.models import (
     TermConfirmationMode,
     TranslationAuditMode,
@@ -57,12 +58,18 @@ class SubtitlePipelineThread(QThread):
             )
 
     def run(self):
+        owned_gateway = None
         try:
 
             def handle_error(error_msg):
                 logger.error("pipeline 发生错误: %s", error_msg)
                 self.has_error = True
                 self.error.emit(error_msg)
+
+            subtitle_config = self.task.subtitle_config
+            thread_num = subtitle_config.thread_num if subtitle_config is not None else 10
+            gateway = LLMGateway(max_concurrency=thread_num)
+            owned_gateway = gateway
 
             # 在任务开始时冻结当前后处理方案，运行途中设置变化不影响本任务。
             postprocess_task = self.task.postprocess_task or TaskFactory.create_postprocess_task(
@@ -118,7 +125,7 @@ class SubtitlePipelineThread(QThread):
                 config_snapshot=self.task.subtitle_config,
                 translation_execution_mode=TranslationExecutionMode.BATCH,
             )
-            optimization_thread = SubtitleThread(subtitle_task)
+            optimization_thread = SubtitleThread(subtitle_task, gateway=gateway)
             optimization_thread.progress.connect(
                 lambda value, msg: self.progress.emit(int(30 + value * 0.3), msg)
             )
@@ -142,7 +149,7 @@ class SubtitlePipelineThread(QThread):
             postprocess_task.postprocessed_subtitle_path = str(
                 initial.with_name(f"【后处理字幕】{subtitle_task.workflow_base_name}.srt")
             )
-            postprocess_thread = PostprocessThread(postprocess_task)
+            postprocess_thread = PostprocessThread(postprocess_task, gateway=gateway)
             postprocess_thread.progress.connect(
                 lambda value, msg: self.progress.emit(int(60 + value * 0.15), msg)
             )
@@ -188,3 +195,6 @@ class SubtitlePipelineThread(QThread):
             # self.task.status = FullProcessTask.Status.FAILED  # type: ignore
             logger.exception("处理失败: %s", str(e))
             self.error.emit(str(e))
+        finally:
+            if owned_gateway is not None:
+                owned_gateway.close()

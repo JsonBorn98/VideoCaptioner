@@ -206,6 +206,7 @@ def run(args: Namespace, config: dict) -> int:
             task,
             profile_store=store,
             timing_resolver=_timing_resolver,
+            gateway=getattr(args, "gateway", None),
         )
     except Exception as exc:  # invalid initial subtitles cannot safely fall back
         if progress:

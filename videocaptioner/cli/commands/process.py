@@ -127,96 +127,108 @@ def run(args: Namespace, config: dict) -> int:
     current_step += 1
     active_data = getattr(tr_args, "result_data", None)
 
-    # Step 2: Subtitle (optimize + translate)
-    if run_subtitle_stage:
-        if not quiet:
-            output.info(f"Step {current_step}/{total_steps}: Processing subtitles...")
+    owned_gateway = None
+    try:
+        if run_subtitle_stage or postprocess_enabled:
+            from videocaptioner.core.llm import LLMGateway
 
-        initial_path = str(out_dir / f"【初版字幕】{path.stem}.srt")
-        sub_args = Namespace(
-            input=transcribed_path,
-            output=initial_path,
-            from_process=True,
-            # Kept for direct command compatibility; subtitle.run always persists SRT.
-            format="srt",
-            no_optimize=no_optimize,
-            no_translate=no_translate,
-            no_split=no_split,
-            verbose=verbose,
-            quiet=quiet,
-            config=getattr(args, "config", None),
-            llm_profile=getattr(args, "llm_profile", None),
-            review_profile=getattr(args, "review_profile", None),
-            utility_profile=getattr(args, "utility_profile", None),
-            translator=getattr(args, "translator", None),
-            translation_mode=getattr(args, "translation_mode", None),
-            target_language=getattr(args, "target_language", None),
-            reflect=getattr(args, "reflect", False),
-            max_cjk=None,
-            max_english=None,
-            prompt=getattr(args, "prompt", None),
-            prompt_file=getattr(args, "prompt_file", None),
-            review_prompt=getattr(args, "review_prompt", None),
-            glossary=getattr(args, "glossary", None),
-            thread_num=getattr(args, "thread_num", None),
-            batch_size=getattr(args, "batch_size", None),
-            layout=getattr(args, "layout", None),
-            input_data=active_data,
-        )
-        from videocaptioner.cli.commands.subtitle import run as subtitle_run
+            owned_gateway = LLMGateway(max_concurrency=get(config, "subtitle.thread_num", 10))
 
-        ret = subtitle_run(sub_args, config)
-        if ret != 0:
-            return ret
-        subtitle_path = initial_path
-        active_data = getattr(sub_args, "result_data", active_data)
-        current_step += 1
-    else:
-        subtitle_path = transcribed_path
-        if not quiet:
-            output.info("Subtitle optimization/translation skipped")
+        # Step 2: Subtitle (optimize + translate)
+        if run_subtitle_stage:
+            if not quiet:
+                output.info(f"Step {current_step}/{total_steps}: Processing subtitles...")
 
-    # Dedicated subtitle postprocessing. A module-level failure never destroys the
-    # initial subtitle and does not abort an otherwise valid complete workflow.
-    if postprocess_enabled:
-        if not quiet:
-            output.info(f"Step {current_step}/{total_steps}: Postprocessing subtitles...")
-        postprocessed_path = str(out_dir / f"【后处理字幕】{path.stem}.srt")
-        post_args = Namespace(
-            input=subtitle_path,
-            output=postprocessed_path,
-            layout=getattr(args, "layout", None) or get(
-                config, "synthesize.layout", "target-above"
-            ),
-            profile=getattr(args, "speed_profile", None),
-            speed_profile=getattr(args, "speed_profile", None),
-            mode=getattr(args, "speed_mode", None),
-            speed_mode=getattr(args, "speed_mode", None),
-            media=getattr(args, "speed_media", None) or str(path),
-            speed_media=getattr(args, "speed_media", None) or str(path),
-            precise_timing=getattr(args, "speed_precise_timing", False),
-            speed_precise_timing=getattr(args, "speed_precise_timing", False),
-            llm_profile=getattr(args, "llm_profile", None),
-            review_profile=getattr(args, "review_profile", None),
-            utility_profile=getattr(args, "utility_profile", None),
-            verbose=verbose,
-            quiet=quiet,
-            config=getattr(args, "config", None),
-            input_data=active_data,
-        )
-        from videocaptioner.cli.commands.postprocess import run as postprocess_run
-
-        ret = postprocess_run(post_args, config)
-        if ret == EXIT.SUCCESS:
-            subtitle_path = postprocessed_path
-            active_data = getattr(post_args, "result_data", active_data)
-        else:
-            output.warn(
-                "Subtitle postprocessing failed; continuing with the preserved initial subtitle"
+            initial_path = str(out_dir / f"【初版字幕】{path.stem}.srt")
+            sub_args = Namespace(
+                input=transcribed_path,
+                output=initial_path,
+                from_process=True,
+                # Kept for direct command compatibility; subtitle.run always persists SRT.
+                format="srt",
+                no_optimize=no_optimize,
+                no_translate=no_translate,
+                no_split=no_split,
+                verbose=verbose,
+                quiet=quiet,
+                config=getattr(args, "config", None),
+                llm_profile=getattr(args, "llm_profile", None),
+                review_profile=getattr(args, "review_profile", None),
+                utility_profile=getattr(args, "utility_profile", None),
+                translator=getattr(args, "translator", None),
+                translation_mode=getattr(args, "translation_mode", None),
+                target_language=getattr(args, "target_language", None),
+                reflect=getattr(args, "reflect", False),
+                max_cjk=None,
+                max_english=None,
+                prompt=getattr(args, "prompt", None),
+                prompt_file=getattr(args, "prompt_file", None),
+                review_prompt=getattr(args, "review_prompt", None),
+                glossary=getattr(args, "glossary", None),
+                thread_num=getattr(args, "thread_num", None),
+                batch_size=getattr(args, "batch_size", None),
+                layout=getattr(args, "layout", None),
+                input_data=active_data,
+                gateway=owned_gateway,
             )
-        current_step += 1
-    elif not quiet:
-        output.info("Subtitle postprocessing skipped; using initial subtitle")
+            from videocaptioner.cli.commands.subtitle import run as subtitle_run
+
+            ret = subtitle_run(sub_args, config)
+            if ret != 0:
+                return ret
+            subtitle_path = initial_path
+            active_data = getattr(sub_args, "result_data", active_data)
+            current_step += 1
+        else:
+            subtitle_path = transcribed_path
+            if not quiet:
+                output.info("Subtitle optimization/translation skipped")
+
+        # Dedicated subtitle postprocessing. A module-level failure never destroys the
+        # initial subtitle and does not abort an otherwise valid complete workflow.
+        if postprocess_enabled:
+            if not quiet:
+                output.info(f"Step {current_step}/{total_steps}: Postprocessing subtitles...")
+            postprocessed_path = str(out_dir / f"【后处理字幕】{path.stem}.srt")
+            post_args = Namespace(
+                input=subtitle_path,
+                output=postprocessed_path,
+                layout=getattr(args, "layout", None) or get(
+                    config, "synthesize.layout", "target-above"
+                ),
+                profile=getattr(args, "speed_profile", None),
+                speed_profile=getattr(args, "speed_profile", None),
+                mode=getattr(args, "speed_mode", None),
+                speed_mode=getattr(args, "speed_mode", None),
+                media=getattr(args, "speed_media", None) or str(path),
+                speed_media=getattr(args, "speed_media", None) or str(path),
+                precise_timing=getattr(args, "speed_precise_timing", False),
+                speed_precise_timing=getattr(args, "speed_precise_timing", False),
+                llm_profile=getattr(args, "llm_profile", None),
+                review_profile=getattr(args, "review_profile", None),
+                utility_profile=getattr(args, "utility_profile", None),
+                verbose=verbose,
+                quiet=quiet,
+                config=getattr(args, "config", None),
+                input_data=active_data,
+                gateway=owned_gateway,
+            )
+            from videocaptioner.cli.commands.postprocess import run as postprocess_run
+
+            ret = postprocess_run(post_args, config)
+            if ret == EXIT.SUCCESS:
+                subtitle_path = postprocessed_path
+                active_data = getattr(post_args, "result_data", active_data)
+            else:
+                output.warn(
+                    "Subtitle postprocessing failed; continuing with the preserved initial subtitle"
+                )
+            current_step += 1
+        elif not quiet:
+            output.info("Subtitle postprocessing skipped; using initial subtitle")
+    finally:
+        if owned_gateway is not None:
+            owned_gateway.close()
 
     # Dub
     if do_dub:

@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from collections import defaultdict
 
 import pytest
@@ -21,6 +23,7 @@ from videocaptioner.core.translate.enhanced.glossary import subtitle_fingerprint
 from videocaptioner.core.translate.enhanced.models import (
     AuditIssueDisposition,
     AuthoritativeGlossary,
+    CancellationToken,
     EnhancedTranslationConfig,
     EnhancedTranslationError,
     GlossaryEntry,
@@ -42,7 +45,7 @@ from videocaptioner.core.translate.enhanced.token_planner import (
 def _profile(
     profile_id: str,
     *,
-    concurrency: int = 1,
+    concurrency: int | None = 1,
     work_context_tokens: int = 16_384,
     max_output_tokens: int | None = None,
     transport: LLMTransport = LLMTransport.OPENAI_COMPATIBLE,
@@ -72,6 +75,7 @@ def _config(
     *,
     audit_mode: TranslationAuditMode = TranslationAuditMode.AUTO_APPLY_REVIEW,
     batch_size: int = 10,
+    max_concurrency: int = 10,
     term_confirmation: TermConfirmationMode = TermConfirmationMode.AUTOMATIC,
     main_profile: LLMModelProfile | None = None,
     review_profile: LLMModelProfile | None = None,
@@ -88,8 +92,18 @@ def _config(
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
+        max_concurrency=max_concurrency,
         audit_mode=audit_mode,
         term_confirmation=term_confirmation,
+    )
+
+
+def _unclamped_config(*, batch_size: int = 1, max_concurrency: int = 2) -> EnhancedTranslationConfig:
+    return _config(
+        batch_size=batch_size,
+        max_concurrency=max_concurrency,
+        main_profile=_profile("main", concurrency=None),
+        review_profile=_profile("review", concurrency=None),
     )
 
 
@@ -166,6 +180,117 @@ class ScriptedGateway:
     @property
     def roles(self):
         return [request.metadata["role"] for _, request in self.calls]
+
+
+def _dynamic_payload(request) -> dict:
+    content = request.messages[1].content
+    start = content.find("<DYNAMIC_SUBTITLES>")
+    end = content.find("</DYNAMIC_SUBTITLES>")
+    assert start != -1 and end != -1
+    return json.loads(content[start + len("<DYNAMIC_SUBTITLES>") : end].strip())
+
+
+def _translation_subject_ids(request) -> tuple[int, ...]:
+    return tuple(item["id"] for item in _dynamic_payload(request)["translation_subjects"])
+
+
+class ConcurrentScriptedGateway:
+    """Thread-safe scripted gateway that records in-flight translation shape."""
+
+    def __init__(
+        self,
+        *,
+        delays: dict[int, float] | None = None,
+        translation_overrides: dict[int, object] | None = None,
+        default_delay: float = 0.05,
+    ) -> None:
+        self._lock = threading.Lock()
+        self.calls = []
+        self.stage_calls = defaultdict(list)
+        self.delays = delays or {}
+        self.translation_overrides = translation_overrides or {}
+        self.default_delay = default_delay
+        self._in_flight: dict[str, int] = defaultdict(int)
+        self.max_in_flight: dict[str, int] = defaultdict(int)
+        self.started: dict[int, float] = {}
+        self.finished: dict[int, float] = {}
+        self.completed_subject_ids: list[int] = []
+        self.abandoned_subject_ids: list[int] = []
+        self.ready_to_cancel = threading.Event()
+        self._first_translation_done = False
+
+    def complete(self, profile, request, *, cancelled=None):
+        stage = request.metadata["stage"]
+        subject_ids = (
+            _translation_subject_ids(request) if stage == "translation" else ()
+        )
+        first_id = subject_ids[0] if subject_ids else 0
+        delay = self.delays.get(
+            first_id, self.default_delay if stage == "translation" else 0.0
+        )
+        with self._lock:
+            self.calls.append((profile, request))
+            self.stage_calls[stage].append(request)
+            self._in_flight[stage] += 1
+            self.max_in_flight[stage] = max(
+                self.max_in_flight[stage], self._in_flight[stage]
+            )
+            if stage == "translation":
+                self.started[first_id] = time.perf_counter()
+                if self._first_translation_done and self._in_flight[stage] >= 2:
+                    self.ready_to_cancel.set()
+        abandoned = False
+        try:
+            deadline = time.perf_counter() + delay
+            while time.perf_counter() < deadline:
+                if cancelled is not None and cancelled():
+                    abandoned = True
+                    raise InterruptedError("LLM request cancelled")
+                time.sleep(min(0.01, max(0.0, deadline - time.perf_counter())))
+            if cancelled is not None and cancelled():
+                abandoned = True
+                raise InterruptedError("LLM request cancelled")
+            if stage == "analysis_window":
+                value = _analysis()
+            elif stage == "audit":
+                value = {"issues": []}
+            elif stage == "translation":
+                if first_id in self.translation_overrides:
+                    value = self.translation_overrides[first_id]
+                    if isinstance(value, BaseException):
+                        raise value
+                else:
+                    value = _translations(
+                        *((cue_id, f"译文 {cue_id}") for cue_id in subject_ids)
+                    )
+            else:
+                raise AssertionError(f"unexpected stage {stage!r}")
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            return LLMResult(
+                text=text,
+                usage=LLMUsage(
+                    input_tokens=10,
+                    output_tokens=2,
+                    cache_read_tokens=4,
+                    cache_write_tokens=1,
+                ),
+            )
+        finally:
+            with self._lock:
+                self._in_flight[stage] -= 1
+                if stage == "translation":
+                    self.finished[first_id] = time.perf_counter()
+                    if abandoned:
+                        self.abandoned_subject_ids.extend(subject_ids)
+                    elif not isinstance(
+                        self.translation_overrides.get(first_id), BaseException
+                    ):
+                        self.completed_subject_ids.extend(subject_ids)
+                        self._first_translation_done = True
+
+    @property
+    def stages(self):
+        return [request.metadata["stage"] for _, request in self.calls]
 
 
 def test_enhanced_planners_and_requests_use_each_role_output_cap(monkeypatch):
@@ -1118,3 +1243,108 @@ def test_usage_snapshot_sums_wall_clock_across_stage_calls():
     assert by_key[("main", "analysis_window")].duration_ms == 10
     assert by_key[("review", "audit")].calls == 2
     assert by_key[("review", "audit")].duration_ms == 12
+
+
+def test_formal_translation_batches_never_exceed_task_concurrency():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 6))
+    gateway = ConcurrentScriptedGateway(default_delay=0.08)
+
+    result = EnhancedTranslationOrchestrator(
+        _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+    ).run(cues)
+
+    assert result.translations == {cue_id: f"译文 {cue_id}" for cue_id in range(1, 6)}
+    assert gateway.max_in_flight["translation"] == 2
+    assert sorted(gateway.completed_subject_ids) == [1, 2, 3, 4, 5]
+
+
+def test_out_of_order_translation_batches_merge_by_subtitle_id():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 4))
+    gateway = ConcurrentScriptedGateway(delays={1: 0.25, 2: 0.02, 3: 0.08})
+
+    result = EnhancedTranslationOrchestrator(
+        _unclamped_config(batch_size=1, max_concurrency=3), gateway=gateway
+    ).run(cues)
+
+    assert result.translations == {1: "译文 1", 2: "译文 2", 3: "译文 3"}
+    assert gateway.finished[2] < gateway.finished[1]
+    assert gateway.finished[3] < gateway.finished[1]
+
+
+def test_translation_cancel_abandons_in_flight_and_keeps_completed_batches():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 5))
+    token = CancellationToken()
+    gateway = ConcurrentScriptedGateway(delays={1: 0.05, 2: 2.0, 3: 2.0, 4: 2.0})
+    caught: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            EnhancedTranslationOrchestrator(
+                _unclamped_config(batch_size=1, max_concurrency=2),
+                gateway=gateway,
+                cancellation=token,
+            ).run(cues)
+        except BaseException as exc:
+            caught.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert gateway.ready_to_cancel.wait(timeout=2)
+    token.cancel()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert len(caught) == 1
+    assert isinstance(caught[0], InterruptedError)
+    assert gateway.completed_subject_ids == [1]
+    assert set(gateway.abandoned_subject_ids) >= {2, 3}
+    assert 4 not in gateway.completed_subject_ids
+    assert "audit" not in gateway.stage_calls
+
+
+def test_translation_skips_warmup_when_batch_count_fits_concurrency():
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    gateway = ConcurrentScriptedGateway(default_delay=0.15)
+
+    result = EnhancedTranslationOrchestrator(
+        _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+    ).run(cues)
+
+    assert result.translations == {1: "译文 1", 2: "译文 2"}
+    assert gateway.max_in_flight["translation"] == 2
+    assert gateway.started[2] < gateway.finished[1]
+    assert gateway.started[1] < gateway.finished[2]
+
+
+def test_translation_keeps_serial_warmup_when_batch_count_exceeds_concurrency():
+    cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 5))
+    gateway = ConcurrentScriptedGateway(default_delay=0.08)
+
+    result = EnhancedTranslationOrchestrator(
+        _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+    ).run(cues)
+
+    assert result.translations == {cue_id: f"译文 {cue_id}" for cue_id in range(1, 5)}
+    assert gateway.finished[1] <= gateway.started[2]
+    assert gateway.finished[1] <= gateway.started[3]
+    assert gateway.max_in_flight["translation"] == 2
+
+
+def test_later_translation_batch_failure_fails_task_without_audit():
+    cues = (SubtitleCue(1, "Source 1"), SubtitleCue(2, "Source 2"))
+    failure = LLMCallError(
+        "provider unavailable",
+        category=LLMErrorCategory.TRANSIENT,
+        retryable=True,
+        attempts=4,
+    )
+    gateway = ConcurrentScriptedGateway(translation_overrides={2: failure}, default_delay=0.02)
+
+    with pytest.raises(EnhancedTranslationError) as raised:
+        EnhancedTranslationOrchestrator(
+            _unclamped_config(batch_size=1, max_concurrency=2), gateway=gateway
+        ).run(cues)
+
+    assert raised.value.stage == "translation"
+    assert raised.value.retryable is True
+    assert raised.value.attempts == 4
+    assert "audit" not in gateway.stage_calls
