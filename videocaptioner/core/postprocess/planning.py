@@ -1,0 +1,372 @@
+"""观看问题规划：问题身份、修复主体与边界上下文、批次容量收缩。
+
+设计记录 D16/D18/D22/D26（见 docs/dev/subtitle-postprocessing-design-record.md）：
+- 扫描汇集的问题（长度 / 速度 / 语义 / 结构）统一为 ``PlanProblem``，
+  每个问题保留独立身份；修复以问题区域为主体，主体外按
+  ``boundary_context_radius`` 个相邻段向上下扩展边界上下文。
+- 边界上下文与主体分开表示，不作为默认修改目标（D16）；
+  多个问题可以共享同一段边界上下文（D16/D22）。
+- 主体重叠或相邻时合并为一个修复主体，同时保留原问题 ID、原因
+  和区域级验收关系；仅上下文重叠而主体独立时保持主体独立（D22）。
+- 上下文范围直接复用任务快照中的 ``boundary_context_radius``，
+  不产生第二套用户设置（D18）。
+- 请求容量不足时先减少主体数量，再逐步减少上下文（沿用上游
+  token planner 的收缩顺序，D26）；单个主体在零上下文下仍超出
+  预算时明确报告容量不足，不截断字幕内容。
+
+本模块只读消费字幕与问题，不修改字幕；供核心任务入口与
+修复执行（票 05）复用，gateway 由调用方注入。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, List, Literal, Optional, Sequence
+
+from .viewing import Side, ViewingProblem
+
+if TYPE_CHECKING:
+    from ..asr.asr_data import ASRData
+
+# 上游默认边界上下文半径（D18：沿用上游设置，不新增第二套）。
+DEFAULT_BOUNDARY_CONTEXT_RADIUS = 3
+
+ProblemKind = Literal["length", "speed", "semantic", "structure"]
+
+
+@dataclass
+class PlanProblem:
+    """规划消费的统一问题记录：稳定身份 + 独立验收关系。
+
+    长度问题由 ``ViewingProblem`` 适配而来；速度 / 语义 / 结构问题
+    由调用方按同一身份契约构造。``problem_id`` 在一次任务内稳定，
+    合并主体只改变归属批次，不改变问题身份。
+    """
+
+    problem_id: str
+    kind: ProblemKind
+    side: Side
+    segment_index: int
+    reason: str
+    resolved: bool = False
+    # 诊断载荷（长度问题的度量 / 速度问题的 CPS 等），随问题透传。
+    detail: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.problem_id:
+            raise ValueError("problem_id must not be empty")
+        if self.segment_index < 0:
+            raise ValueError("segment_index must not be negative")
+
+
+def problems_from_viewing(viewing: Sequence[ViewingProblem]) -> List[PlanProblem]:
+    """把单行限长扫描出的 ``ViewingProblem`` 适配为统一问题记录。
+
+    行数问题归入结构问题（行结构违反单行显示）；长度问题保持
+    长度类别。原问题 ID 原样保留，供批次响应显式绑定。
+    """
+    adapted: List[PlanProblem] = []
+    for problem in viewing:
+        kind: ProblemKind = "structure" if problem.problem_id.startswith("lines:") else "length"
+        adapted.append(
+            PlanProblem(
+                problem_id=problem.problem_id,
+                kind=kind,
+                side=problem.side,
+                segment_index=problem.segment_index,
+                reason=problem.reason,
+                resolved=problem.resolved,
+                detail={
+                    "weighted_length": problem.weighted_length,
+                    "absolute_limit": problem.absolute_limit,
+                    "target_limit": problem.target_limit,
+                    "text": problem.text,
+                },
+            )
+        )
+    return adapted
+
+
+@dataclass
+class RepairSubject:
+    """一个修复主体：合并后的问题区域，携带原问题身份。
+
+    主体以字幕段区间表示；``problem_ids`` 保序去重，``reasons``
+    与问题一一对应。区域级验收与回退（D13）以主体为单位。
+    """
+
+    start_index: int
+    end_index: int  # 半开区间 [start, end)
+    problem_ids: List[str] = field(default_factory=list)
+    reasons: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.start_index < 0 or self.end_index <= self.start_index:
+            raise ValueError("subject span must be a non-empty ascending range")
+
+    @property
+    def size(self) -> int:
+        return self.end_index - self.start_index
+
+    def covers(self, index: int) -> bool:
+        return self.start_index <= index < self.end_index
+
+
+@dataclass
+class BoundaryContext:
+    """一个主体的边界上下文：主体外相邻段，不是修改目标。
+
+    ``before`` / ``after`` 是与主体分开验收的参考段区间；
+    独立主体可以共享同一段上下文（D22）。
+    """
+
+    before: tuple[int, int] = (0, 0)  # 半开区间，空区间为 (k, k)
+    after: tuple[int, int] = (0, 0)
+
+    def is_empty(self) -> bool:
+        return self.before[0] == self.before[1] and self.after[0] == self.after[1]
+
+
+def _context_around(
+    span: tuple[int, int], radius: int, segment_count: int
+) -> BoundaryContext:
+    """主体上下各扩展 ``radius`` 个相邻段的边界上下文（不与主体重叠）。"""
+    if radius < 0:
+        raise ValueError("boundary context radius must not be negative")
+    start, end = span
+    before = (max(0, start - radius), start)
+    after = (end, min(segment_count, end + radius))
+    return BoundaryContext(before=before, after=after)
+
+
+def merge_subjects(
+    problems: Sequence[PlanProblem], *, segment_count: int, adjacency_gap: int = 0
+) -> List[RepairSubject]:
+    """按主体重叠或相邻合并问题区域，保留原问题 ID 与原因（D22）。
+
+    主体按段区间排序后扫描：两个问题的主体区间重叠，或中间
+    隔不超过 ``adjacency_gap`` 个段（默认 0：直接相邻）时合并为
+    一个主体。仅边界上下文会重叠而主体独立的输入自然保持独立
+    （本函数只看主体区间，不扩展上下文）。
+    """
+    if segment_count < 0:
+        raise ValueError("segment_count must not be negative")
+    if not problems:
+        return []
+    if any(problem.segment_index >= segment_count for problem in problems):
+        raise ValueError("problem segment_index exceeds segment_count")
+
+    # 单段主体按段序稳定排序；同段多问题按 ID 保序，合并结果可复现。
+    ordered = sorted(problems, key=lambda p: (p.segment_index, p.problem_id))
+    subjects: List[RepairSubject] = []
+    for problem in ordered:
+        start, end = problem.segment_index, problem.segment_index + 1
+        if subjects:
+            last = subjects[-1]
+            gap = start - last.end_index
+            if gap <= adjacency_gap:
+                # 重叠（gap < 0）或相邻（gap == 0）：并入当前主体。
+                last.end_index = max(last.end_index, end)
+                if problem.problem_id not in last.problem_ids:
+                    last.problem_ids.append(problem.problem_id)
+                    last.reasons.append(problem.reason)
+                continue
+        subjects.append(
+            RepairSubject(
+                start_index=start,
+                end_index=end,
+                problem_ids=[problem.problem_id],
+                reasons=[problem.reason],
+            )
+        )
+    return subjects
+
+
+@dataclass
+class RepairBatch:
+    """一批修复请求：主体列表 + 分开表示的边界上下文。
+
+    响应必须显式包含问题 ID 与输出段序号（票 05 消费）；
+    ``estimated_tokens`` 是保守输入估算，不含输出预留。
+    """
+
+    subjects: List[RepairSubject]
+    context: BoundaryContext
+    estimated_tokens: int = 0
+
+
+@dataclass
+class RepairPlan:
+    """一次问题修复轮次的规划结果（票 05 的输入）。"""
+
+    batches: List[RepairBatch] = field(default_factory=list)
+    # 容量不足的主体（零上下文下仍超出预算）：明确报告，不截断内容。
+    unplannable: List[RepairSubject] = field(default_factory=list)
+
+    @property
+    def subject_count(self) -> int:
+        return sum(len(batch.subjects) for batch in self.batches)
+
+    def problem_ids(self) -> List[str]:
+        ids: List[str] = []
+        for batch in self.batches:
+            for subject in batch.subjects:
+                ids.extend(subject.problem_ids)
+        return ids
+
+
+def estimate_plan_tokens(
+    asr_data: "ASRData",
+    subjects: Sequence[RepairSubject],
+    context: BoundaryContext,
+) -> int:
+    """保守估算一批请求的输入 token（不含固定 prompt 与输出预留）。
+
+    序列化估算沿用上游做法：JSON 化的载荷按 ASCII 3 字符 1 token、
+    非ASCII 1 token 保守计价；主体与上下文分开编码，边界上下文
+    显式标注，不与主体混淆。
+    """
+    import json
+
+    def _side_span(span: tuple[int, int]) -> List[dict]:
+        start, end = span
+        return [
+            {"id": index, "text": asr_data.segments[index].text,
+             "translated": asr_data.segments[index].translated_text}
+            for index in range(start, end)
+        ]
+
+    payload = {
+        "boundary_context": {
+            "before": _side_span(context.before),
+            "after": _side_span(context.after),
+        },
+        "repair_subjects": [
+            {
+                "id": index,
+                "text": asr_data.segments[index].text,
+                "translated": asr_data.segments[index].translated_text,
+                "problems": [
+                    {"id": pid, "reason": reason}
+                    for pid, reason in zip(subject.problem_ids, subject.reasons)
+                ],
+            }
+            for subject in subjects
+            for index in range(subject.start_index, subject.end_index)
+        ],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    ascii_count = sum(1 for char in serialized if ord(char) < 128)
+    return max(1, -(-ascii_count // 3) + (len(serialized) - ascii_count))
+
+
+def plan_repair_batches(
+    asr_data: "ASRData",
+    problems: Sequence[PlanProblem],
+    *,
+    boundary_context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS,
+    token_budget: Optional[int] = None,
+    max_subjects_per_batch: int = 10,
+    adjacency_gap: int = 0,
+) -> RepairPlan:
+    """把问题规划为批量修复请求（D16/D22/D26）。
+
+    - 主体先合并（重叠 / 相邻），每个主体带 ``boundary_context_radius``
+      个相邻段上下文；上下文与主体分开表示。
+    - 请求超出 ``token_budget`` 时沿用上游收缩顺序：先减少单批主体
+      数量，再逐步减少上下文；单个主体在零上下文下仍超出预算时
+      列入 ``unplannable`` 明确报告，不截断字幕内容。
+    - ``token_budget`` 为 None 表示不设输入预算（默认整批提交）。
+    """
+    if boundary_context_radius < 0:
+        raise ValueError("boundary_context_radius must not be negative")
+    if max_subjects_per_batch <= 0:
+        raise ValueError("max_subjects_per_batch must be positive")
+    if adjacency_gap < 0:
+        raise ValueError("adjacency_gap must not be negative")
+
+    segment_count = len(asr_data.segments)
+    # 已解决问题不进入修复请求（D27：只重试仍未解决问题）。
+    open_problems = [problem for problem in problems if not problem.resolved]
+    subjects = merge_subjects(
+        open_problems, segment_count=segment_count, adjacency_gap=adjacency_gap
+    )
+    plan = RepairPlan()
+    if not subjects:
+        return plan
+
+    def context_for(subjects_in_batch: Sequence[RepairSubject], radius: int) -> BoundaryContext:
+        start = subjects_in_batch[0].start_index
+        end = subjects_in_batch[-1].end_index
+        return _context_around((start, end), radius, segment_count)
+
+    def fits(
+        subjects_in_batch: Sequence[RepairSubject], radius: int
+    ) -> Optional[RepairBatch]:
+        context = context_for(subjects_in_batch, radius)
+        estimated = estimate_plan_tokens(asr_data, subjects_in_batch, context)
+        if token_budget is not None and estimated > token_budget:
+            return None
+        return RepairBatch(
+            subjects=list(subjects_in_batch), context=context, estimated_tokens=estimated
+        )
+
+    cursor = 0
+    while cursor < len(subjects):
+        subject = subjects[cursor]
+        batch: Optional[RepairBatch] = None
+
+        if token_budget is None:
+            # 无预算：按 max_subjects_per_batch 切批，主体保持合并后的连续顺序。
+            window = subjects[cursor : cursor + max_subjects_per_batch]
+            batch = fits(window, boundary_context_radius)
+            if batch is not None:
+                plan.batches.append(batch)
+                cursor += len(window)
+                continue
+            # fits 在无预算下不可能失败；保底推进防死循环。
+            raise RuntimeError("unreachable: fits without budget cannot fail")
+
+        # 收缩顺序（D26）：先减少主体数量，保留完整上下文。
+        max_take = min(max_subjects_per_batch, len(subjects) - cursor)
+        for take in range(max_take, 0, -1):
+            window = subjects[cursor : cursor + take]
+            candidate = fits(window, boundary_context_radius)
+            if candidate is not None:
+                batch = candidate
+                break
+
+        # 单主体仍放不下：再逐步减少上下文（radius -> 0）。
+        if batch is None:
+            for radius in range(boundary_context_radius - 1, -1, -1):
+                candidate = fits([subject], radius)
+                if candidate is not None:
+                    batch = candidate
+                    break
+
+        if batch is None:
+            # 零上下文单主体仍超出预算：明确报告容量不足（D26），
+            # 保留完整文本，不做截断；继续规划其余主体。
+            plan.unplannable.append(subject)
+            cursor += 1
+            continue
+
+        plan.batches.append(batch)
+        cursor += len(batch.subjects)
+
+    return plan
+
+
+__all__ = [
+    "DEFAULT_BOUNDARY_CONTEXT_RADIUS",
+    "PlanProblem",
+    "ProblemKind",
+    "RepairSubject",
+    "BoundaryContext",
+    "RepairBatch",
+    "RepairPlan",
+    "problems_from_viewing",
+    "merge_subjects",
+    "plan_repair_batches",
+    "estimate_plan_tokens",
+]
