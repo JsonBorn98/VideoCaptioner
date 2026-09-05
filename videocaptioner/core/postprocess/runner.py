@@ -21,6 +21,7 @@ from .models import (
 )
 from .profiles import PostprocessProfileStore
 from .report import QualityReport
+from .workspace import FilesystemAssetStore, fingerprint_subtitle
 
 if TYPE_CHECKING:
     from ..llm import LLMGateway
@@ -267,17 +268,19 @@ def run_postprocess_task(
     config = PostprocessConfig(**config_payload(config))
     config.utility_llm_profile = injected
     task.config_snapshot = config
-    if assets is not None:
-        try:
-            assets.discover(task)
-        except InterruptedError:
-            return _blocked_result(
-                task, original, report, layout, confidence, warnings, status="cancelled"
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _module_failure_result(
-                task, original, report, layout, confidence, warnings, exc
-            )
+    task.subtitle_fingerprint = fingerprint_subtitle(original)
+    adapter = assets if assets is not None else FilesystemAssetStore()
+    try:
+        adapter.discover(task)
+    except InterruptedError:
+        return _blocked_result(
+            task, original, report, layout, confidence, warnings, status="cancelled"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _module_failure_result(
+            task, original, report, layout, confidence, warnings, exc
+        )
+    warnings.extend(item for item in task.warnings if item not in warnings)
     evidence = tuple(timing_windows) if config.precise_timing else ()
     # Visible outcome of 媒体增强对齐 / 对齐时间轴 (see CONTEXT.md).  None = not
     # requested; otherwise one of "applied" / "degraded_no_media" / "degraded_failed".

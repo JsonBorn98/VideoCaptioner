@@ -43,6 +43,8 @@ __all__ = [
     "PostprocessResult",
     "PostprocessTask",
     "PostprocessAssetAdapter",
+    "FilesystemAssetStore",
+    "ProcessAssetDiscovery",
     "run_postprocess_task",
     "ViewingProblem",
     "scan_viewing_lengths",
@@ -249,3 +251,5 @@ from .runner import run_postprocess_task as run_postprocess_task  # noqa: E402
 from .viewing import ViewingProblem as ViewingProblem  # noqa: E402
 from .viewing import scan_viewing_lengths as scan_viewing_lengths  # noqa: E402
 from .viewing import weighted_length as weighted_length  # noqa: E402
+from .workspace import FilesystemAssetStore as FilesystemAssetStore  # noqa: E402
+from .workspace import ProcessAssetDiscovery as ProcessAssetDiscovery  # noqa: E402

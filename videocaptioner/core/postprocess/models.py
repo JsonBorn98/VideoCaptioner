@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..entities import SubtitleExportPolicy
     from ..speed.timing_evidence import TimingEvidenceBundle
     from .report import QualityReport
+    from .workspace import ProcessAssetDiscovery
 
 
 class PostprocessLayoutMode(str, Enum):
@@ -51,6 +52,12 @@ class PostprocessTask:
     input_data: "ASRData | None" = field(default=None, repr=False)
     result_data: "ASRData | None" = field(default=None, repr=False)
     workflow_base_name: str = ""
+    source_language: str = ""
+    target_language: str = ""
+    translation_method: str = ""
+    subtitle_fingerprint: str = ""
+    explicit_assets: dict[str, str] = field(default_factory=dict)
+    asset_discovery: Optional["ProcessAssetDiscovery"] = field(default=None, repr=False)
     export_policy: "SubtitleExportPolicy | None" = None
     enabled: bool = True
     need_next_task: bool = False
@@ -78,10 +85,10 @@ class PostprocessTask:
 
 
 class PostprocessAssetAdapter(Protocol):
-    """Injected process-asset seam. Discovery behavior is filled in later."""
+    """Injected process-asset seam. ``FilesystemAssetStore`` is the default."""
 
     def discover(self, task: PostprocessTask) -> None:
-        """Inspect or attach process assets for this frozen task."""
+        """Create or reuse the 过程资产目录 and attach verified assets."""
 
 
 @dataclass(frozen=True)
