@@ -240,6 +240,8 @@ def _task_name_source(task: "PostprocessTask") -> str:
 def _software_version() -> str:
     try:
         from videocaptioner._version import version
+    except InterruptedError:
+        raise
     except Exception:  # noqa: BLE001 — version module is generated and may be absent
         return "unknown"
     return str(version or "unknown")
@@ -266,6 +268,8 @@ def _load_manifest(path: Path) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+    except InterruptedError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
@@ -297,6 +301,8 @@ def _asset_readable(path: Path, kind: str) -> bool:
         if not path.is_file() or path.stat().st_size <= 0:
             return False
         text = path.read_text(encoding="utf-8")
+    except InterruptedError:
+        raise
     except (OSError, UnicodeError):
         return False
     if not text.strip():

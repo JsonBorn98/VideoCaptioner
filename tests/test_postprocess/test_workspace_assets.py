@@ -246,3 +246,21 @@ def test_ordinary_io_directory_is_not_polluted_with_process_files(tmp_path):
     assert list(tmp_path.glob("*context*")) == []
     assert result.succeeded
     assert result.continue_downstream is True
+
+
+def test_interrupted_asset_read_is_cancellation_not_unreadable(tmp_path, monkeypatch):
+    glossary = tmp_path / "seed-glossary.json"
+    glossary.write_text('{"schema": "videocaptioner.project_glossary"}\n', encoding="utf-8")
+    original_read = Path.read_text
+
+    def patched(self, *args, **kwargs):
+        if self.resolve() == glossary.resolve():
+            raise InterruptedError("stop requested")
+        return original_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", patched)
+    result = _run(tmp_path, name="stop", explicit_assets={"glossary": str(glossary)})
+
+    assert result.task.status == "cancelled"
+    assert not result.used_fallback
+    assert result.continue_downstream is False
