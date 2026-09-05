@@ -49,6 +49,8 @@ __all__ = [
     "ViewingProblem",
     "scan_viewing_lengths",
     "weighted_length",
+    "RepairSummary",
+    "execute_viewing_repair",
 ]
 
 
@@ -247,6 +249,8 @@ from .models import PostprocessResult as PostprocessResult  # noqa: E402
 from .models import PostprocessTask as PostprocessTask  # noqa: E402
 from .profiles import PostprocessProfile as PostprocessProfile  # noqa: E402
 from .profiles import PostprocessProfileStore as PostprocessProfileStore  # noqa: E402
+from .repair import RepairSummary as RepairSummary  # noqa: E402
+from .repair import execute_viewing_repair as execute_viewing_repair  # noqa: E402
 from .runner import run_postprocess_task as run_postprocess_task  # noqa: E402
 from .viewing import ViewingProblem as ViewingProblem  # noqa: E402
 from .viewing import scan_viewing_lengths as scan_viewing_lengths  # noqa: E402

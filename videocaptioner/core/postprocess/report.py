@@ -14,6 +14,7 @@ from ..utils.text_utils import is_mainly_cjk
 
 if TYPE_CHECKING:
     from ..speed.pipeline import SpeedOptimizationResult
+    from .repair import RepairSummary
     from .viewing import ViewingProblem
 
 _MAX_SAMPLES = 20
@@ -113,6 +114,8 @@ class QualityReport:
     #  单行限长侧扫描出的观看长度问题（见 viewing.py ViewingProblem）。
     #  仅未解决问题供修复规划与人工复查消费；回退区域不记为通过（D10/D14）。
     viewing_problems: List["ViewingProblem"] = field(default_factory=list)
+    #  批量观看问题修复的可见结果状态（repair.py RepairSummary；None = 未运行修复）。
+    viewing_repair: Optional["RepairSummary"] = None
 
     def unresolved_viewing_problems(self) -> List["ViewingProblem"]:
         """未解决的观看长度问题（修复回退区域保持未解决，不记为通过）。"""
@@ -201,6 +204,24 @@ def build_qa_report(report: QualityReport) -> str:
     unresolved = report.unresolved_viewing_problems()
     if unresolved:
         lines.append(f"- 未解决观看长度问题: {len(unresolved)} 条\n")
+    repair = report.viewing_repair
+    if repair is not None and repair.rollbacks:
+        lines.append(f"- 批量修复局部回退: {len(repair.rollbacks)} 个区域\n")
+        lines.append("\n| 状态 | 区域 | 原因 |\n| --- | --- | --- |\n")
+        for rollback in repair.rollbacks[:_MAX_TABLE_ROWS]:
+            lines.append(
+                _md_row(
+                    [
+                        "回退",
+                        f"初版段 {list(rollback.initial_indices)}",
+                        rollback.reason,
+                    ]
+                )
+            )
+        if len(repair.rollbacks) > _MAX_TABLE_ROWS:
+            lines.append(
+                f"\n_省略 {len(repair.rollbacks) - _MAX_TABLE_ROWS} 个回退区域。_\n"
+            )
 
     # 4. 译者复查队列
     if audit is not None:

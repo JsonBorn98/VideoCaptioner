@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from ..asr.asr_data import ASRData
 from ..entities import SubtitleLayoutEnum
+from ..llm.utility import borrow_utility_gateway
 from ..subtitle.io import clone_subtitle_data, import_subtitle, save_canonical_srt
 from ..utils.logger import setup_logger
 from . import run_post_stage, run_pre_stage
@@ -20,6 +21,7 @@ from .models import (
     PostprocessTask,
 )
 from .profiles import PostprocessProfileStore
+from .repair import execute_viewing_repair
 from .report import QualityReport
 from .workspace import FilesystemAssetStore, fingerprint_subtitle
 
@@ -363,14 +365,39 @@ def run_postprocess_task(
 
     try:
         working, report = run_pre_stage(clone_subtitle_data(original), config, report)
-        working, report = run_post_stage(
-            working,
-            config,
-            report,
-            layout=layout,
-            timing_windows=evidence,
-            gateway=gateway,
+        # 批量观看问题修复（票 05）：确定性阶段结束后执行；局部回退只影响
+        # 对应区域（D13/D14），模块级异常仍走整体回退。分析模式已在上方提前返回。
+        # apply 路径只借一次工具网关：compress 与修复循环共用同一实例。
+        needs_repair = (
+            config.utility_llm_profile is not None and config.any_viewing_single_line()
         )
+        if needs_repair:
+            with borrow_utility_gateway(gateway) as runtime:
+                working, report = run_post_stage(
+                    working,
+                    config,
+                    report,
+                    layout=layout,
+                    timing_windows=evidence,
+                    gateway=runtime,
+                )
+                working, report = execute_viewing_repair(
+                    working,
+                    config,
+                    report,
+                    layout,
+                    gateway=runtime,
+                    profile=config.utility_llm_profile,
+                )
+        else:
+            working, report = run_post_stage(
+                working,
+                config,
+                report,
+                layout=layout,
+                timing_windows=evidence,
+                gateway=gateway,
+            )
         _validate_output(working)
         output = Path(task.postprocessed_subtitle_path or task.default_output_path()).with_suffix(
             ".srt"
