@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext as _nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
@@ -371,16 +372,16 @@ def run_postprocess_task(
         needs_repair = (
             config.utility_llm_profile is not None and config.any_viewing_single_line()
         )
-        if needs_repair:
-            with borrow_utility_gateway(gateway) as runtime:
-                working, report = run_post_stage(
-                    working,
-                    config,
-                    report,
-                    layout=layout,
-                    timing_windows=evidence,
-                    gateway=runtime,
-                )
+        with borrow_utility_gateway(gateway) if needs_repair else _nullcontext(gateway) as runtime:
+            working, report = run_post_stage(
+                working,
+                config,
+                report,
+                layout=layout,
+                timing_windows=evidence,
+                gateway=runtime,
+            )
+            if needs_repair:
                 working, report = execute_viewing_repair(
                     working,
                     config,
@@ -389,15 +390,14 @@ def run_postprocess_task(
                     gateway=runtime,
                     profile=config.utility_llm_profile,
                 )
-        else:
-            working, report = run_post_stage(
-                working,
-                config,
-                report,
-                layout=layout,
-                timing_windows=evidence,
-                gateway=gateway,
-            )
+                # 修复循环的警告（回退 / 传输失败 / 容量不足）并入任务警告（D10）。
+                repair_summary = report.viewing_repair
+                if repair_summary is not None:
+                    warnings.extend(
+                        item
+                        for item in repair_summary.warnings
+                        if item not in warnings
+                    )
         _validate_output(working)
         output = Path(task.postprocessed_subtitle_path or task.default_output_path()).with_suffix(
             ".srt"

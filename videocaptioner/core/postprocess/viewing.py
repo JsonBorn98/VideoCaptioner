@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Literal
@@ -22,6 +23,16 @@ from .config import SINGLE_LINE, PostprocessConfig
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
+
+# 阅读速度字符数的共享空白口径（CJK 去空白；audit 与 repair 共用，单一来源）。
+_WS_RE = re.compile(r"\s+")
+
+
+def char_count(text: str, cjk: bool) -> int:
+    """阅读速度字符数：CJK 按去空白字符数计，其余按 strip 后字符数计（含词间空格）。"""
+    if cjk:
+        return len(_WS_RE.sub("", text))
+    return len(text.strip())
 
 Side = Literal["original", "translated"]
 
@@ -207,6 +218,7 @@ def scan_viewing_lengths(
 __all__ = [
     "Side",
     "ViewingProblem",
+    "char_count",
     "effective_length_limit",
     "scan_viewing_lengths",
     "sides_for_layout",

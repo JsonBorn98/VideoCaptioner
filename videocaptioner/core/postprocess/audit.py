@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, List, Tuple
 
 from ..utils.text_utils import is_mainly_cjk
@@ -18,11 +17,10 @@ from .report import (
     QualityReport,
     SpeedWarning,
 )
+from .viewing import char_count as _char_count
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData, ASRDataSeg
-
-_WS_RE = re.compile(r"\s+")
 
 
 def _fmt(ms: int) -> str:
@@ -31,13 +29,6 @@ def _fmt(ms: int) -> str:
     minutes, seconds = divmod(total_seconds, 60)
     hours, minutes = divmod(minutes, 60)
     return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
-
-
-def _char_count(text: str, cjk: bool) -> int:
-    """CJK 按去空白字符数计，其余按 strip 后字符数计（含词间空格）。"""
-    if cjk:
-        return len(_WS_RE.sub("", text))
-    return len(text.strip())
 
 
 def _context_entry(seg: "ASRDataSeg", index: int, current: bool) -> dict:

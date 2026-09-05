@@ -14,6 +14,9 @@
 - 业务重试耗尽、重复候选或区域状态重复时，只回退该问题区域的初版未拆分
   快照（D13，区域 = 修复主体的初版段区间），其他成功区域保留；局部未解决
   不阻断下游（D14），模块级异常仍上抛由调用方整体回退。
+- 回退快照取修复入口（确定性规则阶段后）的 working 字幕，不取后处理入口
+  的初版字幕：确定性产物是已完整验收的最后状态（D10「不取某次未完整验收
+  的中间结果」的意图），回退到更早状态会复活用户显式开启的确定性修正。
 
 修复主体沿用 planning（票 04）：主体 + 边界上下文分开表示，上下文不作为
 修改目标；``boundary_context_radius`` 沿用上游默认值（D18，完整接线见票 06）。
@@ -24,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
@@ -34,6 +36,7 @@ from ..asr.asr_data import ASRData, ASRDataSeg
 from ..llm import LLMGateway, LLMMessage, LLMRequest
 from ..llm.utility import borrow_utility_gateway
 from ..prompts import get_prompt
+from ..subtitle.io import clone_subtitle_data
 from ..utils.logger import setup_logger
 from ..utils.text_utils import is_mainly_cjk
 from .config import SINGLE_LINE, PostprocessConfig
@@ -46,6 +49,7 @@ from .planning import (
 )
 from .report import QualityReport
 from .viewing import (
+    char_count,
     effective_length_limit,
     scan_viewing_lengths,
     sides_for_layout,
@@ -67,8 +71,6 @@ MAX_TRANSPORT_FAILURE_ROUNDS = 2
 # 修复循环轮数安全上界：每个问题至多 1+4 次请求后封闭，超出即异常路径。
 MAX_ROUNDS = 16
 
-_WS_RE = re.compile(r"\s+")
-
 # 问题稳定身份：working 段序会因拆分漂移，跨轮计数一律用
 # (初版段序, 显示侧, 问题类别)；problem_id 只在一次请求内对模型显式绑定。
 ProblemIdentity = Tuple[int, str, str]
@@ -77,13 +79,6 @@ ProblemIdentity = Tuple[int, str, str]
 def _compact(text: str) -> str:
     """原文等价比较基：剔除全部空白后按字符序比较（D05 拆分边界空白重排允许）。"""
     return "".join(text.split())
-
-
-def _char_count(text: str, cjk: bool) -> int:
-    """阅读速度字符数（与 audit.py 口径一致：CJK 去空白，其余 strip）。"""
-    if cjk:
-        return len(_WS_RE.sub("", text))
-    return len(text.strip())
 
 
 def _clone_seg(seg: ASRDataSeg) -> ASRDataSeg:
@@ -354,7 +349,7 @@ def _over_hard_cps(value: str, cjk: bool, span_ms: int, cfg: PostprocessConfig) 
     if not value or not value.strip() or span_ms <= 0:
         return False
     limit = cfg.max_cps_cjk if cjk else cfg.max_cps_latin
-    return _char_count(value, cjk) / (span_ms / 1000) > limit
+    return char_count(value, cjk) / (span_ms / 1000) > limit
 
 
 def _validate_segment_candidate(
@@ -469,8 +464,6 @@ def execute_viewing_repair(
     if profile is None:
         logger.info("未配置工具角色模型配置方案，跳过观看问题模型修复")
         return working, report
-
-    from ..subtitle.io import clone_subtitle_data
 
     summary = RepairSummary()
     report.viewing_repair = summary

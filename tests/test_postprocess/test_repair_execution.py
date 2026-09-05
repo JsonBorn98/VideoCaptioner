@@ -396,36 +396,30 @@ def test_transport_then_success_still_uses_full_budget():
 def test_exhausted_region_rolls_back_to_unsplit_snapshot():
     """耗尽区域恢复初版未拆分快照：时间轴、原文、段数全部回到初版。"""
     data = _data(("超长" * 30, "短"), ("第二段超长" * 4, "第二短"), ("第三段", "第三短"))
-    # 段 1 的问题让第一个 gateway 永远无法通过；段 0 可以通过。
-    def make_response(payload):
-        return _response(_repairs_for_first_subject_only(payload))
-
-    def _repairs_for_first_subject_only(payload):
-        repairs = []
-        for subject in payload["repair_subjects"]:
-            segment = subject["segments"][0]
-            text: str = segment["text"]
-            if "第二段" in text:
-                return [{"problem_id": segment["problem_ids"][0], "output_index": 0,
-                          "original": text, "translated": segment["translated"]}]  # 不拆分，仍超长
-            head, tail = text[: len(text) // 2], text[len(text) // 2:]
-            repairs.extend([
-                {"problem_id": segment["problem_ids"][0], "output_index": 0,
-                 "original": head, "translated": "短短"},
-                {"problem_id": segment["problem_ids"][0], "output_index": 1,
-                 "original": tail, "translated": "短短"},
-            ])
-        return repairs
+    # 段 1 的问题永远无法通过（不拆分仍超长）；段 0 可以通过。
 
     class _AdaptiveGateway(_ScriptedGateway):
         def complete(self, profile, request, *, cancelled=None):
-            import json as _json
-            payload = _json.loads(_payload_text(request))
+            payload = json.loads(_payload_text(request))
             self.requests.append(payload)
-            script = self.scripts.pop(0) if self.scripts else None
-            if isinstance(script, Exception):
-                raise script
-            return LLMResult(text=_response(_repairs_for_first_subject_only(payload)))
+            repairs = []
+            for subject in payload["repair_subjects"]:
+                segment = subject["segments"][0]
+                text: str = segment["text"]
+                if "第二段" in text:
+                    # 不拆分，仍超长 → 候选被拒，直到业务重试耗尽回退。
+                    return LLMResult(text=_response([
+                        {"problem_id": segment["problem_ids"][0], "output_index": 0,
+                         "original": text, "translated": segment["translated"]}
+                    ]))
+                head, tail = text[: len(text) // 2], text[len(text) // 2:]
+                repairs.extend([
+                    {"problem_id": segment["problem_ids"][0], "output_index": 0,
+                     "original": head, "translated": "短短"},
+                    {"problem_id": segment["problem_ids"][0], "output_index": 1,
+                     "original": tail, "translated": "短短"},
+                ])
+            return LLMResult(text=_response(repairs))
 
     gateway = _AdaptiveGateway([])
     repaired, report = execute_viewing_repair(
@@ -444,8 +438,6 @@ def test_exhausted_region_rolls_back_to_unsplit_snapshot():
 def test_rollback_restores_initial_timeline():
     """回退恢复初版时间轴：失败区域的中间拆分时间不残留。"""
     data = _data(("超长" * 30, "短"), ("第二段超长" * 4, "第二短"))
-    _response([{"problem_id": "length:original:0", "output_index": 0,
-                       "original": "超长" * 30, "translated": "短"}])
 
     class _SelectiveGateway(_ScriptedGateway):
         def complete(self, profile, request, *, cancelled=None):
