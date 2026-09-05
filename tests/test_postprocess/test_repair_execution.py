@@ -506,6 +506,39 @@ def test_module_level_failure_propagates():
 # ---- 请求形状可观察性 ----
 
 
+def test_runner_propagates_repair_warnings_into_task_warnings(tmp_path):
+    """修复循环警告（回退 / 容量不足）经核心入口并入任务警告（D10 报警）。"""
+    from videocaptioner.core.postprocess import PostprocessTask, run_postprocess_task
+    from videocaptioner.core.postprocess.report import build_qa_report
+
+    source = tmp_path / "input.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:04,000\n" + "超长" * 30 + "\n",
+        encoding="utf-8",
+    )
+    over = _response([{"problem_id": "length:original:0", "output_index": 0,
+                       "original": "超长" * 30, "translated": "短"}])
+    gateway = _ScriptedGateway([over] * 5)
+    task = PostprocessTask(
+        str(source),
+        postprocessed_subtitle_path=str(tmp_path / "result.srt"),
+        config_snapshot=PostprocessConfig(
+            trim_trailing_punct=False,
+            utility_llm_profile=_profile(),
+        ),
+    )
+    result = run_postprocess_task(task, gateway=gateway)
+    # 回退区域：警告经 runner 并入 task.warnings / result.warnings。
+    assert any("回退区域" in warning for warning in result.warnings)
+    assert any("回退区域" in warning for warning in task.warnings)
+    # QA 报告同步列出回退明细（D10 报告明确列出）。
+    qa = build_qa_report(result.report)
+    assert "批量修复局部回退" in qa
+
+
+# ---- 请求形状可观察性（原位） ----
+
+
 def test_request_payload_carries_explicit_binding_fields():
     """请求载荷显式携带 problem_ids / max_fragments / limits / 上下文分开。"""
     data = _data(("超长" * 30, "短"), ("正常", "正常"))
