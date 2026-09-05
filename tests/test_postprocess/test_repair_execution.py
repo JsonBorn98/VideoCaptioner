@@ -564,13 +564,17 @@ def test_request_payload_carries_explicit_binding_fields():
 
 
 def test_no_profile_skips_repair_and_reports_problems():
-    """未配置工具角色方案：跳过模型修复（原样返回，不扫描写入报告）。"""
+    """未配置翻译角色：跳过模型修复（原样返回），票 06 起选择进报告。"""
     data = _data(("超长" * 30, "短"))
     repaired, report = execute_viewing_repair(
         data, _config(), QualityReport(), SubtitleLayoutEnum.ORIGINAL_ON_TOP,
         gateway=None, profile=None,
     )
-    # 跳过修复：字幕原样返回、报告不动（扫描由 run_post_stage 统一负责）。
-    assert report.viewing_repair is None
+    # 跳过修复：字幕原样返回、不发起请求（扫描由 run_post_stage 统一负责）。
+    # 票 06（D15）：修复方式选择进入报告与任务状态，report_only 如实记录。
+    assert report.viewing_repair is not None
+    assert report.viewing_repair.flow_mode == "report_only"
+    assert report.viewing_repair.requests == 0
+    assert any("模型修复未执行" in warning for warning in report.viewing_repair.warnings)
     assert report.viewing_problems == []
     assert repaired.segments[0].text == "超长" * 30

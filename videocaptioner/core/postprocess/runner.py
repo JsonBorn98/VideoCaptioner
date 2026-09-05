@@ -24,6 +24,7 @@ from .models import (
 from .profiles import PostprocessProfileStore
 from .repair import execute_viewing_repair
 from .report import QualityReport
+from .translation import load_translation_snapshot_file
 from .workspace import FilesystemAssetStore, fingerprint_subtitle
 
 if TYPE_CHECKING:
@@ -135,6 +136,14 @@ def _has_aligned_timing_evidence(evidence: Iterable["TimingEvidenceWindow"]) -> 
     """Return whether at least one window contains media-derived timing evidence."""
 
     return any(window.quality_metrics.get("fallback") is not True for window in evidence)
+
+
+def _snapshot_profile_resolver():
+    """按快照角色身份解析连接的延迟解析器（票 06）；方案库惰性加载。"""
+
+    from .translation import store_profile_resolver
+
+    return store_profile_resolver(None)
 
 
 def _blocked_result(
@@ -284,6 +293,17 @@ def run_postprocess_task(
             task, original, report, layout, confidence, warnings, exc
         )
     warnings.extend(item for item in task.warnings if item not in warnings)
+    # 翻译执行快照（票 06，D15）：完整 workflow 由调用方在任务开始时冻结注入；
+    # 独立任务从验证过的过程资产重建身份快照。缺失时的明确提示由修复循环
+    # 的 report_only 结果写入报告与任务警告（不猜测配置、不静默升级）。
+    if task.translation_snapshot is None and task.asset_discovery is not None:
+        snapshot_path = task.asset_discovery.asset_path("translation_snapshot")
+        rebuilt = load_translation_snapshot_file(snapshot_path) if snapshot_path else None
+        if rebuilt is not None:
+            task.translation_snapshot = rebuilt
+            if not task.translation_method.strip():
+                task.translation_method = rebuilt.method
+    snapshot = task.translation_snapshot
     evidence = tuple(timing_windows) if config.precise_timing else ()
     # Visible outcome of 媒体增强对齐 / 对齐时间轴 (see CONTEXT.md).  None = not
     # requested; otherwise one of "applied" / "degraded_no_media" / "degraded_failed".
@@ -372,6 +392,9 @@ def run_postprocess_task(
         needs_repair = (
             config.utility_llm_profile is not None and config.any_viewing_single_line()
         )
+        # 修复方式按任务冻结快照选择（票 06，D15）：快照角色连接缺失时按
+        # 角色身份从方案库显式解析（可验证的资产身份才复用）。
+        repair_resolver = _snapshot_profile_resolver()
         with borrow_utility_gateway(gateway) if needs_repair else _nullcontext(gateway) as runtime:
             working, report = run_post_stage(
                 working,
@@ -381,14 +404,16 @@ def run_postprocess_task(
                 timing_windows=evidence,
                 gateway=runtime,
             )
-            if needs_repair:
+            if config.any_viewing_single_line():
                 working, report = execute_viewing_repair(
                     working,
                     config,
                     report,
                     layout,
                     gateway=runtime,
+                    snapshot=snapshot,
                     profile=config.utility_llm_profile,
+                    profile_resolver=repair_resolver,
                 )
                 # 修复循环的警告（回退 / 传输失败 / 容量不足）并入任务警告（D10）。
                 repair_summary = report.viewing_repair

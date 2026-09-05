@@ -161,6 +161,14 @@ class HomeInterface(QWidget):
             input_data=self._active_subtitle_data,
             export_policy=self._workflow_export_policy,
         )
+        # 翻译执行快照（票 06，D15）：后处理修复方式与字幕阶段冻结的任务对齐。
+        if subtitle_task.translation_execution_snapshot is not None:
+            postprocess_task.translation_snapshot = (
+                subtitle_task.translation_execution_snapshot
+            )
+            postprocess_task.translation_method = (
+                subtitle_task.translation_execution_snapshot.method
+            )
         self.postprocess_interface.set_task(postprocess_task)
         self.postprocess_interface.process()
         self.stackedWidget.setCurrentWidget(self.postprocess_interface)

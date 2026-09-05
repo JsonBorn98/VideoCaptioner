@@ -178,9 +178,11 @@ def run(args: Namespace, config: dict) -> int:
                 return ret
             subtitle_path = initial_path
             active_data = getattr(sub_args, "result_data", active_data)
+            translation_snapshot = getattr(sub_args, "translation_execution_snapshot", None)
             current_step += 1
         else:
             subtitle_path = transcribed_path
+            translation_snapshot = None
             if not quiet:
                 output.info("Subtitle optimization/translation skipped")
 
@@ -213,6 +215,9 @@ def run(args: Namespace, config: dict) -> int:
                 input_data=active_data,
                 gateway=owned_gateway,
             )
+            # 翻译执行快照（票 06，D15）：后处理修复方式与字幕阶段冻结的任务对齐。
+            if translation_snapshot is not None:
+                post_args.translation_execution_snapshot = translation_snapshot
             from videocaptioner.cli.commands.postprocess import run as postprocess_run
 
             ret = postprocess_run(post_args, config)

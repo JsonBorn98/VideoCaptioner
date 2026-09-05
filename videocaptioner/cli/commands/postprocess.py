@@ -193,6 +193,13 @@ def run(args: Namespace, config: dict) -> int:
         config_snapshot=resolved,
     )
     task.input_data = getattr(args, "input_data", None)
+    # 翻译执行快照（票 06，D15）：process 管线把字幕阶段冻结的任务快照
+    # 传入；独立调用无快照，由 runner 从验证过的过程资产重建或明确提示。
+    translation_snapshot = getattr(args, "translation_execution_snapshot", None)
+    if translation_snapshot is not None:
+        task.translation_snapshot = translation_snapshot
+        if not task.translation_method:
+            task.translation_method = translation_snapshot.method
 
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)

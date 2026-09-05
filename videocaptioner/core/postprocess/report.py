@@ -205,6 +205,19 @@ def build_qa_report(report: QualityReport) -> str:
     if unresolved:
         lines.append(f"- 未解决观看长度问题: {len(unresolved)} 条\n")
     repair = report.viewing_repair
+    if repair is not None:
+        # 修复方式选择与角色身份（票 06，D15）：进入报告便于核对实际行为。
+        method_label = repair.translation_method or "未知"
+        flow_label = {
+            "main_review": "主翻译 + 高级校对",
+            "main": "仅主翻译",
+            "report_only": "未执行模型修复",
+        }.get(repair.flow_mode, repair.flow_mode or "未执行模型修复")
+        lines.append(f"- 修复方式: {method_label} -> {flow_label}\n")
+        if repair.main_role:
+            lines.append(f"- 主翻译角色: {repair.main_role}\n")
+        if repair.review_role:
+            lines.append(f"- 高级校对角色: {repair.review_role}\n")
     if repair is not None and repair.rollbacks:
         lines.append(f"- 批量修复局部回退: {len(repair.rollbacks)} 个区域\n")
         lines.append("\n| 状态 | 区域 | 原因 |\n| --- | --- | --- |\n")

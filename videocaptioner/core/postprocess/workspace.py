@@ -189,6 +189,22 @@ class FilesystemAssetStore:
             else:
                 rejected.append(kind)
 
+        # 完整 workflow 冻结的翻译执行快照（票 06，D15）：作为过程资产落盘，
+        # 供后续独立调用按 manifest 验证复用；载荷只含方式与角色身份，无连接机密。
+        if task.translation_snapshot is not None and "translation_snapshot" not in verified:
+            snapshot_path = task_dir / ASSET_FILENAMES["translation_snapshot"]
+            try:
+                _write_json(snapshot_path, task.translation_snapshot.to_persisted())
+            except InterruptedError:
+                raise
+            except OSError as exc:
+                task.warnings.append(f"翻译执行快照保存失败: {exc}")
+            else:
+                if _asset_readable(snapshot_path, "translation_snapshot"):
+                    verified["translation_snapshot"] = snapshot_path
+                else:
+                    task.warnings.append("翻译执行快照保存后不可读，未列入资产")
+
         missing = tuple(kind for kind in UPSTREAM_ASSET_KINDS if kind not in verified)
         rejected_unique = tuple(dict.fromkeys(rejected))
         manifest = _build_manifest(

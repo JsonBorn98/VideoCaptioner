@@ -31,6 +31,7 @@ from videocaptioner.core.llm.utility import (
     validate_utility_profile,
 )
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
+from videocaptioner.core.postprocess.translation import snapshot_from_subtitle_config
 from videocaptioner.core.split.split import SubtitleSplitter
 from videocaptioner.core.subtitle import clone_subtitle_data
 from videocaptioner.core.translate.enhanced import (
@@ -454,6 +455,11 @@ class SubtitleThread(QThread):
             # 5. 发布内存快照，并强制保存当前阶段唯一的规范 SRT。
             # 取消门：用户已停止时不落地本次任务的输出文件。
             self.cancellation.raise_if_cancelled()
+            # 翻译执行快照（票 06，D15）：从本任务冻结的翻译配置生成，
+            # 供下游后处理把修复方式与原任务对齐（workflow 传递 / 独立复用）。
+            self.task.translation_execution_snapshot = snapshot_from_subtitle_config(
+                subtitle_config
+            )
             self.task.result_data = clone_subtitle_data(asr_data)
             canonical, exported, warning = TaskFactory.save_stage_subtitle(
                 asr_data,

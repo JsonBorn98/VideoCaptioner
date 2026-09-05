@@ -48,6 +48,11 @@ from .planning import (
     problems_from_viewing,
 )
 from .report import QualityReport
+from .translation import (
+    RepairFlow,
+    TranslationExecutionSnapshot,
+    resolve_repair_flow,
+)
 from .viewing import (
     char_count,
     effective_length_limit,
@@ -74,6 +79,36 @@ MAX_ROUNDS = 16
 # 问题稳定身份：working 段序会因拆分漂移，跨轮计数一律用
 # (初版段序, 显示侧, 问题类别)；problem_id 只在一次请求内对模型显式绑定。
 ProblemIdentity = Tuple[int, str, str]
+
+
+def _role_label(profile: Optional["LLMModelProfile"]) -> str:
+    """角色身份的可读标签（报告 / 任务状态消费，无连接机密）。"""
+    if profile is None:
+        return ""
+    return f"{profile.profile_id} / {profile.model}"
+
+
+def select_repair_flow(
+    snapshot: Optional["TranslationExecutionSnapshot"],
+    profile: Optional["LLMModelProfile"],
+    profile_resolver=None,
+) -> RepairFlow:
+    """把快照 / 显式备用角色解析为修复方式（票 06，D07/D15）。
+
+    快照优先（完整 workflow 冻结的任务翻译方式）；无快照但有显式
+    ``profile`` 时按普通 LLM 方式修复（显式备用输入，不静默升级）；
+    两者皆无时仅报告。``report_only`` 的原因由调用方写入警告与报告。
+    """
+    if snapshot is not None:
+        return resolve_repair_flow(snapshot, profile_resolver=profile_resolver)
+    if profile is not None:
+        # 显式备用翻译角色：普通 LLM 方式，不自动增加高级校对（D07）。
+        return RepairFlow(
+            "main",
+            "无翻译执行快照，使用显式备用翻译角色按普通方式修复",
+            main_profile=profile,
+        )
+    return RepairFlow("report_only", "缺少翻译执行快照，无法自动重译")
 
 
 def _compact(text: str) -> str:
@@ -110,6 +145,20 @@ class RepairSummary:
     rollbacks: List[RegionRollback] = field(default_factory=list)
     unplannable_subjects: int = 0
     warnings: List[str] = field(default_factory=list)
+    # 修复方式选择（票 06）：翻译方式与角色身份进入报告与任务状态，
+    # 便于核对实际行为（D15「翻译方式选择和资产身份进入报告」）。
+    translation_method: str = ""
+    """任务开始时冻结的翻译方式（single_llm / enhanced_llm / non_llm；空=未知）。"""
+    flow_mode: str = ""
+    """实际修复方式：main_review / main / report_only。"""
+    main_role: str = ""
+    """主翻译角色身份（profile_id / model；仅报告用，无连接机密）。"""
+    review_role: str = ""
+    """高级校对角色身份（仅 main_review 方式非空）。"""
+    boundary_context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS
+    """本轮实际使用的边界上下文半径（默认取快照中的上游设置，D18）。"""
+    review_corrections: int = 0
+    """高级校对复校实际修正的译文处数（仅 main_review 方式计数）。"""
 
 
 class _WorkingState:
@@ -292,17 +341,234 @@ def _build_payload(
     }
 
 
-def _request_messages(payload: Dict[str, Any]) -> List[LLMMessage]:
+def _request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMessage]:
+    """构造一次请求消息；``guidance`` 是任务冻结的原翻译提示配置（可空）。"""
     system_prompt = get_prompt("optimize/viewing_repair")
+    guidance_block = ""
+    if guidance.strip():
+        guidance_block = (
+            "Custom translation guidance from the original task:\n"
+            + guidance.strip()
+            + "\n\n"
+        )
     return [
         LLMMessage("system", system_prompt),
         LLMMessage(
             "user",
-            "Repair the following subtitle viewing problems:\n<input>"
+            guidance_block
+            + "Repair the following subtitle viewing problems:\n<input>"
             + json.dumps(payload, ensure_ascii=False)
             + "</input>",
         ),
     ]
+
+
+def _review_request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMessage]:
+    """构造高级校对复校请求消息（增强流程第二段，票 06）。"""
+    system_prompt = get_prompt("optimize/viewing_repair_review")
+    guidance_block = ""
+    if guidance.strip():
+        guidance_block = (
+            "Custom review guidance from the original task:\n" + guidance.strip() + "\n\n"
+        )
+    return [
+        LLMMessage("system", system_prompt),
+        LLMMessage(
+            "user",
+            guidance_block
+            + "Review the following proposed repair fragments:\n<input>"
+            + json.dumps(payload, ensure_ascii=False)
+            + "</input>",
+        ),
+    ]
+
+
+def _parse_review_response(
+    text: str, proposals: Dict[Tuple[str, int], Dict[str, Any]]
+) -> Tuple[Optional[str], Dict[Tuple[str, int], str]]:
+    """解析高级校对复校响应并显式绑定 (problem_id, output_index)。
+
+    返回 (整体致命错误, 绑定键 → 校订译文)。未知绑定或协议违规整体拒绝，
+    保留主翻译候选不变（保守默认，prompt 规则 7）。
+    """
+    try:
+        parsed = json_repair.loads(text)
+    except Exception as exc:  # noqa: BLE001 —— 模型输出垃圾按业务失败处理
+        return f"复校响应不是有效 JSON: {exc}", {}
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("reviews"), list):
+        return "复校响应缺少 reviews 数组", {}
+    corrections: Dict[Tuple[str, int], str] = {}
+    for entry in parsed["reviews"]:
+        if not isinstance(entry, dict):
+            return "reviews 含非对象条目", {}
+        problem_id = entry.get("problem_id")
+        output_index = entry.get("output_index")
+        translated = entry.get("translated")
+        if not isinstance(problem_id, str) or type(output_index) is not int:
+            return "复校绑定必须是 problem_id 字符串 + output_index 整数", {}
+        if output_index < 0:
+            return "复校 output_index 必须是非负整数", {}
+        if not isinstance(translated, str):
+            return "复校 translated 必须是字符串", {}
+        key = (problem_id, output_index)
+        if key not in proposals:
+            return f"未知复校绑定 problem_id={problem_id!r}", {}
+        corrections[key] = translated
+    return None, corrections
+
+
+def _review_pass(
+    runtime: LLMGateway,
+    review_profile: "LLMModelProfile",
+    state: "_WorkingState",
+    cfg: PostprocessConfig,
+    layout: "SubtitleLayoutEnum",
+    *,
+    region_start: int,
+    region_length: int,
+    accepted_entries: Dict[int, List[Dict[str, Any]]],
+    replacements: List[List[ASRDataSeg]],
+    segment_problems: Dict[int, List[PlanProblem]],
+    radius: int,
+    guidance: str = "",
+) -> Tuple[int, List[str]]:
+    """对一个已拼接主体执行高级校对复校（增强流程第二段，票 06）。
+
+    ``accepted_entries`` 按主体内偏移携带主翻译已接受候选的显式绑定；
+    ``replacements`` 提供主体内各输入段的片段数（复校定位用）。
+    只复校译文侧；原文侧与时间由主翻译候选保证（D05/D24）。
+    返回 (修正数, 警告列表)；复校失败不回退已接受候选（保守保留
+    主翻译，prompt 规则 7）。
+    """
+    if not accepted_entries or region_length <= 0:
+        return 0, []
+    # 主体内各输入段在拼接后区域中的起始偏移（含透传段的 1 片）。
+    prefix: List[int] = []
+    cursor = 0
+    for fragments in replacements:
+        prefix.append(cursor)
+        cursor += len(fragments)
+    proposals: List[Dict[str, Any]] = []
+    bindings: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    for offset in sorted(accepted_entries):
+        input_index = region_start + offset
+        problems = segment_problems.get(input_index, [])
+        if not problems:
+            continue
+        problem_id = problems[0].problem_id
+        for position, entry in enumerate(accepted_entries[offset]):
+            proposal = {
+                "problem_id": problem_id,
+                "output_index": entry["output_index"],
+                "region_position": prefix[offset] + position,
+                "original": entry["original"],
+                "translated": entry["translated"],
+            }
+            proposals.append(proposal)
+            bindings[(problem_id, entry["output_index"])] = proposal
+    if not proposals:
+        return 0, []
+    # 边界上下文取拼接后当前状态的相邻段（D16 语义：边界参考，非修改目标）。
+    context: List[Dict[str, Any]] = []
+    for index in range(max(0, region_start - radius), region_start):
+        context.append(
+            {
+                "id": index,
+                "text": state.segments[index].text,
+                "translated": state.segments[index].translated_text,
+            }
+        )
+    for index in range(
+        region_start + region_length,
+        min(len(state.segments), region_start + region_length + radius),
+    ):
+        context.append(
+            {
+                "id": index,
+                "text": state.segments[index].text,
+                "translated": state.segments[index].translated_text,
+            }
+        )
+    payload = {
+        "limits": {
+            "absolute_cjk": cfg.single_line_absolute_cjk,
+            "absolute_latin": cfg.single_line_absolute_latin,
+        },
+        "boundary_context": context,
+        "review_subjects": [
+            {
+                "segments": [
+                    {
+                        "id": region_start + offset,
+                        "problem_ids": [
+                            problem.problem_id
+                            for problem in segment_problems.get(
+                                region_start + offset, []
+                            )
+                        ],
+                        "proposals": [
+                            {
+                                "output_index": entry["output_index"],
+                                "original": entry["original"],
+                                "translated": entry["translated"],
+                            }
+                            for entry in accepted_entries[offset]
+                        ],
+                    }
+                    for offset in sorted(accepted_entries)
+                ]
+            }
+        ],
+        "feedback": [],
+    }
+    try:
+        response = runtime.complete(
+            review_profile,
+            LLMRequest(
+                messages=tuple(_review_request_messages(payload, guidance)),
+                max_output_tokens=review_profile.max_output_tokens,
+                metadata={"stage": "viewing_repair_review", "role": "utility"},
+            ),
+        )
+    except InterruptedError:
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 复校传输失败保留主翻译候选
+        logger.warning("观看问题修复高级校对请求失败（保留主翻译候选）: %s", exc)
+        return 0, [f"高级校对复校请求失败，保留主翻译候选: {exc}"]
+    fatal, corrections = _parse_review_response(response.text, bindings)
+    if fatal is not None:
+        return 0, [f"高级校对复校响应被拒（保留主翻译候选）: {fatal}"]
+    active_sides = _active_single_line_sides(cfg, layout)
+    warnings: List[str] = []
+    corrections_applied = 0
+    for (problem_id, output_index), translated in corrections.items():
+        proposal = bindings.get((problem_id, output_index))
+        if proposal is None:
+            continue
+        position = region_start + proposal["region_position"]
+        if position >= len(state.segments):
+            continue
+        seg = state.segments[position]
+        # 非空性守恒（主翻译验收同一约束）：复校不得发明或丢失译文。
+        if bool(proposal["translated"].strip()) != bool(translated.strip()):
+            warnings.append("高级校对复校改动译文侧非空性，已拒绝该处修正")
+            continue
+        if "\n" in translated and "translated" in active_sides:
+            warnings.append("高级校对复校引入换行（单行显示侧），已拒绝该处修正")
+            continue
+        if "translated" in active_sides and translated.strip():
+            limit = effective_length_limit(
+                translated,
+                cjk_limit=cfg.single_line_absolute_cjk,
+                latin_limit=cfg.single_line_absolute_latin,
+            )
+            if weighted_length(translated) > limit:
+                warnings.append("高级校对复校超出有效绝对上限，已拒绝该处修正")
+                continue
+        if translated.strip() and translated != seg.translated_text:
+            seg.translated_text = translated
+            corrections_applied += 1
+    return corrections_applied, warnings
 
 
 def _parse_response(
@@ -452,21 +718,48 @@ def execute_viewing_repair(
     layout: "SubtitleLayoutEnum",
     *,
     gateway: Optional[LLMGateway] = None,
+    snapshot: Optional["TranslationExecutionSnapshot"] = None,
     profile: Optional["LLMModelProfile"] = None,
-    boundary_context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS,
+    profile_resolver=None,
+    boundary_context_radius: Optional[int] = None,
 ) -> Tuple[ASRData, QualityReport]:
-    """执行批量观看问题修复循环（票 05 核心入口，供任务入口调用）。
+    """执行批量观看问题修复循环（票 05/06 核心入口，供任务入口调用）。
 
+    修复方式从任务开始时冻结的翻译执行快照中选择（票 06，D07/D15）：
+    增强型翻译跟随主翻译 + 高级校对两段流程；普通 LLM 翻译只复用主翻译，
+    不自动增加高级校对；非 LLM 翻译与缺失快照不静默发起 LLM 请求，只执行
+    确定性处理并仅报告。``profile`` 是无快照时的显式备用翻译角色。
     每轮：扫描 → 规划（主体 + 边界上下文）→ 批量请求 → 显式绑定验收 →
-    拼回完整字幕 → 重新验收进入下一轮；耗尽 / 重复 / 容量不足的区域局部
-    回退到修复入口快照并标记未解决（D13/D14），不阻断下游。
+    （增强流程）高级校对复校 → 拼回完整字幕 → 重新验收进入下一轮；
+    耗尽 / 重复 / 容量不足的区域局部回退到修复入口快照并标记未解决
+    （D13/D14），不阻断下游。``boundary_context_radius`` 缺省取快照中
+    的上游设置（D18），显式传入时覆盖（独立任务用当前任务配置）。
     """
-    if profile is None:
-        logger.info("未配置工具角色模型配置方案，跳过观看问题模型修复")
+    flow = select_repair_flow(snapshot, profile, profile_resolver)
+    summary = RepairSummary()
+    summary.translation_method = snapshot.method if snapshot is not None else ""
+    summary.flow_mode = flow.mode
+    summary.main_role = _role_label(flow.main_profile)
+    summary.review_role = _role_label(flow.review_profile)
+    summary.boundary_context_radius = (
+        boundary_context_radius
+        if boundary_context_radius is not None
+        else flow.boundary_context_radius
+    )
+    report.viewing_repair = summary
+    if flow.mode == "report_only":
+        # 非 LLM / 缺失快照：不静默发起 LLM 请求（D15），仅确定性处理与报告。
+        summary.warnings.append(f"观看问题模型修复未执行（{flow.reason}）")
+        logger.info("观看问题模型修复按仅报告处理：%s", flow.reason)
         return working, report
 
-    summary = RepairSummary()
-    report.viewing_repair = summary
+    repair_profile = flow.main_profile
+    assert repair_profile is not None  # mode main / main_review 保证非空
+    radius = summary.boundary_context_radius
+    # 任务冻结的原翻译提示配置（D15）：只作为修复请求的补充指引，
+    # 不替换修复系统提示词；非快照路径（显式备用角色）为空。
+    main_guidance = snapshot.main_prompt if snapshot is not None else ""
+    review_guidance = snapshot.review_prompt if snapshot is not None else ""
     state = _WorkingState(clone_subtitle_data(working))
     # 区域封闭表（初版段序）：回退 / 容量不足的区域不再进入后续请求。
     closed_regions: Set[int] = set()
@@ -511,9 +804,7 @@ def execute_viewing_repair(
             ]
             if not open_problems:
                 break
-            plan = plan_repair_batches(
-                data, open_problems, boundary_context_radius=boundary_context_radius
-            )
+            plan = plan_repair_batches(data, open_problems, boundary_context_radius=radius)
             for subject in plan.unplannable:
                 # 容量不足（D26）：明确报告、封闭区域、不截断内容。
                 indices = state.initial_indices(subject.start_index, subject.end_index)
@@ -575,10 +866,10 @@ def execute_viewing_repair(
                 summary.requests += 1
                 try:
                     response = runtime.complete(
-                        profile,
+                        repair_profile,
                         LLMRequest(
-                            messages=tuple(_request_messages(payload)),
-                            max_output_tokens=profile.max_output_tokens,
+                            messages=tuple(_request_messages(payload, main_guidance)),
+                            max_output_tokens=repair_profile.max_output_tokens,
                             metadata={"stage": "viewing_repair", "role": "utility"},
                         ),
                     )
@@ -607,6 +898,9 @@ def execute_viewing_repair(
                         subject.start_index, subject.end_index
                     )
                     replacements: List[List[ASRDataSeg]] = []
+                    # 已接受候选的显式绑定（主体内偏移 → 按 output_index 排序的条目），
+                    # 供增强流程高级校对复校（票 06）。
+                    accepted_entries: Dict[int, List[Dict[str, Any]]] = {}
                     splice_ok = True
                     any_accepted = False
                     for index in range(subject.start_index, subject.end_index):
@@ -635,6 +929,9 @@ def execute_viewing_repair(
                             break
                         candidate_fps.setdefault(initial_index, set()).add(fingerprint)
                         replacements.append(fragments)
+                        accepted_entries[index - subject.start_index] = sorted(
+                            entries, key=lambda entry: entry["output_index"]
+                        )
                         any_accepted = True
                         accepted.update(identities)
                         for identity in identities:
@@ -663,6 +960,27 @@ def execute_viewing_repair(
                     for index in indices:
                         state_fps.setdefault(index, set()).add(region_fp)
                     summary.spliced_fragments += spliced
+                    # 增强流程（票 06，D07）：拼接成功后对已接受候选执行
+                    # 高级校对复校；失败保留主翻译候选，不回退已接受区域。
+                    if flow.mode == "main_review" and flow.review_profile is not None:
+                        applied, review_warnings = _review_pass(
+                            runtime,
+                            flow.review_profile,
+                            state,
+                            cfg,
+                            layout,
+                            region_start=subject.start_index,
+                            region_length=spliced,
+                            accepted_entries=accepted_entries,
+                            replacements=replacements,
+                            segment_problems=segment_problems,
+                            radius=radius,
+                            guidance=review_guidance,
+                        )
+                        summary.review_corrections += applied
+                        summary.warnings.extend(
+                            warning for warning in review_warnings if warning not in summary.warnings
+                        )
                     round_accepted = True
 
             if round_accepted:
@@ -699,4 +1017,5 @@ __all__ = [
     "RegionRollback",
     "RepairSummary",
     "execute_viewing_repair",
+    "select_repair_flow",
 ]

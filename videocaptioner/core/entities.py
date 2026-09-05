@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from videocaptioner.core.asr.asr_data import ASRData
     from videocaptioner.core.llm.models import LLMModelProfile
     from videocaptioner.core.postprocess.models import PostprocessTask
+    from videocaptioner.core.postprocess.translation import TranslationExecutionSnapshot
     from videocaptioner.core.synthesis.models import EncodeSettings
     from videocaptioner.core.translate.enhanced.models import (
         TermConfirmationMode,
@@ -975,6 +976,12 @@ class SubtitleTask:
     glossary_path: Optional[str] = None
     translation_audit_report_path: Optional[str] = None
     translation_checkpoint_path: Optional[str] = None
+    # 任务开始时冻结的翻译执行快照（票 06，D15）：由字幕线程从本任务的
+    # SubtitleConfig 生成，供下游后处理把修复方式与原任务对齐。
+    # 运行期对象（角色连接 / 提示词）只随 workflow 在内存传递，不落盘。
+    translation_execution_snapshot: Optional["TranslationExecutionSnapshot"] = field(
+        default=None, repr=False
+    )
     translation_audit_report: Optional["TranslationAuditReport"] = field(
         default=None, repr=False
     )

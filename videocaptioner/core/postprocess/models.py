@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..entities import SubtitleExportPolicy
     from ..speed.timing_evidence import TimingEvidenceBundle
     from .report import QualityReport
+    from .translation import TranslationExecutionSnapshot
     from .workspace import ProcessAssetDiscovery
 
 
@@ -55,6 +56,11 @@ class PostprocessTask:
     source_language: str = ""
     target_language: str = ""
     translation_method: str = ""
+    # 任务开始时冻结的翻译执行快照（票 06，D15）：完整 workflow 由调用方
+    # 冻结注入；独立任务由 runner 从验证过的过程资产重建身份快照。
+    translation_snapshot: Optional["TranslationExecutionSnapshot"] = field(
+        default=None, repr=False
+    )
     subtitle_fingerprint: str = ""
     explicit_assets: dict[str, str] = field(default_factory=dict)
     asset_discovery: Optional["ProcessAssetDiscovery"] = field(default=None, repr=False)

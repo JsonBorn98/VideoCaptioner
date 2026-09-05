@@ -27,6 +27,9 @@ def build_postprocess_stage_summary(result: PostprocessResult) -> StageSummary:
         audit_counts = report.audit.counts()
         if audit_counts["hard"]:
             counts.append(("硬超速", audit_counts["hard"]))
+    repair = report.viewing_repair
+    if repair is not None and repair.review_corrections:
+        counts.append(("校对修正", repair.review_corrections))
 
     outcome = result.precise_timing_outcome
     if outcome == "applied":
@@ -38,6 +41,16 @@ def build_postprocess_stage_summary(result: PostprocessResult) -> StageSummary:
         status_parts.append("fallback")
     elif result.task.status == "skipped":
         status_parts.append("skipped")
+    if repair is not None:
+        # 修复方式选择进入任务状态摘要（票 06，D15）：
+        # 翻译方式 -> 实际修复方式，便于核对实际行为。
+        method_label = repair.translation_method or "未知"
+        flow_label = {
+            "main_review": "主翻译+高级校对",
+            "main": "仅主翻译",
+            "report_only": "仅报告",
+        }.get(repair.flow_mode, repair.flow_mode or "仅报告")
+        status_parts.append(f"修复 {method_label}->{flow_label}")
     badge = _PRECISE_TIMING_BADGES.get(outcome or "")
     if badge:
         status_parts.append(f"对齐时间轴 {badge}")
