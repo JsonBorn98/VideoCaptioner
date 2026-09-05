@@ -56,6 +56,24 @@ class PostprocessConfig:
     max_compensation_ms: int = 800
     """最大补偿：单段结尾可获得的补偿时长上限。"""
 
+    # ---- 显示侧长度策略（设计记录 D02/D03/D19/D25；CONTEXT.md「显示侧长度策略」）----
+    # 每侧独立选择单行限长（single_line）或自动换行（auto_wrap）；默认两侧均单行限长。
+    original_display_mode: str = "single_line"
+    """原文侧显示模式：single_line（单行限长）| auto_wrap（自动换行）。"""
+    translated_display_mode: str = "single_line"
+    """译文侧显示模式：single_line（单行限长）| auto_wrap（自动换行）。"""
+    # 单行限长按折算字符数执行（见 viewing.py）：目标上限是软目标，绝对上限是
+    # 长度验收硬条件；目标上限不得高于绝对上限（D03）。上限不是固定段长，
+    # 不要求把短字幕补长到目标值。
+    single_line_target_cjk: int = 16
+    """中文目标长度上限（折算字符数，软目标）。"""
+    single_line_absolute_cjk: int = 20
+    """中文绝对长度上限（折算字符数，长度验收硬条件）。"""
+    single_line_target_latin: int = 21
+    """英文目标长度上限（折算字符数，软目标；≈42 个半角字符）。"""
+    single_line_absolute_latin: int = 25
+    """英文绝对长度上限（折算字符数，长度验收硬条件；≈50 个半角字符）。"""
+
     # ---- 审计 / 报告 ----
     audit_reading_speed: bool = False
     """阅读速度 / 时长异常审计（只读）。qa_report 开启时强制视为 True。"""
@@ -144,6 +162,10 @@ class PostprocessConfig:
             "short_text_max_chars",
             "short_text_max_duration_ms",
             "speed_semantic_window",
+            "single_line_target_cjk",
+            "single_line_absolute_cjk",
+            "single_line_target_latin",
+            "single_line_absolute_latin",
         )
         for field_name in int_fields:
             if type(getattr(self, field_name)) is not int:
@@ -205,6 +227,36 @@ class PostprocessConfig:
             raise ValueError("comfort_cps_cjk cannot exceed max_cps_cjk")
         if self.comfort_cps_latin > self.max_cps_latin:
             raise ValueError("comfort_cps_latin cannot exceed max_cps_latin")
+        # 显示侧长度策略（D02/D03/D25）：模式取值与排序校验——目标上限不得
+        # 高于绝对上限；两侧上限都为正，否则单行限长验收没有有效硬条件。
+        for field_name in ("original_display_mode", "translated_display_mode"):
+            if getattr(self, field_name) not in ("single_line", "auto_wrap"):
+                raise ValueError(f"{field_name} must be 'single_line' or 'auto_wrap'")
+        for side_name in ("cjk", "latin"):
+            target = getattr(self, f"single_line_target_{side_name}")
+            absolute = getattr(self, f"single_line_absolute_{side_name}")
+            if target <= 0 or absolute <= 0:
+                raise ValueError(f"single_line limits for {side_name} must be positive")
+            if target > absolute:
+                raise ValueError(
+                    f"single_line_target_{side_name} cannot exceed "
+                    f"single_line_absolute_{side_name}"
+                )
+
+    def display_mode_for(self, side: str) -> str:
+        """指定显示侧（original / translated）的显示模式。"""
+        if side == "original":
+            return self.original_display_mode
+        if side == "translated":
+            return self.translated_display_mode
+        raise ValueError(f"unknown display side: {side}")
+
+    def any_viewing_single_line(self) -> bool:
+        """任一显示侧仍为单行限长（决定是否执行显示长度扫描）。"""
+        return (
+            self.original_display_mode == "single_line"
+            or self.translated_display_mode == "single_line"
+        )
 
     def audit_enabled(self) -> bool:
         """是否需要执行审计（审计开关 / QA 报告 / 压缩重译任一开启）。"""

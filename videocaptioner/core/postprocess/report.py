@@ -14,6 +14,7 @@ from ..utils.text_utils import is_mainly_cjk
 
 if TYPE_CHECKING:
     from ..speed.pipeline import SpeedOptimizationResult
+    from .viewing import ViewingProblem
 
 _MAX_SAMPLES = 20
 _MAX_TABLE_ROWS = 40
@@ -109,6 +110,13 @@ class QualityReport:
     #  压缩重译未能自动完成、已保留原文的条目
     compress_failures: List[str] = field(default_factory=list)
     speed: Optional["SpeedOptimizationResult"] = None
+    #  单行限长侧扫描出的观看长度问题（见 viewing.py ViewingProblem）。
+    #  仅未解决问题供修复规划与人工复查消费；回退区域不记为通过（D10/D14）。
+    viewing_problems: List["ViewingProblem"] = field(default_factory=list)
+
+    def unresolved_viewing_problems(self) -> List["ViewingProblem"]:
+        """未解决的观看长度问题（修复回退区域保持未解决，不记为通过）。"""
+        return [problem for problem in self.viewing_problems if not problem.resolved]
 
     def stage(self, name: str) -> StageReport:
         report = self.stages.get(name)
@@ -189,6 +197,10 @@ def build_qa_report(report: QualityReport) -> str:
         lines.append(f"- 舒适警告: {c['comfort']}（中文 {cjk_comfort} / 外文 {latin_comfort}）\n")
         lines.append(f"- 长时长异常: {c['long_duration']}\n")
         lines.append(f"- 时轴重叠: {c['overlaps']}\n")
+
+    unresolved = report.unresolved_viewing_problems()
+    if unresolved:
+        lines.append(f"- 未解决观看长度问题: {len(unresolved)} 条\n")
 
     # 4. 译者复查队列
     if audit is not None:

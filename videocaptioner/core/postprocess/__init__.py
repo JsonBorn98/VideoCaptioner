@@ -44,6 +44,9 @@ __all__ = [
     "PostprocessTask",
     "PostprocessAssetAdapter",
     "run_postprocess_task",
+    "ViewingProblem",
+    "scan_viewing_lengths",
+    "weighted_length",
 ]
 
 
@@ -214,6 +217,20 @@ def run_post_stage(
                 c["overlaps"],
             )
 
+    # 每侧显示长度扫描在所有文本与时轴变换结束后执行（见 viewing.py）：单行限长侧
+    # 超出有效绝对上限或行数超单行形成问题；自动换行侧完全跳过长度与行数约束（D19）。
+    # 只读扫描、绝不阻断管线；问题供修复规划（票 04）与报告消费。
+    if cfg.audit_enabled() or cfg.any_viewing_single_line():
+        try:
+            from .viewing import scan_viewing_lengths
+
+            problems = scan_viewing_lengths(asr_data, cfg, layout)
+            report.viewing_problems.extend(problems)
+            if problems:
+                logger.info("显示长度扫描：%d 个观看长度问题", len(problems))
+        except Exception as exc:  # noqa: BLE001 —— 后处理不得阻断管线
+            logger.warning("显示长度扫描失败，已跳过: %s", exc)
+
     report.segment_count = len(asr_data.segments)
     return asr_data, report
 
@@ -227,3 +244,6 @@ from .models import PostprocessTask as PostprocessTask  # noqa: E402
 from .profiles import PostprocessProfile as PostprocessProfile  # noqa: E402
 from .profiles import PostprocessProfileStore as PostprocessProfileStore  # noqa: E402
 from .runner import run_postprocess_task as run_postprocess_task  # noqa: E402
+from .viewing import ViewingProblem as ViewingProblem  # noqa: E402
+from .viewing import scan_viewing_lengths as scan_viewing_lengths  # noqa: E402
+from .viewing import weighted_length as weighted_length  # noqa: E402
