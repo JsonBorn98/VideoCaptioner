@@ -92,22 +92,19 @@ def test_context_is_separate_from_subjects():
     (subject,) = batch.subjects
     assert subject.start_index == 5 and subject.end_index == 6
     # 上下文区间在主体之外，分开表示，不进入主体。
-    assert batch.context.before == (2, 5)
-    assert batch.context.after == (6, 9)
-    assert not subject.covers(batch.context.before[1] - 1)  # 主体前最后一段上下文
-    assert not subject.covers(batch.context.after[0])  # 主体后第一段上下文
+    assert batch.context.spans == ((2, 5), (6, 9))
+    assert not subject.covers(2)  # 主体前最后一段上下文
+    assert not subject.covers(8)  # 主体后第一段上下文
 
 
 def test_context_clips_at_subtitle_edges():
     data = _data(*[("段", "译")] * 4)
     plan = plan_repair_batches(data, [_problem("length:original:0", 0)])
     (batch,) = plan.batches
-    assert batch.context.before == (0, 0)  # 开头无上文
-    assert batch.context.after == (1, 4)
+    assert batch.context.spans == ((1, 4),)  # 开头无上文
     plan = plan_repair_batches(data, [_problem("length:original:3", 3)])
     (batch,) = plan.batches
-    assert batch.context.before == (0, 3)
-    assert batch.context.after == (4, 4)  # 结尾无下文
+    assert batch.context.spans == ((0, 3),)  # 结尾无下文
 
 
 # ---- radius 复用（验收 3：无第二套设置）----
@@ -123,8 +120,7 @@ def test_radius_controls_context_expansion():
         data, [_problem("length:original:6", 6)], boundary_context_radius=1
     )
     (batch,) = plan.batches
-    assert batch.context.before == (5, 6)
-    assert batch.context.after == (7, 8)
+    assert batch.context.spans == ((5, 6), (7, 8))
     plan = plan_repair_batches(
         data, [_problem("length:original:6", 6)], boundary_context_radius=0
     )
@@ -189,11 +185,43 @@ def test_independent_subjects_with_overlapping_contexts_stay_independent():
     # 主体保持独立：区间互不重叠。
     assert (first.start_index, first.end_index) == (2, 3)
     assert (second.start_index, second.end_index) == (4, 5)
-    # 同批共享上下文：批上下文围绕整批主体区间 (2,5) 外扩 radius=2。
-    assert batch.context.before == (0, 2)
-    assert batch.context.after == (5, 7)
+    # 上下文 = 各主体扩展的并集 − 主体区间：段 4 是主体被剔除，
+    # 间隙段 3 成为独立共享 span（first 下文 ∩ second 上文）。
+    assert batch.context.spans == ((0, 2), (3, 4), (5, 7))
+    # 主体间间隙段 3 在 radius 覆盖内：作为共享上下文出现（D22）。
+    radius_tight = plan_repair_batches(
+        data, [_problem("a", 2), _problem("b", 4)], boundary_context_radius=1
+    )
+    (tight_batch,) = radius_tight.batches
+    assert tight_batch.context.spans == ((1, 2), (3, 4), (5, 6))
+    # 间隙段 3 既是 first 的下文也是 second 的上文（仅上下文重叠）。
+    assert 3 in range(tight_batch.context.spans[1][0], tight_batch.context.spans[1][1])
     # 上下文在主体之外，不成为修改目标（不并入任一主体区间）。
     assert not first.covers(3) and not second.covers(3)
+
+
+def test_gap_segments_between_subjects_become_shared_context():
+    """主体间间隙段在 radius 覆盖内时成为共享上下文，不被整批包络丢弃（D16）。"""
+    data = _data(*[("段", "译")] * 10)
+    # 主体段 2 与段 5（隔 2 段）：radius=3 时段 3、4 在两侧覆盖内。
+    plan = plan_repair_batches(
+        data, [_problem("a", 2), _problem("b", 5)], boundary_context_radius=3
+    )
+    (batch,) = plan.batches
+    first, second = batch.subjects
+    assert (first.start_index, first.end_index) == (2, 3)
+    assert (second.start_index, second.end_index) == (5, 6)
+    # 各主体扩展并集：段 3/4（first 下文 ∩ second 上文）+ 两侧外沿。
+    covered = {
+        index
+        for start, end in batch.context.spans
+        for index in range(start, end)
+    }
+    assert 3 in covered and 4 in covered  # 间隙段是共享上下文
+    assert 0 in covered and 1 in covered  # first 上文
+    assert 6 in covered and 7 in covered and 8 in covered  # second 下文
+    # 主体段永不进入上下文。
+    assert 2 not in covered and 5 not in covered
 
 
 def test_far_subjects_split_into_batches_without_budget():
@@ -226,8 +254,9 @@ def test_budget_shrinks_subject_count_before_context():
     full = plan_repair_batches(data, problems)
     assert len(full.batches) == 1  # 无预算整批可容纳
     full_tokens = full.batches[0].estimated_tokens
-    # 首主体在段 0：上文钳制在片头（空），下文取满 radius。
-    assert full.batches[0].context.before == (0, 0)
+    # 首主体在段 0：上文钳制在片头（无 span），下文从段 1 起；
+    # 主体互不相邻（隔 1 段）→ 间隙段自成共享 span。
+    assert full.batches[0].context.spans == ((1, 2), (3, 4), (5, 6), (7, 10))
 
     # 预算约一半：先减主体数量（拆批），上下文保持完整 radius。
     budget = full_tokens // 2
@@ -263,8 +292,7 @@ def test_budget_shrinks_context_after_single_subject():
     assert plan.unplannable == []
     # 单主体装下了，但上下文被收缩（radius < 请求值）。
     assert batch.estimated_tokens <= budget
-    context_span = (batch.context.before[1] - batch.context.before[0]
-                    + batch.context.after[1] - batch.context.after[0])
+    context_span = batch.context.segment_count()
     assert context_span < 2 * radius  # 少于满 radius 的上下文量
     # 主体内容完整保留（未截断）。
     (subject,) = batch.subjects

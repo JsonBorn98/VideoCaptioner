@@ -2,14 +2,16 @@
 
 设计记录 D16/D18/D22/D26（见 docs/dev/subtitle-postprocessing-design-record.md）：
 - 扫描汇集的问题（长度 / 速度 / 语义 / 结构）统一为 ``PlanProblem``，
-  每个问题保留独立身份；修复以问题区域为主体，主体外按
-  ``boundary_context_radius`` 个相邻段向上下扩展边界上下文。
-- 边界上下文与主体分开表示，不作为默认修改目标（D16）；
-  多个问题可以共享同一段边界上下文（D16/D22）。
+  每个问题保留独立身份；修复以问题区域为主体，各主体向上下
+  扩展 ``boundary_context_radius`` 个相邻段作为边界上下文。
+- 边界上下文与主体分开表示，不作为默认修改目标（D16）；主体区间
+  永远从上下文中剔除，同批独立主体之间的间隙段在 radius 覆盖内时
+  成为共享上下文（D16/D22）。
 - 主体重叠或相邻时合并为一个修复主体，同时保留原问题 ID、原因
   和区域级验收关系；仅上下文重叠而主体独立时保持主体独立（D22）。
-- 上下文范围直接复用任务快照中的 ``boundary_context_radius``，
-  不产生第二套用户设置（D18）。
+- 上下文范围直接复用任务快照中的 ``boundary_context_radius``
+  （``entities.py`` ``SubtitleConfig`` 默认 3；上游 token planner 的
+  ``context_radius`` 同样默认 3），不产生第二套用户设置（D18）。
 - 请求容量不足时先减少主体数量，再逐步减少上下文（沿用上游
   token planner 的收缩顺序，D26）；单个主体在零上下文下仍超出
   预算时明确报告容量不足，不截断字幕内容。
@@ -28,7 +30,8 @@ from .viewing import Side, ViewingProblem
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
 
-# 上游默认边界上下文半径（D18：沿用上游设置，不新增第二套）。
+# 上游默认边界上下文半径（D18）：与 entities.py SubtitleConfig.boundary_context_radius
+# 的默认值保持一致，后处理不新增第二套设置。
 DEFAULT_BOUNDARY_CONTEXT_RADIUS = 3
 
 ProblemKind = Literal["length", "speed", "semantic", "structure"]
@@ -114,40 +117,58 @@ class RepairSubject:
 
 @dataclass
 class BoundaryContext:
-    """一个主体的边界上下文：主体外相邻段，不是修改目标。
+    """一个批次的边界上下文：主体外相邻参考段，不是修改目标。
 
-    ``before`` / ``after`` 是与主体分开验收的参考段区间；
-    独立主体可以共享同一段上下文（D22）。
+    ``spans`` 是互不相交的升序半开区间；主体区间永远不在其中。
+    同批独立主体之间的间隙段在 radius 覆盖内时作为共享上下文
+    出现（D16/D22：仅上下文重叠不合并主体）。
     """
 
-    before: tuple[int, int] = (0, 0)  # 半开区间，空区间为 (k, k)
-    after: tuple[int, int] = (0, 0)
+    spans: tuple[tuple[int, int], ...] = ()
 
     def is_empty(self) -> bool:
-        return self.before[0] == self.before[1] and self.after[0] == self.after[1]
+        return not self.spans
+
+    def segment_count(self) -> int:
+        """上下文覆盖的段数（供预算与测试断言）。"""
+        return sum(end - start for start, end in self.spans)
 
 
-def _context_around(
-    span: tuple[int, int], radius: int, segment_count: int
+def _context_spans(
+    subjects: Sequence[RepairSubject], radius: int, segment_count: int
 ) -> BoundaryContext:
-    """主体上下各扩展 ``radius`` 个相邻段的边界上下文（不与主体重叠）。"""
+    """各主体上下扩展 ``radius`` 个相邻段、剔除主体区间后的共享上下文。
+
+    逐主体扩展再取并集（D16「向主体上下扩展」），主体段从上下文中
+    剔除（D16 上下文不成为修改目标）；独立主体之间的间隙段因此
+    可以同时出现在两个主体的上下文里（D22 共享上下文）。
+    """
     if radius < 0:
         raise ValueError("boundary context radius must not be negative")
-    start, end = span
-    before = (max(0, start - radius), start)
-    after = (end, min(segment_count, end + radius))
-    return BoundaryContext(before=before, after=after)
+    covered: set[int] = set()
+    context: set[int] = set()
+    for subject in subjects:
+        covered.update(range(subject.start_index, subject.end_index))
+        context.update(range(max(0, subject.start_index - radius), subject.start_index))
+        context.update(range(subject.end_index, min(segment_count, subject.end_index + radius)))
+    context -= covered
+    spans: List[tuple[int, int]] = []
+    for index in sorted(context):
+        if spans and index == spans[-1][1]:
+            spans[-1] = (spans[-1][0], index + 1)
+        else:
+            spans.append((index, index + 1))
+    return BoundaryContext(spans=tuple(spans))
 
 
 def merge_subjects(
-    problems: Sequence[PlanProblem], *, segment_count: int, adjacency_gap: int = 0
+    problems: Sequence[PlanProblem], *, segment_count: int
 ) -> List[RepairSubject]:
     """按主体重叠或相邻合并问题区域，保留原问题 ID 与原因（D22）。
 
-    主体按段区间排序后扫描：两个问题的主体区间重叠，或中间
-    隔不超过 ``adjacency_gap`` 个段（默认 0：直接相邻）时合并为
-    一个主体。仅边界上下文会重叠而主体独立的输入自然保持独立
-    （本函数只看主体区间，不扩展上下文）。
+    主体按段区间排序后扫描：两个问题的主体区间重叠或直接相邻
+    （中间无间隙段）时合并为一个主体。仅边界上下文会重叠而
+    主体独立的输入自然保持独立（本函数只看主体区间，不扩展上下文）。
     """
     if segment_count < 0:
         raise ValueError("segment_count must not be negative")
@@ -163,9 +184,7 @@ def merge_subjects(
         start, end = problem.segment_index, problem.segment_index + 1
         if subjects:
             last = subjects[-1]
-            gap = start - last.end_index
-            if gap <= adjacency_gap:
-                # 重叠（gap < 0）或相邻（gap == 0）：并入当前主体。
+            if start <= last.end_index:  # 重叠或直接相邻：并入当前主体。
                 last.end_index = max(last.end_index, end)
                 if problem.problem_id not in last.problem_ids:
                     last.problem_ids.append(problem.problem_id)
@@ -222,42 +241,41 @@ def estimate_plan_tokens(
 ) -> int:
     """保守估算一批请求的输入 token（不含固定 prompt 与输出预留）。
 
-    序列化估算沿用上游做法：JSON 化的载荷按 ASCII 3 字符 1 token、
-    非ASCII 1 token 保守计价；主体与上下文分开编码，边界上下文
-    显式标注，不与主体混淆。
+    计价直接复用上游 token planner 的 ``estimate_tokens``（单一来源，
+    D26 沿用上游做法）；主体与上下文分开编码，边界上下文显式
+    标注，不与主体混淆。
     """
     import json
 
-    def _side_span(span: tuple[int, int]) -> List[dict]:
-        start, end = span
-        return [
-            {"id": index, "text": asr_data.segments[index].text,
-             "translated": asr_data.segments[index].translated_text}
-            for index in range(start, end)
-        ]
+    from ..translate.enhanced.token_planner import estimate_tokens
+
+    def _segment_payload(index: int) -> dict:
+        segment = asr_data.segments[index]
+        return {
+            "id": index,
+            "text": segment.text,
+            "translated": segment.translated_text,
+        }
 
     payload = {
-        "boundary_context": {
-            "before": _side_span(context.before),
-            "after": _side_span(context.after),
-        },
+        "boundary_context": [
+            _segment_payload(index) for start, end in context.spans for index in range(start, end)
+        ],
         "repair_subjects": [
             {
-                "id": index,
-                "text": asr_data.segments[index].text,
-                "translated": asr_data.segments[index].translated_text,
+                "segments": [
+                    _segment_payload(index)
+                    for index in range(subject.start_index, subject.end_index)
+                ],
                 "problems": [
                     {"id": pid, "reason": reason}
                     for pid, reason in zip(subject.problem_ids, subject.reasons)
                 ],
             }
             for subject in subjects
-            for index in range(subject.start_index, subject.end_index)
         ],
     }
-    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    ascii_count = sum(1 for char in serialized if ord(char) < 128)
-    return max(1, -(-ascii_count // 3) + (len(serialized) - ascii_count))
+    return estimate_tokens(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def plan_repair_batches(
@@ -267,43 +285,35 @@ def plan_repair_batches(
     boundary_context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS,
     token_budget: Optional[int] = None,
     max_subjects_per_batch: int = 10,
-    adjacency_gap: int = 0,
 ) -> RepairPlan:
     """把问题规划为批量修复请求（D16/D22/D26）。
 
-    - 主体先合并（重叠 / 相邻），每个主体带 ``boundary_context_radius``
+    - 主体先合并（重叠 / 相邻），每批主体各带 ``boundary_context_radius``
       个相邻段上下文；上下文与主体分开表示。
     - 请求超出 ``token_budget`` 时沿用上游收缩顺序：先减少单批主体
       数量，再逐步减少上下文；单个主体在零上下文下仍超出预算时
       列入 ``unplannable`` 明确报告，不截断字幕内容。
-    - ``token_budget`` 为 None 表示不设输入预算（默认整批提交）。
+    - ``token_budget`` 为 None 表示不设输入预算（默认整批提交）；
+      ``max_subjects_per_batch`` 对应上游 ``batch_size``（D16 沿用
+      上游翻译的批次做法）。
     """
     if boundary_context_radius < 0:
         raise ValueError("boundary_context_radius must not be negative")
     if max_subjects_per_batch <= 0:
         raise ValueError("max_subjects_per_batch must be positive")
-    if adjacency_gap < 0:
-        raise ValueError("adjacency_gap must not be negative")
 
     segment_count = len(asr_data.segments)
     # 已解决问题不进入修复请求（D27：只重试仍未解决问题）。
     open_problems = [problem for problem in problems if not problem.resolved]
-    subjects = merge_subjects(
-        open_problems, segment_count=segment_count, adjacency_gap=adjacency_gap
-    )
+    subjects = merge_subjects(open_problems, segment_count=segment_count)
     plan = RepairPlan()
     if not subjects:
         return plan
 
-    def context_for(subjects_in_batch: Sequence[RepairSubject], radius: int) -> BoundaryContext:
-        start = subjects_in_batch[0].start_index
-        end = subjects_in_batch[-1].end_index
-        return _context_around((start, end), radius, segment_count)
-
     def fits(
         subjects_in_batch: Sequence[RepairSubject], radius: int
     ) -> Optional[RepairBatch]:
-        context = context_for(subjects_in_batch, radius)
+        context = _context_spans(subjects_in_batch, radius, segment_count)
         estimated = estimate_plan_tokens(asr_data, subjects_in_batch, context)
         if token_budget is not None and estimated > token_budget:
             return None
