@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from ..asr.asr_data import ASRData
 from ..entities import SubtitleLayoutEnum
@@ -13,7 +13,12 @@ from ..subtitle.io import clone_subtitle_data, import_subtitle, save_canonical_s
 from ..utils.logger import setup_logger
 from . import run_post_stage, run_pre_stage
 from .config import PostprocessConfig, config_payload
-from .models import PostprocessLayoutMode, PostprocessResult, PostprocessTask
+from .models import (
+    PostprocessAssetAdapter,
+    PostprocessLayoutMode,
+    PostprocessResult,
+    PostprocessTask,
+)
 from .profiles import PostprocessProfileStore
 from .report import QualityReport
 
@@ -128,6 +133,73 @@ def _has_aligned_timing_evidence(evidence: Iterable["TimingEvidenceWindow"]) -> 
     return any(window.quality_metrics.get("fallback") is not True for window in evidence)
 
 
+def _blocked_result(
+    task: PostprocessTask,
+    original: ASRData,
+    report: QualityReport,
+    layout: SubtitleLayoutEnum,
+    confidence: float,
+    warnings: list[str],
+    *,
+    status: Literal["invalid_initial", "cancelled", "fallback"],
+    used_fallback: bool = False,
+    error: str | None = None,
+    precise_timing_outcome: str | None = None,
+    precise_timing_grades: tuple[tuple[str, int], ...] | None = None,
+) -> PostprocessResult:
+    """Publish a halted task that rolls back to the 初版快照 and blocks 下游继续."""
+
+    task.status = status
+    if error is not None:
+        task.error = error
+    task.warnings = warnings
+    task.active_subtitle_path = task.initial_subtitle_path
+    task.result_data = clone_subtitle_data(original)
+    return PostprocessResult(
+        task,
+        original,
+        original,
+        report,
+        layout,
+        confidence,
+        tuple(warnings),
+        False,
+        used_fallback,
+        precise_timing_outcome,
+        precise_timing_grades,
+        continue_downstream=False,
+    )
+
+
+def _module_failure_result(
+    task: PostprocessTask,
+    original: ASRData,
+    report: QualityReport,
+    layout: SubtitleLayoutEnum,
+    confidence: float,
+    warnings: list[str],
+    exc: BaseException,
+    *,
+    precise_timing_outcome: str | None = None,
+    precise_timing_grades: tuple[tuple[str, int], ...] | None = None,
+) -> PostprocessResult:
+    warnings.append(f"字幕后处理失败，已回退到初版字幕: {exc}")
+    logger.warning("字幕后处理失败，已回退到初版字幕: %s", exc)
+    return _blocked_result(
+        task,
+        original,
+        report,
+        layout,
+        confidence,
+        warnings,
+        status="fallback",
+        used_fallback=True,
+        error=str(exc),
+        precise_timing_outcome=precise_timing_outcome,
+        precise_timing_grades=precise_timing_grades,
+    )
+
+
 def run_postprocess_task(
     task: PostprocessTask,
     *,
@@ -135,6 +207,8 @@ def run_postprocess_task(
     timing_windows: Iterable["TimingEvidenceWindow"] = (),
     timing_resolver: TimingResolver | None = None,
     gateway: Optional["LLMGateway"] = None,
+    assets: PostprocessAssetAdapter | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> PostprocessResult:
     """Run one isolated stage and fall back to its immutable initial subtitle.
 
@@ -153,10 +227,28 @@ def run_postprocess_task(
         confidence,
     )
     original = clone_subtitle_data(input_data)
-    # An invalid initial hand-off is not a postprocess failure and cannot be a
-    # valid fallback.  Let the workflow terminate instead of claiming success.
-    _validate_output(original)
+    # An invalid initial hand-off is not a module-level processing failure and
+    # cannot be a valid fallback.  Publish a distinct status and block downstream.
+    try:
+        _validate_output(original)
+    except ValueError as exc:
+        warnings.append(f"初版字幕无效，已阻断下游: {exc}")
+        report = QualityReport(segment_count=len(original.segments))
+        return _blocked_result(
+            task,
+            original,
+            report,
+            layout,
+            confidence,
+            warnings,
+            status="invalid_initial",
+            error=str(exc),
+        )
     report = QualityReport(segment_count=len(input_data.segments))
+    if cancelled is not None and cancelled():
+        return _blocked_result(
+            task, original, report, layout, confidence, warnings, status="cancelled"
+        )
     if not task.enabled:
         task.status = "skipped"
         task.active_subtitle_path = task.initial_subtitle_path
@@ -175,6 +267,17 @@ def run_postprocess_task(
     config = PostprocessConfig(**config_payload(config))
     config.utility_llm_profile = injected
     task.config_snapshot = config
+    if assets is not None:
+        try:
+            assets.discover(task)
+        except InterruptedError:
+            return _blocked_result(
+                task, original, report, layout, confidence, warnings, status="cancelled"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _module_failure_result(
+                task, original, report, layout, confidence, warnings, exc
+            )
     evidence = tuple(timing_windows) if config.precise_timing else ()
     # Visible outcome of 媒体增强对齐 / 对齐时间轴 (see CONTEXT.md).  None = not
     # requested; otherwise one of "applied" / "degraded_no_media" / "degraded_failed".
@@ -185,6 +288,10 @@ def run_postprocess_task(
             try:
                 evidence = tuple(timing_resolver(task, original, layout))
                 warnings.extend(item for item in task.warnings if item not in warnings)
+            except InterruptedError:
+                return _blocked_result(
+                    task, original, report, layout, confidence, warnings, status="cancelled"
+                )
             except Exception as exc:  # noqa: BLE001
                 warnings.append(f"对齐时间轴生成失败，已降级为字幕内部估算时间轴: {exc}")
                 # Drop any caller-supplied windows so "degraded_failed" truly
@@ -269,26 +376,29 @@ def run_postprocess_task(
         if output.resolve() == source:
             raise ValueError("postprocess output must not overwrite its input subtitle")
         output = save_canonical_srt(working, output, layout=layout)
-    except Exception as exc:  # noqa: BLE001
-        task.status = "fallback"
-        task.error = str(exc)
-        warnings.append(f"字幕后处理失败，已回退到初版字幕: {exc}")
-        task.warnings = warnings
-        task.active_subtitle_path = task.initial_subtitle_path
-        task.result_data = clone_subtitle_data(original)
-        logger.warning("字幕后处理失败，已回退到初版字幕: %s", exc)
-        return PostprocessResult(
+    except InterruptedError:
+        return _blocked_result(
             task,
-            original,
             original,
             report,
             layout,
             confidence,
-            tuple(warnings),
-            False,
-            True,
-            precise_timing_outcome,
-            precise_timing_grades,
+            warnings,
+            status="cancelled",
+            precise_timing_outcome=precise_timing_outcome,
+            precise_timing_grades=precise_timing_grades,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _module_failure_result(
+            task,
+            original,
+            report,
+            layout,
+            confidence,
+            warnings,
+            exc,
+            precise_timing_outcome=precise_timing_outcome,
+            precise_timing_grades=precise_timing_grades,
         )
 
     task.status = "completed"
@@ -312,4 +422,4 @@ def run_postprocess_task(
     )
 
 
-__all__ = ["TimingResolver", "run_postprocess_task"]
+__all__ = ["PostprocessAssetAdapter", "TimingResolver", "run_postprocess_task"]

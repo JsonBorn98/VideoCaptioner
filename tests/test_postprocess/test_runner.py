@@ -267,14 +267,13 @@ def test_invalid_initial_subtitle_is_not_reported_as_a_valid_fallback(tmp_path):
     source = tmp_path / "empty.srt"
     source.write_text("", encoding="utf-8")
 
-    try:
-        run_postprocess_task(
-            PostprocessTask(str(source), config_snapshot=PostprocessConfig())
-        )
-    except ValueError as exc:
-        assert "empty subtitle" in str(exc)
-    else:
-        raise AssertionError("invalid initial subtitle must terminate the task")
+    result = run_postprocess_task(
+        PostprocessTask(str(source), config_snapshot=PostprocessConfig())
+    )
+
+    assert result.task.status == "invalid_initial"
+    assert not result.used_fallback
+    assert not result.continue_downstream
 
 
 def test_analyze_is_stage_wide_read_only_and_keeps_initial_as_active(tmp_path):

@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional, Protocol
 
 from ..entities import SubtitleLayoutEnum
 from ..subtitle.io import canonical_stage_path
@@ -55,9 +55,15 @@ class PostprocessTask:
     enabled: bool = True
     need_next_task: bool = False
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    status: Literal["pending", "running", "completed", "fallback", "skipped", "cancelled"] = (
-        "pending"
-    )
+    status: Literal[
+        "pending",
+        "running",
+        "completed",
+        "fallback",
+        "skipped",
+        "cancelled",
+        "invalid_initial",
+    ] = "pending"
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -69,6 +75,13 @@ class PostprocessTask:
     def default_output_path(self) -> str:
         source = Path(self.initial_subtitle_path or self.source_subtitle_path)
         return str(canonical_stage_path(source, "后处理字幕"))
+
+
+class PostprocessAssetAdapter(Protocol):
+    """Injected process-asset seam. Discovery behavior is filled in later."""
+
+    def discover(self, task: PostprocessTask) -> None:
+        """Inspect or attach process assets for this frozen task."""
 
 
 @dataclass(frozen=True)
@@ -91,3 +104,5 @@ class PostprocessResult:
     # (等级名, 数量) 序列，等级名取 "HIGH"/"MEDIUM"/"LOW"，按 HIGH→MEDIUM→LOW 排序、只含计数>0 者。
     precise_timing_outcome: Optional[str] = None
     precise_timing_grades: Optional[tuple[tuple[str, int], ...]] = None
+    # 下游继续：正常完成/跳过允许下游；无效初版、模块级失败、取消阻断下游。
+    continue_downstream: bool = True

@@ -42,6 +42,7 @@ __all__ = [
     "PostprocessProfileStore",
     "PostprocessResult",
     "PostprocessTask",
+    "PostprocessAssetAdapter",
     "run_postprocess_task",
 ]
 
@@ -219,6 +220,7 @@ def run_post_stage(
 
 # Public stage API.  Imports live after the functions so runner can reuse this
 # module without a circular initialization dependency.
+from .models import PostprocessAssetAdapter as PostprocessAssetAdapter  # noqa: E402
 from .models import PostprocessLayoutMode as PostprocessLayoutMode  # noqa: E402
 from .models import PostprocessResult as PostprocessResult  # noqa: E402
 from .models import PostprocessTask as PostprocessTask  # noqa: E402
