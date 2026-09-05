@@ -12,6 +12,11 @@ from typing import Any, List, Literal, Optional
 
 from ..llm.models import LLMModelProfile
 
+# 显示模式取值（D02/D19，见 viewing.py）。定义在此处（无依赖）：校验与
+# viewing.py 共用同一来源，避免模式字面值在两处各自漂移。
+SINGLE_LINE = "single_line"
+AUTO_WRAP = "auto_wrap"
+
 
 @dataclass
 class PostprocessConfig:
@@ -230,8 +235,8 @@ class PostprocessConfig:
         # 显示侧长度策略（D02/D03/D25）：模式取值与排序校验——目标上限不得
         # 高于绝对上限；两侧上限都为正，否则单行限长验收没有有效硬条件。
         for field_name in ("original_display_mode", "translated_display_mode"):
-            if getattr(self, field_name) not in ("single_line", "auto_wrap"):
-                raise ValueError(f"{field_name} must be 'single_line' or 'auto_wrap'")
+            if getattr(self, field_name) not in (SINGLE_LINE, AUTO_WRAP):
+                raise ValueError(f"{field_name} must be '{SINGLE_LINE}' or '{AUTO_WRAP}'")
         for side_name in ("cjk", "latin"):
             target = getattr(self, f"single_line_target_{side_name}")
             absolute = getattr(self, f"single_line_absolute_{side_name}")
@@ -254,8 +259,8 @@ class PostprocessConfig:
     def any_viewing_single_line(self) -> bool:
         """任一显示侧仍为单行限长（决定是否执行显示长度扫描）。"""
         return (
-            self.original_display_mode == "single_line"
-            or self.translated_display_mode == "single_line"
+            self.original_display_mode == SINGLE_LINE
+            or self.translated_display_mode == SINGLE_LINE
         )
 
     def audit_enabled(self) -> bool:

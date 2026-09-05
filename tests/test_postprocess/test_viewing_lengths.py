@@ -30,7 +30,8 @@ def _data(*pairs: tuple[str, str]) -> ASRData:
 def test_weighted_length_weights():
     # CJK/全角计 1；拉丁字母、数字、半角标点计 0.5；空白及零宽格式字符计 0；其他符号计 1。
     assert weighted_length("你好世界") == 4.0
-    assert weighted_length("ｈｅｌｌｏ"[0:0] + "hello") == 2.5
+    assert weighted_length("ｈｅｌｌｏ") == 5.0  # 全角字母按全角形式计 1
+    assert weighted_length("hello") == 2.5
     assert weighted_length("abc 123") == 3.0  # 6 个半角字符 × 0.5，空格计 0
     assert weighted_length("你好 hello") == 2.0 + 2.5
     assert weighted_length("　") == 0.0  # 全角空格是空白

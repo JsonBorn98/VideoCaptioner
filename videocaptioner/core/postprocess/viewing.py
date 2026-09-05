@@ -18,16 +18,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Literal
 
 from ..entities import SubtitleLayoutEnum
-from .config import PostprocessConfig
+from .config import SINGLE_LINE, PostprocessConfig
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
 
 Side = Literal["original", "translated"]
-
-SINGLE_LINE = "single_line"
-AUTO_WRAP = "auto_wrap"
-DISPLAY_MODES = (SINGLE_LINE, AUTO_WRAP)
 
 # CJK / 全角：按 1 计。表意空格 U+3000 属空白，先于本表按 0 处理。
 _CJK_RANGES = (
@@ -67,7 +63,8 @@ def _char_weight(char: str) -> float:
 
 
 def _is_cjk_char(char: str) -> bool:
-    if char.isspace() or unicodedata.category(char) == "Cf":
+    """有效计权字符中是否 CJK/全角（空白与零宽格式字符先排除）。"""
+    if _char_weight(char) <= 0:
         return False
     return _in_ranges(ord(char), _CJK_RANGES)
 
@@ -90,7 +87,7 @@ def effective_length_limit(
     for char in text:
         weight = _char_weight(char)
         total_weight += weight
-        if weight > 0 and _is_cjk_char(char):
+        if _is_cjk_char(char):
             cjk_weight += weight
     if total_weight <= 0:
         return float(latin_limit)
@@ -126,6 +123,29 @@ def sides_for_layout(layout: SubtitleLayoutEnum) -> tuple[Side, ...]:
     return ("original", "translated")
 
 
+def _make_problem(
+    kind: str,
+    side: Side,
+    index: int,
+    text: str,
+    length: float,
+    absolute: float,
+    target: float,
+    reason: str,
+) -> ViewingProblem:
+    """按已计算的长度事实构造一个观看长度问题（长度/行数共用）。"""
+    return ViewingProblem(
+        problem_id=f"{kind}:{side}:{index}",
+        side=side,
+        segment_index=index,
+        text=text,
+        weighted_length=length,
+        absolute_limit=absolute,
+        target_limit=target,
+        reason=reason,
+    )
+
+
 def scan_viewing_lengths(
     asr_data: "ASRData", cfg: PostprocessConfig, layout: SubtitleLayoutEnum
 ) -> List[ViewingProblem]:
@@ -154,41 +174,37 @@ def scan_viewing_lengths(
                 cjk_limit=cfg.single_line_target_cjk,
                 latin_limit=cfg.single_line_target_latin,
             )
+
             if "\n" in text.strip():
                 problems.append(
-                    ViewingProblem(
-                        problem_id=f"lines:{side}:{index}",
-                        side=side,
-                        segment_index=index,
-                        text=text,
-                        weighted_length=length,
-                        absolute_limit=absolute,
-                        target_limit=target,
-                        reason="单行限长模式下显示侧行数超过单行",
+                    _make_problem(
+                        "lines",
+                        side,
+                        index,
+                        text,
+                        length,
+                        absolute,
+                        target,
+                        "单行限长模式下显示侧行数超过单行",
                     )
                 )
             if length > absolute:
                 problems.append(
-                    ViewingProblem(
-                        problem_id=f"length:{side}:{index}",
-                        side=side,
-                        segment_index=index,
-                        text=text,
-                        weighted_length=length,
-                        absolute_limit=absolute,
-                        target_limit=target,
-                        reason=(
-                            f"折算字符数 {length:g} 超过有效绝对上限 {absolute:g}"
-                        ),
+                    _make_problem(
+                        "length",
+                        side,
+                        index,
+                        text,
+                        length,
+                        absolute,
+                        target,
+                        f"折算字符数 {length:g} 超过有效绝对上限 {absolute:g}",
                     )
                 )
     return problems
 
 
 __all__ = [
-    "AUTO_WRAP",
-    "DISPLAY_MODES",
-    "SINGLE_LINE",
     "Side",
     "ViewingProblem",
     "effective_length_limit",

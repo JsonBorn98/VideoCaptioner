@@ -228,6 +228,8 @@ def run_post_stage(
             report.viewing_problems.extend(problems)
             if problems:
                 logger.info("显示长度扫描：%d 个观看长度问题", len(problems))
+        except InterruptedError:
+            raise
         except Exception as exc:  # noqa: BLE001 —— 后处理不得阻断管线
             logger.warning("显示长度扫描失败，已跳过: %s", exc)
 
