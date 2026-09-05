@@ -353,12 +353,7 @@ class BatchProcessThread(QThread):
         task.input_data = subtitle_task.result_data
         task.workflow_base_name = subtitle_task.workflow_base_name
         # 翻译执行快照（票 06，D15）：后处理修复方式与字幕阶段冻结的任务对齐。
-        task.translation_snapshot = subtitle_task.translation_execution_snapshot
-        task.translation_method = (
-            subtitle_task.translation_execution_snapshot.method
-            if subtitle_task.translation_execution_snapshot is not None
-            else ""
-        )
+        task.bind_translation_snapshot(subtitle_task.translation_execution_snapshot)
         task.export_policy = batch_task.export_policy
         task.media_path = video_path or (batch_task.file_path if full_process else None)
         source = Path(subtitle_path)

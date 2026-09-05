@@ -85,6 +85,20 @@ class PostprocessTask:
         self.initial_subtitle_path = self.initial_subtitle_path or self.source_subtitle_path
         self.active_subtitle_path = self.active_subtitle_path or self.initial_subtitle_path
 
+    def bind_translation_snapshot(
+        self, snapshot: Optional["TranslationExecutionSnapshot"]
+    ) -> None:
+        """绑定任务开始时冻结的翻译执行快照（票 06，D15）。
+
+        统一各适配层的赋值口径：快照与其翻译方式一起绑定；空快照
+        不覆盖已绑定的内容（显式传入 None 只表示「没有可绑的」）。
+        """
+        if snapshot is None:
+            return
+        self.translation_snapshot = snapshot
+        if not self.translation_method.strip():
+            self.translation_method = snapshot.method
+
     def default_output_path(self) -> str:
         source = Path(self.initial_subtitle_path or self.source_subtitle_path)
         return str(canonical_stage_path(source, "后处理字幕"))

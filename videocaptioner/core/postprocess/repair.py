@@ -52,6 +52,7 @@ from .translation import (
     RepairFlow,
     TranslationExecutionSnapshot,
     resolve_repair_flow,
+    role_label,
 )
 from .viewing import (
     char_count,
@@ -79,13 +80,6 @@ MAX_ROUNDS = 16
 # 问题稳定身份：working 段序会因拆分漂移，跨轮计数一律用
 # (初版段序, 显示侧, 问题类别)；problem_id 只在一次请求内对模型显式绑定。
 ProblemIdentity = Tuple[int, str, str]
-
-
-def _role_label(profile: Optional["LLMModelProfile"]) -> str:
-    """角色身份的可读标签（报告 / 任务状态消费，无连接机密）。"""
-    if profile is None:
-        return ""
-    return f"{profile.profile_id} / {profile.model}"
 
 
 def select_repair_flow(
@@ -739,8 +733,8 @@ def execute_viewing_repair(
     summary = RepairSummary()
     summary.translation_method = snapshot.method if snapshot is not None else ""
     summary.flow_mode = flow.mode
-    summary.main_role = _role_label(flow.main_profile)
-    summary.review_role = _role_label(flow.review_profile)
+    summary.main_role = role_label(flow.main_profile, None)
+    summary.review_role = role_label(flow.review_profile, None)
     summary.boundary_context_radius = (
         boundary_context_radius
         if boundary_context_radius is not None

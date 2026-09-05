@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from ..utils.text_utils import is_mainly_cjk
+from .translation import flow_mode_label
 
 if TYPE_CHECKING:
     from ..speed.pipeline import SpeedOptimizationResult
@@ -208,12 +209,9 @@ def build_qa_report(report: QualityReport) -> str:
     if repair is not None:
         # 修复方式选择与角色身份（票 06，D15）：进入报告便于核对实际行为。
         method_label = repair.translation_method or "未知"
-        flow_label = {
-            "main_review": "主翻译 + 高级校对",
-            "main": "仅主翻译",
-            "report_only": "未执行模型修复",
-        }.get(repair.flow_mode, repair.flow_mode or "未执行模型修复")
-        lines.append(f"- 修复方式: {method_label} -> {flow_label}\n")
+        lines.append(
+            f"- 修复方式: {method_label} -> {flow_mode_label(repair.flow_mode)}\n"
+        )
         if repair.main_role:
             lines.append(f"- 主翻译角色: {repair.main_role}\n")
         if repair.review_role:

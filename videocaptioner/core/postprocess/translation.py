@@ -50,6 +50,22 @@ class TranslationRoleIdentity:
     name: str = ""
     model: str = ""
 
+    def label(self) -> str:
+        """角色身份的可读标签（报告 / 任务状态消费，无连接机密）。"""
+        return " / ".join(part for part in (self.profile_id, self.model) if part)
+
+
+def role_label(
+    profile: Optional["LLMModelProfile"],
+    identity: Optional[TranslationRoleIdentity],
+) -> str:
+    """角色标签的唯一实现：运行期对象优先，其次持久化身份，无则空。"""
+    if profile is not None:
+        return f"{profile.profile_id} / {profile.model}"
+    if identity is not None:
+        return identity.label()
+    return ""
+
 
 def _identity_from_profile(
     role: str, profile: Optional["LLMModelProfile"]
@@ -85,22 +101,6 @@ class TranslationExecutionSnapshot:
     review_identity: Optional[TranslationRoleIdentity] = None
     source_language: str = ""
     target_language: str = ""
-
-    def describe_role(self, role: str) -> str:
-        """角色身份的可读描述（报告 / 任务状态消费，无连接机密）。"""
-        if role == "main":
-            profile, identity = self.main_profile, self.main_identity
-        elif role == "review":
-            profile, identity = self.review_profile, self.review_identity
-        else:
-            raise ValueError(f"unknown translation role: {role}")
-        if profile is not None:
-            return f"{profile.profile_id} / {profile.model}"
-        if identity is not None:
-            return " / ".join(
-                part for part in (identity.profile_id, identity.model) if part
-            )
-        return ""
 
     def to_persisted(self) -> Dict[str, Any]:
         """可持久化载荷：方式、半径、语言与角色身份，无连接机密与提示词。"""
@@ -222,6 +222,59 @@ def snapshot_from_subtitle_config(config) -> TranslationExecutionSnapshot:
 
 
 @dataclass(frozen=True)
+class _CliSnapshotConfig:
+    """CLI 字幕命令解析结果的快照源（喂给 snapshot_from_subtitle_config）。
+
+    与 ``SubtitleConfig`` 同一属性契约：``effective_translation_mode``
+    是方法（不是 property），``target_language`` 是裸值（工厂里再取
+    ``.value``，str 无 value 属性会原样返回）。
+    """
+
+    main_llm_profile: Optional["LLMModelProfile"] = None
+    review_llm_profile: Optional["LLMModelProfile"] = None
+    main_translation_prompt: str = ""
+    review_translation_prompt: str = ""
+    source_language: str = "auto"
+    target_language: str = ""
+    _method: str = METHOD_NON_LLM
+    _radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS
+
+    def effective_translation_mode(self) -> str:
+        return self._method
+
+    @property
+    def boundary_context_radius(self) -> int:
+        return self._radius
+
+
+def cli_translation_snapshot(
+    *,
+    translation_mode: str,
+    need_translate: bool,
+    main_profile: Optional["LLMModelProfile"],
+    review_profile: Optional["LLMModelProfile"],
+    main_prompt: str,
+    review_prompt: str,
+    source_language: str,
+    target_language: str,
+    boundary_context_radius: int,
+) -> TranslationExecutionSnapshot:
+    """CLI 路径的快照冻结：复用 SubtitleConfig 的同一冻结形状。"""
+    return snapshot_from_subtitle_config(
+        _CliSnapshotConfig(
+            main_llm_profile=main_profile if need_translate else None,
+            review_llm_profile=review_profile if need_translate else None,
+            main_translation_prompt=main_prompt,
+            review_translation_prompt=review_prompt,
+            source_language=source_language if need_translate else "auto",
+            target_language=target_language,
+            _method=translation_mode if need_translate and translation_mode else METHOD_NON_LLM,
+            _radius=boundary_context_radius,
+        )
+    )
+
+
+@dataclass(frozen=True)
 class RepairFlow:
     """从冻结快照选出的修复方式（repair.py 消费）。
 
@@ -234,6 +287,19 @@ class RepairFlow:
     main_profile: Optional["LLMModelProfile"] = None
     review_profile: Optional["LLMModelProfile"] = None
     boundary_context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS
+
+
+# 修复方式的共享中文标签（报告 / 状态摘要共用；单一来源，见 repair.report/summary）。
+FLOW_MODE_LABELS = {
+    "main_review": "主翻译+高级校对",
+    "main": "仅主翻译",
+    "report_only": "仅报告",
+}
+
+
+def flow_mode_label(mode: str) -> str:
+    """修复方式标签；未知方式回退到方式串本身（不吞错，也不阻断报告）。"""
+    return FLOW_MODE_LABELS.get(mode, mode or "仅报告")
 
 
 def resolve_repair_flow(
@@ -295,24 +361,26 @@ def resolve_repair_flow(
     return RepairFlow("report_only", f"翻译方式未知（{snapshot.method!r}），不猜测配置")
 
 
-def store_profile_resolver(store=None):
+def store_profile_resolver():
     """按快照记录的角色身份解析角色连接（独立任务复用已验证过程资产）。
 
     只在快照缺少运行期角色对象时被调用：按持久化身份中的
     ``profile_id`` 查方案库，且 ``name`` / ``model`` 与身份一致才复用；
     身份漂移（方案已被改动）或缺失一律返回 None——不静默替换角色
-    （D15 不猜测配置 / D17 复用必须可验证）。``store`` 为 None 时
-    惰性新建默认方案库。
+    （D15 不猜测配置 / D17 复用必须可验证）。方案库惰性加载。
     """
 
     from ..llm.profiles import LLMProfileNotFoundError
 
-    def _store():
-        if store is not None:
-            return store
-        from ..llm.profiles import LLMModelProfileStore
+    store = None
 
-        return LLMModelProfileStore()
+    def _store():
+        nonlocal store
+        if store is None:
+            from ..llm.profiles import LLMModelProfileStore
+
+            store = LLMModelProfileStore()
+        return store
 
     def resolve(role: str, snapshot: TranslationExecutionSnapshot):
         identity = snapshot.main_identity if role == "main" else snapshot.review_identity
@@ -346,8 +414,11 @@ __all__ = [
     "TRANSLATION_SNAPSHOT_VERSION",
     "TranslationExecutionSnapshot",
     "TranslationRoleIdentity",
+    "cli_translation_snapshot",
+    "flow_mode_label",
     "load_translation_snapshot_file",
     "resolve_repair_flow",
+    "role_label",
     "snapshot_from_subtitle_config",
     "store_profile_resolver",
 ]

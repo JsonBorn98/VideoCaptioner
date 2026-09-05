@@ -145,13 +145,8 @@ class SubtitlePipelineThread(QThread):
             postprocess_task.input_data = subtitle_task.result_data
             postprocess_task.workflow_base_name = subtitle_task.workflow_base_name
             # 翻译执行快照（票 06，D15）：后处理修复方式与字幕阶段冻结的任务对齐。
-            postprocess_task.translation_snapshot = (
+            postprocess_task.bind_translation_snapshot(
                 subtitle_task.translation_execution_snapshot
-            )
-            postprocess_task.translation_method = (
-                subtitle_task.translation_execution_snapshot.method
-                if subtitle_task.translation_execution_snapshot is not None
-                else ""
             )
             postprocess_task.export_policy = self.task.export_policy
             initial = Path(subtitle_task.output_path or "subtitle.srt")

@@ -24,7 +24,7 @@ from .models import (
 from .profiles import PostprocessProfileStore
 from .repair import execute_viewing_repair
 from .report import QualityReport
-from .translation import load_translation_snapshot_file
+from .translation import load_translation_snapshot_file, store_profile_resolver
 from .workspace import FilesystemAssetStore, fingerprint_subtitle
 
 if TYPE_CHECKING:
@@ -136,14 +136,6 @@ def _has_aligned_timing_evidence(evidence: Iterable["TimingEvidenceWindow"]) -> 
     """Return whether at least one window contains media-derived timing evidence."""
 
     return any(window.quality_metrics.get("fallback") is not True for window in evidence)
-
-
-def _snapshot_profile_resolver():
-    """按快照角色身份解析连接的延迟解析器（票 06）；方案库惰性加载。"""
-
-    from .translation import store_profile_resolver
-
-    return store_profile_resolver(None)
 
 
 def _blocked_result(
@@ -394,7 +386,7 @@ def run_postprocess_task(
         )
         # 修复方式按任务冻结快照选择（票 06，D15）：快照角色连接缺失时按
         # 角色身份从方案库显式解析（可验证的资产身份才复用）。
-        repair_resolver = _snapshot_profile_resolver()
+        repair_resolver = store_profile_resolver()
         with borrow_utility_gateway(gateway) if needs_repair else _nullcontext(gateway) as runtime:
             working, report = run_post_stage(
                 working,

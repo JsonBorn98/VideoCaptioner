@@ -500,16 +500,12 @@ def run(args: Namespace, config: dict) -> int:
         # 4. Save the initial subtitle. Postprocessing is a separate command/stage.
         # 翻译执行快照（票 06，D15）：方式 / 角色 / 提示在解析与执行时冻结，
         # 落到 args 上供 process 管线把后处理修复方式与原任务对齐。
-        from videocaptioner.core.postprocess.translation import (
-            TranslationExecutionSnapshot,
-        )
+        from videocaptioner.core.postprocess.translation import cli_translation_snapshot
         from videocaptioner.core.subtitle.io import save_canonical_srt
 
-        args.translation_execution_snapshot = TranslationExecutionSnapshot(
-            method=(
-                translation_mode if need_translate and translation_mode else "non_llm"
-            ),
-            boundary_context_radius=int(get(config, "translate.boundary_context_radius", 3)),
+        args.translation_execution_snapshot = cli_translation_snapshot(
+            translation_mode=translation_mode,
+            need_translate=need_translate,
             main_profile=main_translation_profile,
             review_profile=review_translation_profile,
             main_prompt=custom_prompt or "",
@@ -517,6 +513,7 @@ def run(args: Namespace, config: dict) -> int:
             # 惰性条件：未开启翻译时 source_language 从未赋值，不要求翻译语言。
             source_language=source_language if need_translate else "auto",
             target_language=target_lang_code,
+            boundary_context_radius=int(get(config, "translate.boundary_context_radius", 3)),
         )
 
         output_path = str(save_canonical_srt(asr_data, output_path, layout=layout))
