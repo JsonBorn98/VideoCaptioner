@@ -173,7 +173,11 @@ class SubtitlePipelineThread(QThread):
             # result 为 None 表示线程级意外失败（run_postprocess_task 抛出，
             # 例如初版无效）——同样阻断。
             postprocess_result = postprocess_thread.result
-            if postprocess_result is None or not postprocess_result.continue_downstream:
+            if (
+                postprocess_result is None
+                or not postprocess_result.continue_downstream
+                or postprocess_task.status == "cancelled"
+            ):
                 logger.warning(
                     "字幕后处理未成功完成（状态 %s），阻断视频合成", postprocess_task.status
                 )

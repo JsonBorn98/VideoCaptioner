@@ -102,6 +102,7 @@ class PostprocessThread(QThread):
                 self.task,
                 timing_resolver=_resolve_timing,
                 gateway=self._injected_gateway,
+                cancelled=self.isInterruptionRequested,
             )
             if self._finish_if_cancelled():
                 return

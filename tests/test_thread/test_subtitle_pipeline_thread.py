@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import (
     FullProcessTask,
     SubtitleConfig,
+    SubtitleLayoutEnum,
     SubtitleTask,
     SynthesisTask,
     TranscribeConfig,
@@ -21,7 +25,8 @@ from videocaptioner.core.llm.models import (
     ProviderDialect,
 )
 from videocaptioner.core.postprocess.config import PostprocessConfig
-from videocaptioner.core.postprocess.models import PostprocessTask
+from videocaptioner.core.postprocess.models import PostprocessResult, PostprocessTask
+from videocaptioner.core.postprocess.report import QualityReport
 from videocaptioner.core.translate.enhanced.models import (
     AuthoritativeGlossary,
     EnhancedTranslationResult,
@@ -417,3 +422,140 @@ def test_injected_postprocess_gateway_is_never_closed(tmp_path, monkeypatch, qap
 
     assert gateway.requests
     assert gateway.closed is False
+
+
+def _canned_postprocess_result(task: PostprocessTask, *, continue_downstream: bool, status: str):
+    data = ASRData([ASRDataSeg("Hello", 0, 1000, "你好")])
+    task.status = status
+    task.result_data = data
+    task.active_subtitle_path = str(
+        Path(task.source_subtitle_path).with_name("【后处理字幕】video.srt")
+    )
+    return PostprocessResult(
+        task,
+        data,
+        data,
+        QualityReport(),
+        SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        1.0,
+        succeeded=continue_downstream,
+        used_fallback=status == "fallback",
+        continue_downstream=continue_downstream,
+    )
+
+
+def _run_pipeline_with_canned_postprocess(
+    tmp_path, monkeypatch, qapp, *, continue_downstream: bool, status: str
+):
+    synthesis_calls = []
+
+    class FakePostprocessThread:
+        def __init__(self, task, gateway=None):
+            self.task = task
+            self.result = None
+            self.progress = _Signal()
+            self.error = _Signal()
+
+        def run(self):
+            self.result = _canned_postprocess_result(
+                self.task, continue_downstream=continue_downstream, status=status
+            )
+
+    class RecordingSynthesisThread:
+        def __init__(self, task):
+            self.task = task
+            self.progress = _Signal()
+            self.error = _Signal()
+
+        def run(self):
+            synthesis_calls.append(self.task.subtitle_path)
+
+    monkeypatch.setattr(pipeline_module, "PostprocessThread", FakePostprocessThread)
+    monkeypatch.setattr(pipeline_module, "LLMGateway", TrackingGateway)
+    _patch_transcript_and_synthesis(monkeypatch, tmp_path, _word_source())
+    monkeypatch.setattr(pipeline_module, "VideoSynthesisThread", RecordingSynthesisThread)
+    _patch_subtitle_consumers(monkeypatch, tmp_path, {})
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"")
+    postprocess_task = PostprocessTask(
+        source_subtitle_path=str(tmp_path / "placeholder.srt"),
+        config_snapshot=PostprocessConfig(trim_trailing_punct=False),
+    )
+    task = FullProcessTask(
+        file_path=str(video),
+        workflow_base_name="video",
+        transcribe_config=TranscribeConfig(),
+        subtitle_config=_subtitle_config(),
+        postprocess_enabled=True,
+        postprocess_task=postprocess_task,
+    )
+    errors = []
+    thread = SubtitlePipelineThread(task)
+    thread.error.connect(errors.append)
+    thread.run()
+    return errors, synthesis_calls
+
+
+@pytest.mark.parametrize(
+    ("continue_downstream", "status", "expect_synthesis"),
+    [
+        (True, "completed", True),
+        (False, "fallback", False),
+        (False, "cancelled", False),
+        (True, "cancelled", False),
+    ],
+)
+def test_pipeline_gates_synthesis_on_postprocess_continue_flag(
+    tmp_path, monkeypatch, qapp, continue_downstream, status, expect_synthesis
+):
+    errors, synthesis_calls = _run_pipeline_with_canned_postprocess(
+        tmp_path,
+        monkeypatch,
+        qapp,
+        continue_downstream=continue_downstream,
+        status=status,
+    )
+    if expect_synthesis:
+        assert errors == []
+        assert synthesis_calls
+    else:
+        assert errors
+        assert synthesis_calls == []
+
+
+def test_postprocess_thread_forwards_cancellation_into_task_seam(tmp_path, monkeypatch, qapp):
+    from threading import Event
+
+    entered = Event()
+    release = Event()
+    captured = {}
+
+    def fake_run(task, **kwargs):
+        callback = kwargs.get("cancelled")
+        captured["callable"] = callable(callback)
+        captured["before"] = callback() if callback else None
+        entered.set()
+        assert release.wait(5)
+        captured["after"] = callback() if callback else None
+        raise RuntimeError("capture only")
+
+    monkeypatch.setattr(
+        "videocaptioner.ui.thread.postprocess_thread.run_postprocess_task",
+        fake_run,
+    )
+    source = tmp_path / "【初版字幕】sample.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\n译文。\n", encoding="utf-8"
+    )
+    thread = PostprocessThread(
+        PostprocessTask(str(source), config_snapshot=PostprocessConfig())
+    )
+    thread.start()
+    assert entered.wait(5)
+    thread.stop()
+    release.set()
+    assert thread.wait(5000)
+    assert captured["callable"] is True
+    assert captured["before"] is False
+    assert captured["after"] is True

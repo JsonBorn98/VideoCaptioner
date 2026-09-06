@@ -124,6 +124,10 @@ _LEGACY_DROP_FIELDS = frozenset(
         # 保留任何允许改写原文的开关。旧档残留值直接丢弃、不迁移、不兼容
         # 读取——残留旧值不改变新任务行为；文本能力只作用于译文侧。
         "optimize_both_sides",
+        # 票 07 退役的上游观看限长：从未属于后处理配置。旧档或手改残留
+        # 直接丢弃，不迁移成新的显示侧上限，也不阻断新任务加载。
+        "max_word_count_cjk",
+        "max_word_count_english",
     }
 )
 

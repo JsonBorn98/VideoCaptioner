@@ -20,8 +20,10 @@ from videocaptioner.core.llm import (
     ProviderDialect,
 )
 from videocaptioner.core.postprocess import PostprocessConfig
+from videocaptioner.core.postprocess import repair as repair_module
 from videocaptioner.core.postprocess.repair import execute_viewing_repair
 from videocaptioner.core.postprocess.report import QualityReport
+from videocaptioner.core.postprocess.viewing import ViewingProblem
 
 
 def _profile() -> LLMModelProfile:
@@ -338,6 +340,92 @@ def test_duplicate_candidate_rollback_on_repeat_after_failure():
     # 1 正常提交 + 4 业务重试耗尽 → 局部回退（不是重复候选路径）。
     assert summary.requests == 5
     assert summary.rollbacks and summary.rollbacks[0].reason == "业务修复重试耗尽"
+
+
+class _AlwaysProblematicScan:
+    """Fake 扫描：每轮都在指定段报同一条长度问题，无视字幕实际内容。
+
+    修复循环的不变量是「验收通过的候选拼回后不会再被扫描报告」
+    （片段已满足绝对上限）。破坏该不变量（模拟未来会重新标记已接受
+    区域的问题类型），D27 的重复候选 / 区域状态重复守卫才是可达分支。
+    """
+
+    def __init__(self, segment_index: int, text: str):
+        self._index = segment_index
+        self._text = text
+
+    def __call__(self, asr_data, cfg, layout):
+        return [
+            ViewingProblem(
+                problem_id=f"length:original:{self._index}",
+                side="original",
+                segment_index=self._index,
+                text=self._text,
+                weighted_length=999.0,
+                absolute_limit=20,
+                target_limit=16,
+                reason="fake scan keeps flagging the segment",
+            )
+        ]
+
+
+def test_duplicate_candidate_fingerprint_triggers_rollback(monkeypatch):
+    """同段同指纹候选再次验收通过：立即回退（「重复修复候选」，D27）。"""
+    # 段 1 本身合格：轮 1 的单片段候选与它等价并记下候选指纹；
+    # 轮 2 对拼回后的等价片段再交同一候选 → 指纹相同 → 守卫触发。
+    monkeypatch.setattr(
+        repair_module, "scan_viewing_lengths", _AlwaysProblematicScan(1, "正常")
+    )
+    same_piece = _response(
+        [{"problem_id": "length:original:1", "output_index": 0,
+          "original": "正常", "translated": "短"}]
+    )
+    gateway = _ScriptedGateway([same_piece, same_piece])
+    repaired, report = execute_viewing_repair(
+        _data(("超长" * 30, "短"), ("正常", "正常")), _config(), QualityReport(),
+        SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        gateway=gateway, profile=_profile(),
+    )
+    summary = report.viewing_repair
+    assert summary.requests == 2  # 轮 1 记指纹；轮 2 同指纹 → 立即回退
+    assert summary.rollbacks and summary.rollbacks[0].reason == "重复修复候选"
+    assert any("重复修复候选" in warning for warning in summary.warnings)
+    # 回退恢复初版段：段 0 的真实超长问题留给终态扫描如实报告。
+    assert [seg.text for seg in repaired.segments] == ["超长" * 30, "正常"]
+
+
+def test_duplicate_region_state_triggers_rollback(monkeypatch):
+    """拼接后区域状态与历史一致：按区域回退（「区域状态重复（无改善）」，D27）。"""
+    original = "超长" * 30
+    # 轮 1：原段拆 3 片（候选指纹 a），记录拼接后的区域状态指纹。
+    split = _response(
+        [
+            {"problem_id": "length:original:0", "output_index": i,
+             "original": original[i * 20:(i + 1) * 20], "translated": "短"}
+            for i in range(3)
+        ]
+    )
+    # 轮 2：对首片段（1334ms、片段上限 1）交单片段候选 —— 候选指纹与
+    # 轮 1 不同（不触发候选守卫），但拼回后的区域状态与轮 1 完全一致
+    # （时间 / 文本 / 译文逐项相同）→ 区域状态守卫触发。
+    reshuffle = _response(
+        [{"problem_id": "length:original:0", "output_index": 0,
+          "original": original[:20], "translated": "短"}]
+    )
+    monkeypatch.setattr(
+        repair_module, "scan_viewing_lengths", _AlwaysProblematicScan(0, original)
+    )
+    gateway = _ScriptedGateway([split, reshuffle])
+    repaired, report = execute_viewing_repair(
+        _data((original, "短"), ("正常", "正常")), _config(), QualityReport(),
+        SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        gateway=gateway, profile=_profile(),
+    )
+    summary = report.viewing_repair
+    assert summary.requests == 2
+    assert summary.rollbacks and summary.rollbacks[0].reason == "区域状态重复（无改善）"
+    assert any("区域状态重复" in warning for warning in summary.warnings)
+    assert [seg.text for seg in repaired.segments] == [original, "正常"]
 
 
 # ---- 验收 6：首次提交不计入重试；4 次业务重试；网络重试独立 ----
