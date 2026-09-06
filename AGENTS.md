@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Subtitle Postprocessing Design
+
+When continuing the subtitle length, retranslation, or viewing-experience redesign, read `docs/dev/subtitle-postprocessing-design-record.md` first. It records confirmed decisions, superseded suggestions, open questions, and implementation status; update it as the design discussion advances.
+
 ## Project Structure & Module Organization
 
 VideoCaptioner is a Python 3.10+ package with CLI and PyQt desktop entry points. Core code lives in `videocaptioner/`: `core/` contains ASR, subtitle, translate, TTS, split, and utility modules; `cli/` contains command handlers; `ui/` contains Qt views, components, and threads. Tests are grouped by feature under `tests/` (`test_cli/`, `test_asr/`, `test_translate/`, etc.) with fixtures in `tests/fixtures/`. Runtime assets, fonts, styles, and translations live in `resource/`. Documentation lives in `docs/`.
