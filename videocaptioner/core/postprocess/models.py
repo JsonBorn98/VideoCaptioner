@@ -145,3 +145,17 @@ class PostprocessResult:
     precise_timing_grades: Optional[tuple[tuple[str, int], ...]] = None
     # 下游继续：正常完成/跳过允许下游；无效初版、模块级失败、取消阻断下游。
     continue_downstream: bool = True
+
+
+@dataclass(frozen=True)
+class PostprocessDeliveryContext:
+    """模块成功后的交付上下文（票 08）。
+
+    活动字幕位置与对齐时间轴可见结果总是一同穿过
+    ``_publish_module_outputs`` → ``build_postprocess_state_payload``；
+    捆成一个对象，避免三参数数据泥团。
+    """
+
+    active_subtitle_path: Optional[str] = None
+    precise_timing_outcome: Optional[str] = None
+    precise_timing_grades: Optional[tuple[tuple[str, int], ...]] = None

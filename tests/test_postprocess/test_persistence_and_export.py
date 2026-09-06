@@ -307,6 +307,43 @@ def test_export_failure_reports_only_export_failure(tmp_path):
     ).read_bytes() == state_before
 
 
+# ---- 上游资产收集：完整 workflow 接线（含 checkpoint）----
+
+
+def test_collect_upstream_assets_picks_readable_kinds_only(tmp_path):
+    from types import SimpleNamespace
+
+    from videocaptioner.core.postprocess.assets import collect_upstream_assets
+
+    glossary = tmp_path / "glossary.vcglossary.json"
+    glossary.write_text('{"terms": []}\n', encoding="utf-8")
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text('{"cursor": 1}\n', encoding="utf-8")
+    source = SimpleNamespace(
+        glossary_path=str(glossary),
+        translation_audit_report_path=str(tmp_path / "missing-audit.md"),
+        translation_checkpoint_path=str(checkpoint),
+    )
+
+    assets = collect_upstream_assets(source)
+
+    # 存在且可读的进 explicit_assets；文件缺失的 audit 不进。
+    assert assets == {
+        "glossary": str(glossary),
+        "checkpoint": str(checkpoint),
+    }
+
+
+def test_collect_upstream_assets_skips_absent_attributes(tmp_path):
+    from types import SimpleNamespace
+
+    from videocaptioner.core.postprocess.assets import collect_upstream_assets
+
+    assets = collect_upstream_assets(SimpleNamespace())
+
+    assert assets == {}
+
+
 # ---- 状态展示：未解决问题、回退警告、活动字幕 ----
 
 

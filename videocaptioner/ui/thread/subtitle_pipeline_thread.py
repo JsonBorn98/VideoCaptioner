@@ -8,6 +8,7 @@ from videocaptioner.core.entities import (
     FullProcessTask,
 )
 from videocaptioner.core.llm import LLMGateway
+from videocaptioner.core.postprocess.assets import collect_upstream_assets
 from videocaptioner.core.translate.enhanced.models import (
     TermConfirmationMode,
     TranslationAuditMode,
@@ -150,16 +151,7 @@ class SubtitlePipelineThread(QThread):
             )
             # 上游过程资产（票 08，D21）：完整 workflow 把字幕阶段产物交给
             # 后处理复制进专用过程目录；独立调用由资产发现按 manifest 验证。
-            explicit_assets = {}
-            for kind, attr in (
-                ("glossary", "glossary_path"),
-                ("audit", "translation_audit_report_path"),
-                ("checkpoint", "translation_checkpoint_path"),
-            ):
-                asset_path = getattr(subtitle_task, attr, None)
-                if asset_path and Path(str(asset_path)).is_file():
-                    explicit_assets[kind] = str(asset_path)
-            postprocess_task.explicit_assets = explicit_assets
+            postprocess_task.explicit_assets = collect_upstream_assets(subtitle_task)
             postprocess_task.export_policy = self.task.export_policy
             initial = Path(subtitle_task.output_path or "subtitle.srt")
             postprocess_task.postprocessed_subtitle_path = str(

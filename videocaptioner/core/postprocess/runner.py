@@ -18,6 +18,7 @@ from . import run_post_stage, run_pre_stage
 from .config import PostprocessConfig, config_payload
 from .models import (
     PostprocessAssetAdapter,
+    PostprocessDeliveryContext,
     PostprocessLayoutMode,
     PostprocessResult,
     PostprocessTask,
@@ -210,10 +211,7 @@ def _module_outputs(
     task: PostprocessTask,
     report: QualityReport,
     config: PostprocessConfig,
-    *,
-    active_subtitle_path: str | None,
-    precise_timing_outcome: str | None,
-    precise_timing_grades: tuple[tuple[str, int], ...] | None,
+    delivery: PostprocessDeliveryContext,
 ) -> dict[str, bytes]:
     """组装模块成功后的下游产物载荷（票 08，D21/D28）。
 
@@ -228,7 +226,7 @@ def _module_outputs(
     if config.qa_report:
         report.source_path = task.source_subtitle_path
         report.output_path = (
-            task.postprocessed_subtitle_path or active_subtitle_path or ""
+            task.postprocessed_subtitle_path or delivery.active_subtitle_path or ""
         )
         outputs["qa_report"] = build_qa_report(report).encode("utf-8")
     if report.speed is not None:
@@ -243,9 +241,9 @@ def _module_outputs(
             build_postprocess_state_payload(
                 task,
                 report,
-                active_subtitle_path=active_subtitle_path,
-                precise_timing_outcome=precise_timing_outcome,
-                precise_timing_grades=precise_timing_grades,
+                active_subtitle_path=delivery.active_subtitle_path,
+                precise_timing_outcome=delivery.precise_timing_outcome,
+                precise_timing_grades=delivery.precise_timing_grades,
             ),
             ensure_ascii=False,
             sort_keys=True,
@@ -261,22 +259,12 @@ def _publish_module_outputs(
     report: QualityReport,
     config: PostprocessConfig,
     adapter: PostprocessAssetAdapter,
-    *,
-    active_subtitle_path: str | None,
-    precise_timing_outcome: str | None,
-    precise_timing_grades: tuple[tuple[str, int], ...] | None,
+    delivery: PostprocessDeliveryContext,
 ) -> None:
     """把下游产物写入过程目录；失败只警告，不改变已完成的核心结果（D28）。"""
 
     try:
-        outputs = _module_outputs(
-            task,
-            report,
-            config,
-            active_subtitle_path=active_subtitle_path,
-            precise_timing_outcome=precise_timing_outcome,
-            precise_timing_grades=precise_timing_grades,
-        )
+        outputs = _module_outputs(task, report, config, delivery)
         adapter.publish_downstream_outputs(task, outputs)
     except InterruptedError:
         raise
@@ -447,9 +435,11 @@ def run_postprocess_task(
             report,
             config,
             adapter,
-            active_subtitle_path=task.active_subtitle_path,
-            precise_timing_outcome=precise_timing_outcome,
-            precise_timing_grades=precise_timing_grades,
+            PostprocessDeliveryContext(
+                active_subtitle_path=task.active_subtitle_path,
+                precise_timing_outcome=precise_timing_outcome,
+                precise_timing_grades=precise_timing_grades,
+            ),
         )
         logger.info("后处理分析模式完成：仅生成报告，未写入字幕")
         return PostprocessResult(
@@ -552,9 +542,11 @@ def run_postprocess_task(
         report,
         config,
         adapter,
-        active_subtitle_path=str(output),
-        precise_timing_outcome=precise_timing_outcome,
-        precise_timing_grades=precise_timing_grades,
+        PostprocessDeliveryContext(
+            active_subtitle_path=str(output),
+            precise_timing_outcome=precise_timing_outcome,
+            precise_timing_grades=precise_timing_grades,
+        ),
     )
     logger.info("后处理完成：%d 段 -> %s", len(working.segments), output.name)
     return PostprocessResult(

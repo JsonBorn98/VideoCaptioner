@@ -158,41 +158,29 @@ class PostprocessThread(QThread):
             clear_task_context()
 
     def _write_sidecar(self, output_path: str) -> None:
-        """保存可复用的对齐时间轴 sidecar（跟随字幕输出；非过程报告）。"""
+        """保存可复用的对齐时间轴 sidecar（共享守卫，见 core/postprocess/sidecar.py）。"""
 
         if self.result is None or not output_path:
             return
-        config = self.task.config_snapshot
-        timing_bundle = self.task.timing_bundle
-        if (
-            config is None
-            or not config.save_timing_sidecar
-            or timing_bundle is None
-            or self.result.precise_timing_outcome != "applied"
-        ):
-            return
-        from videocaptioner.core.speed.timing_archive import (
-            timing_sidecar_path,
-            write_timing_archive,
-        )
+        from videocaptioner.core.postprocess.sidecar import write_timing_sidecar_if_applied
 
-        write_timing_archive(timing_sidecar_path(output_path), timing_bundle)
+        sidecar_path = write_timing_sidecar_if_applied(self.result, output_path)
+        if sidecar_path is not None:
+            logger.info("对齐时间轴 sidecar 已保存: %s", sidecar_path)
 
     def _log_report_locations(self) -> None:
-        """记录过程报告与状态的位置（票 08，D21/D28）。
+        """记录过程报告与状态的位置（票 08，D21/D28；QtLogHandler INFO 级转发 GUI 日志面板）。
 
         过程报告 / 状态由核心任务入口写入 ``videocaptioner-workspace``；
         这里只记录位置，不再向普通输出目录复制过程文件。
         """
 
-        for kind, label in (
-            ("qa_report", "QA 报告"),
-            ("speed_changes", "速度变更记录"),
-            ("postprocess_state", "后处理状态"),
-        ):
-            path = self.task.persisted_outputs.get(kind)
-            if path:
-                logger.info("过程报告位置（%s）: %s", label, path)
+        from videocaptioner.core.postprocess.report_locations import (
+            describe_persisted_outputs,
+        )
+
+        for label, path in describe_persisted_outputs(self.task):
+            logger.info("过程报告位置（%s）: %s", label, path)
 
 
 __all__ = ["PostprocessThread"]

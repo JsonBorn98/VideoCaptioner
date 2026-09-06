@@ -73,48 +73,28 @@ def _timing_resolver(task, data, _layout):
 
 
 def _write_sidecar(result, *, verbose: bool) -> None:
-    """保存可复用的对齐时间轴 sidecar（仍跟随字幕输出；非过程报告）。"""
+    """保存可复用的对齐时间轴 sidecar（共享守卫，见 core/postprocess/sidecar.py）。"""
 
-    config = result.task.config_snapshot
-    timing_bundle = result.task.timing_bundle
+    from videocaptioner.core.postprocess.sidecar import write_timing_sidecar_if_applied
+
     output_path = result.task.postprocessed_subtitle_path or result.task.active_subtitle_path
-    if (
-        config is None
-        or not output_path
-        or not config.save_timing_sidecar
-        or timing_bundle is None
-        or result.precise_timing_outcome != "applied"
-    ):
-        return
-    from videocaptioner.core.speed.timing_archive import (
-        timing_sidecar_path,
-        write_timing_archive,
-    )
-
-    sidecar_path = timing_sidecar_path(output_path)
-    write_timing_archive(sidecar_path, timing_bundle)
-    if verbose:
+    sidecar_path = write_timing_sidecar_if_applied(result, output_path or "")
+    if verbose and sidecar_path is not None:
         output.info(f"Timing evidence -> {sidecar_path}")
 
 
-def _report_locations(result, *, verbose: bool) -> None:
+def _report_locations(result) -> None:
     """展示过程报告与状态的位置（票 08，D21/D28）。
 
     过程报告 / 状态已由核心任务入口写入 ``videocaptioner-workspace``；
     这里只展示位置，不再向普通输出目录复制过程文件。
+    位置行是普通 info（非仅 verbose）：验收 7 的用户可见展示。
     """
 
-    persisted = getattr(result.task, "persisted_outputs", {})
-    labels = {
-        "qa_report": "QA report",
-        "speed_changes": "Speed changes",
-        "postprocess_state": "Postprocess state",
-    }
-    if verbose:
-        for kind, label in labels.items():
-            path = persisted.get(kind)
-            if path:
-                output.info(f"{label} -> {path}")
+    from videocaptioner.core.postprocess.report_locations import describe_persisted_outputs
+
+    for label, path in describe_persisted_outputs(result.task):
+        output.info(f"{label} -> {path}")
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -243,11 +223,13 @@ def run(args: Namespace, config: dict) -> int:
     # 过程报告 / 状态位置由核心写入过程目录（票 08，D21/D28）：
     # 这里只保存对齐 sidecar 并展示报告位置，不再向普通输出目录复制过程文件。
     _write_sidecar(result, verbose=verbose and not quiet)
-    _report_locations(result, verbose=verbose and not quiet)
+    if not quiet:
+        _report_locations(result)
     args.result_data = result.output_data
-    args.postprocess_result = result
+    # 下游接缝字段（票 08，D14）：process 管线按 continue_downstream 门控
+    # 下游、按 active_subtitle_path 取活动字幕（成功 = 后处理字幕；
+    # 回退 / 分析模式 = 初版）。
     args.continue_downstream = result.continue_downstream
-    # 活动字幕位置（票 08，D14）：成功 = 后处理字幕；回退 / 分析模式 = 初版。
     args.active_subtitle_path = result.task.active_subtitle_path or str(input_path)
     # 显式交付导出（票 08，D28）：模块成功后按 manifest 复制过程资产；
     # 运行中 / 取消 / 模块级失败不提供。导出失败只报导出失败。

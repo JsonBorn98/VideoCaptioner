@@ -219,29 +219,24 @@ def run(args: Namespace, config: dict) -> int:
                 post_args.translation_execution_snapshot = translation_snapshot
             # 上游过程资产（票 08，D21）：完整 workflow 把字幕阶段产物交给
             # 后处理复制进专用过程目录；独立调用由资产发现按 manifest 验证。
-            explicit_assets = {}
-            if sub_args is not None:
-                for kind, attr in (
-                    ("glossary", "glossary_path"),
-                    ("audit", "translation_audit_report_path"),
-                    ("checkpoint", "translation_checkpoint_path"),
-                ):
-                    asset_path = getattr(sub_args, attr, None)
-                    if asset_path and Path(str(asset_path)).is_file():
-                        explicit_assets[kind] = str(asset_path)
-            post_args.explicit_assets = explicit_assets
+            from videocaptioner.core.postprocess.assets import collect_upstream_assets
+
+            post_args.explicit_assets = (
+                collect_upstream_assets(sub_args) if sub_args is not None else {}
+            )
             from videocaptioner.cli.commands.postprocess import run as postprocess_run
 
             ret = postprocess_run(post_args, config)
-            # 票 08 / D14：成功或局部回退用活动字幕继续下游；模块级失败、
-            # 初版无效或取消明确阻断下游，不把不可用结果当作成功交付。
-            if ret == EXIT.SUCCESS:
+            # 票 08 / D14：成功或局部回退用活动字幕继续下游；下游门控按核心
+            # 入口的接缝字段（continue_downstream）判定，模块级失败、初版
+            # 无效或取消明确阻断，不把不可用结果当作成功交付。
+            if ret == EXIT.SUCCESS and getattr(post_args, "continue_downstream", True):
                 subtitle_path = getattr(post_args, "active_subtitle_path", None) or subtitle_path
                 active_data = getattr(post_args, "result_data", active_data)
                 current_step += 1
             else:
                 output.warn("Subtitle postprocessing did not complete; blocking downstream stages")
-                return ret
+                return ret if ret != EXIT.SUCCESS else EXIT.RUNTIME_ERROR
         elif not quiet:
             output.info("Subtitle postprocessing skipped; using initial subtitle")
     finally:
