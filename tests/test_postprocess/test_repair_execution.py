@@ -390,7 +390,7 @@ def test_duplicate_candidate_fingerprint_triggers_rollback(monkeypatch):
     assert summary.requests == 2  # 轮 1 记指纹；轮 2 同指纹 → 立即回退
     assert summary.rollbacks and summary.rollbacks[0].reason == "重复修复候选"
     assert any("重复修复候选" in warning for warning in summary.warnings)
-    # 回退恢复初版段：段 0 的真实超长问题留给终态扫描如实报告。
+    # 回退恢复初版段：段 1 回到未拆分形状（终态扫描也走 fake，不在此断言）。
     assert [seg.text for seg in repaired.segments] == ["超长" * 30, "正常"]
 
 
