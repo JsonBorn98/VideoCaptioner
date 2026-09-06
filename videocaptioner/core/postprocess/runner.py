@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext as _nullcontext
 from dataclasses import replace
@@ -205,6 +206,85 @@ def _module_failure_result(
     )
 
 
+def _module_outputs(
+    task: PostprocessTask,
+    report: QualityReport,
+    config: PostprocessConfig,
+    *,
+    active_subtitle_path: str | None,
+    precise_timing_outcome: str | None,
+    precise_timing_grades: tuple[tuple[str, int], ...] | None,
+) -> dict[str, bytes]:
+    """组装模块成功后的下游产物载荷（票 08，D21/D28）。
+
+    QA 报告按 ``config.qa_report``；速度变更记录与状态载荷无条件进入
+    过程目录（速度结果是模块结果的一部分，状态是导出门控的依据）。
+    """
+
+    from .report import build_qa_report
+    from .workspace import build_postprocess_state_payload
+
+    outputs: dict[str, bytes] = {}
+    if config.qa_report:
+        report.source_path = task.source_subtitle_path
+        report.output_path = (
+            task.postprocessed_subtitle_path or active_subtitle_path or ""
+        )
+        outputs["qa_report"] = build_qa_report(report).encode("utf-8")
+    if report.speed is not None:
+        from ..speed.models import canonical_json_bytes
+        from ..speed.report import result_to_dict
+
+        outputs["speed_changes"] = (
+            canonical_json_bytes(result_to_dict(report.speed)) + b"\n"
+        )
+    outputs["postprocess_state"] = (
+        json.dumps(
+            build_postprocess_state_payload(
+                task,
+                report,
+                active_subtitle_path=active_subtitle_path,
+                precise_timing_outcome=precise_timing_outcome,
+                precise_timing_grades=precise_timing_grades,
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return outputs
+
+
+def _publish_module_outputs(
+    task: PostprocessTask,
+    report: QualityReport,
+    config: PostprocessConfig,
+    adapter: PostprocessAssetAdapter,
+    *,
+    active_subtitle_path: str | None,
+    precise_timing_outcome: str | None,
+    precise_timing_grades: tuple[tuple[str, int], ...] | None,
+) -> None:
+    """把下游产物写入过程目录；失败只警告，不改变已完成的核心结果（D28）。"""
+
+    try:
+        outputs = _module_outputs(
+            task,
+            report,
+            config,
+            active_subtitle_path=active_subtitle_path,
+            precise_timing_outcome=precise_timing_outcome,
+            precise_timing_grades=precise_timing_grades,
+        )
+        adapter.publish_downstream_outputs(task, outputs)
+    except InterruptedError:
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 过程产物落盘不得阻断交付
+        task.warnings.append(f"过程产物写入失败: {exc}")
+        logger.warning("过程产物写入失败，继续交付: %s", exc)
+
+
 def run_postprocess_task(
     task: PostprocessTask,
     *,
@@ -361,6 +441,16 @@ def run_postprocess_task(
         task.result_data = clone_subtitle_data(original)
         warnings.append("分析模式仅生成报告，未写入后处理字幕")
         task.warnings = warnings
+        # 分析模式同属模块成功：报告与状态也写入过程目录（票 08，D21/D28）。
+        _publish_module_outputs(
+            task,
+            report,
+            config,
+            adapter,
+            active_subtitle_path=task.active_subtitle_path,
+            precise_timing_outcome=precise_timing_outcome,
+            precise_timing_grades=precise_timing_grades,
+        )
         logger.info("后处理分析模式完成：仅生成报告，未写入字幕")
         return PostprocessResult(
             task,
@@ -453,6 +543,19 @@ def run_postprocess_task(
     task.active_subtitle_path = str(output)
     task.result_data = clone_subtitle_data(working)
     task.warnings = warnings
+    # 修复拼接可能改变段数：报告的段数以最终交付数据为准（不取中间快照）。
+    report.segment_count = len(working.segments)
+    # 过程报告 / 检查点 / 状态写入专用过程目录（票 08，D21/D28）：模块
+    # 成功后才登记；失败只警告，不改变已完成的核心结果。
+    _publish_module_outputs(
+        task,
+        report,
+        config,
+        adapter,
+        active_subtitle_path=str(output),
+        precise_timing_outcome=precise_timing_outcome,
+        precise_timing_grades=precise_timing_grades,
+    )
     logger.info("后处理完成：%d 段 -> %s", len(working.segments), output.name)
     return PostprocessResult(
         task,

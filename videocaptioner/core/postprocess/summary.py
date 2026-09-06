@@ -31,6 +31,13 @@ def build_postprocess_stage_summary(result: PostprocessResult) -> StageSummary:
     repair = report.viewing_repair
     if repair is not None and repair.review_corrections:
         counts.append(("校对修正", repair.review_corrections))
+    # 未解决问题与回退区域进入共享摘要（票 08，D10/D14）：适配层
+    # 不再各自从报告重复推导，CLI 与 GUI 展示同一事实。
+    unresolved = report.unresolved_viewing_problems()
+    if unresolved:
+        counts.append(("未解决问题", len(unresolved)))
+    if repair is not None and repair.rollbacks:
+        counts.append(("回退区域", len(repair.rollbacks)))
 
     outcome = result.precise_timing_outcome
     if outcome == "applied":
@@ -47,6 +54,15 @@ def build_postprocess_stage_summary(result: PostprocessResult) -> StageSummary:
         # 翻译方式 -> 实际修复方式，便于核对实际行为。
         method_label = repair.translation_method or "未知"
         status_parts.append(f"修复 {method_label}->{flow_mode_label(repair.flow_mode)}")
+    # 活动字幕状态（票 08）：下游消费哪一份字幕——后处理字幕或回退到初版。
+    if result.continue_downstream:
+        status_parts.append(
+            "活动字幕=后处理字幕"
+            if result.task.postprocessed_subtitle_path
+            else "活动字幕=初版字幕"
+        )
+    else:
+        status_parts.append("活动字幕=初版字幕")
     badge = _PRECISE_TIMING_BADGES.get(outcome or "")
     if badge:
         status_parts.append(f"对齐时间轴 {badge}")

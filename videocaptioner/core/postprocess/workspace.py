@@ -14,16 +14,17 @@ import re
 import shutil
 import tempfile
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ..utils.logger import setup_logger
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
     from .models import PostprocessTask
+    from .report import QualityReport
 
 logger = setup_logger("postprocess.workspace")
 
@@ -39,6 +40,14 @@ UPSTREAM_ASSET_KINDS = (
     "translation_snapshot",
     "context",
 )
+# 下游产物（票 08，D21/D28）：由核心任务入口在模块成功后写入过程目录；
+# 每次运行按当前 manifest 重建清单，未产生的种类不再列为资产。
+DOWNSTREAM_OUTPUT_KINDS = (
+    "qa_report",
+    "speed_changes",
+    "postprocess_state",
+)
+EXPORTABLE_KINDS = UPSTREAM_ASSET_KINDS + DOWNSTREAM_OUTPUT_KINDS
 ASSET_FILENAMES = {
     "glossary": "glossary.vcglossary.json",
     "audit": "translation-audit.md",
@@ -46,8 +55,20 @@ ASSET_FILENAMES = {
     "translation_snapshot": "translation-snapshot.json",
     "context": "context.json",
     "qa_report": "qa-report.md",
+    "speed_changes": "speed-changes.json",
     "postprocess_state": "postprocess-state.json",
 }
+# 导出允许复制的 manifest 本身（D28「可同时复制 manifest」）。
+EXPORT_MANIFEST_KIND = "manifest"
+
+
+class ProcessAssetExportError(Exception):
+    """显式交付导出失败：仅报告导出本身，不改变已完成的核心结果。"""
+
+
+# 过程状态载荷 schema（postprocess-state.json）。
+POSTPROCESS_STATE_SCHEMA = "videocaptioner.postprocess_state"
+POSTPROCESS_STATE_VERSION = 1
 _JSON_ASSET_KINDS = frozenset(
     {
         "glossary",
@@ -237,6 +258,175 @@ class FilesystemAssetStore:
             task_dir.name,
         )
 
+    def publish_downstream_outputs(
+        self, task: "PostprocessTask", outputs: Mapping[str, bytes]
+    ) -> None:
+        """把模块成功后的下游产物写入过程目录并登记进 manifest（D21/D28）。
+
+        先移除上次运行留下的、本次未重新产生的下游产物文件与清单项，
+        再按稳定文件名原子写入本次产物，并按清理后的清单重建已验证
+        资产快照——每次运行的清单只反映当前结果，不累积陈旧条目。
+        """
+
+        discovery = task.asset_discovery
+        if discovery is None:
+            raise ProcessAssetExportError("过程资产目录尚未发现，无法登记过程产物")
+        manifest = _load_manifest(discovery.manifest_path) or {}
+        listed: dict[str, str] = {
+            str(kind): str(filename)
+            for kind, filename in (manifest.get("assets") or {}).items()
+            if isinstance(kind, str) and isinstance(filename, str)
+        }
+        # 先摘除本次未重新产生的下游产物（陈旧文件与清单项一起移除）。
+        produced = set(outputs)
+        for kind in DOWNSTREAM_OUTPUT_KINDS:
+            if kind in produced:
+                continue
+            stale = listed.pop(kind, None)
+            if stale:
+                stale_path = _resolve_listed_asset(discovery.task_dir, stale)
+                if stale_path is not None and stale_path.is_file():
+                    _unlink_quiet(stale_path)
+        # 再按稳定文件名原子写入本次产物；写入或读取失败只警告，不改变核心结果。
+        verified: dict[str, Path] = {}
+        for kind, payload in outputs.items():
+            if kind not in DOWNSTREAM_OUTPUT_KINDS:
+                task.warnings.append(f"未知过程产物类型，未登记: {kind}")
+                continue
+            destination = discovery.task_dir / ASSET_FILENAMES[kind]
+            try:
+                _write_bytes(destination, payload)
+            except InterruptedError:
+                raise
+            except OSError as exc:
+                task.warnings.append(f"过程产物 {kind} 写入失败: {exc}")
+                continue
+            if _asset_readable(destination, kind):
+                verified[kind] = destination
+            else:
+                task.warnings.append(f"过程产物 {kind} 写入后不可读，未列入资产")
+        listed.update({kind: path.name for kind, path in verified.items()})
+        manifest["assets"] = listed
+        _write_json(discovery.manifest_path, manifest)
+        # 按清理后的清单重建已验证资产快照（陈旧种类一并消失）。
+        assets: dict[str, Path] = {}
+        for kind, filename in listed.items():
+            path = _resolve_listed_asset(discovery.task_dir, filename)
+            if path is not None and _asset_readable(path, kind):
+                assets[kind] = path
+        task.asset_discovery = replace(discovery, verified_assets=tuple(assets.items()))
+        # 任务上的持久化位置只记录本次下游产物（报告位置展示用）。
+        task.persisted_outputs = {kind: str(path) for kind, path in verified.items()}
+
+
+def build_postprocess_state_payload(
+    task: "PostprocessTask",
+    report: "QualityReport",
+    *,
+    active_subtitle_path: str | None,
+    precise_timing_outcome: str | None,
+    precise_timing_grades: tuple[tuple[str, int], ...] | None,
+) -> dict[str, Any]:
+    """``postprocess-state.json`` 载荷：状态、警告与过程产物位置（无连接机密）。"""
+
+    repair = report.viewing_repair
+    return {
+        "schema": POSTPROCESS_STATE_SCHEMA,
+        "version": POSTPROCESS_STATE_VERSION,
+        "status": task.status,
+        "task_id": task.task_id,
+        "active_subtitle_path": active_subtitle_path,
+        "initial_subtitle_path": task.initial_subtitle_path,
+        "postprocessed_subtitle_path": task.postprocessed_subtitle_path,
+        "warnings": list(task.warnings),
+        "unresolved_viewing_problems": len(report.unresolved_viewing_problems()),
+        "resolved_viewing_problems": len(
+            [problem for problem in report.viewing_problems if problem.resolved]
+        ),
+        "viewing_repair": (
+            None
+            if repair is None
+            else {
+                "flow_mode": repair.flow_mode,
+                "translation_method": repair.translation_method,
+                "rounds": repair.rounds,
+                "requests": repair.requests,
+                "rollbacks": [
+                    {"initial_indices": list(item.initial_indices), "reason": item.reason}
+                    for item in repair.rollbacks
+                ],
+                "warnings": list(repair.warnings),
+            }
+        ),
+        "precise_timing_outcome": precise_timing_outcome,
+        "precise_timing_grades": (
+            [[name, count] for name, count in precise_timing_grades]
+            if precise_timing_grades
+            else None
+        ),
+        "segment_count": report.segment_count,
+    }
+
+
+def export_process_assets(
+    task: "PostprocessTask",
+    destination: str | Path,
+    *,
+    kinds: Sequence[str] | None = None,
+    include_manifest: bool = True,
+) -> list[Path]:
+    """模块成功完成后按 manifest 选择并复制过程资产（D28）。
+
+    显式交付导出：只复制 manifest 已验证的资产（保持稳定文件名），
+    可同时复制 manifest 本身；模块未成功完成（运行中 / 取消 / 模块级
+    失败 / 未完成）不提供导出。导出失败只报告导出本身，不改变已完成
+    的核心后处理结果与过程目录。
+    """
+
+    discovery = task.asset_discovery
+    if task.status != "completed":
+        raise ProcessAssetExportError(
+            f"后处理模块未成功完成（状态 {task.status}），不提供过程资产导出"
+        )
+    if discovery is None:
+        raise ProcessAssetExportError("过程资产目录尚未发现，无法导出")
+    verified = {kind: path for kind, path in discovery.verified_assets}
+    if kinds is None:
+        selected = list(verified)
+    else:
+        unknown = [kind for kind in kinds if kind not in EXPORTABLE_KINDS]
+        if unknown:
+            raise ProcessAssetExportError(
+                "未知过程资产类型: "
+                + ", ".join(unknown)
+                + "；可用类型: "
+                + ", ".join(kind for kind in EXPORTABLE_KINDS if kind in verified)
+            )
+        selected = [kind for kind in kinds if kind in verified]
+    target = Path(destination)
+    copied: list[Path] = []
+    try:
+        target.mkdir(parents=True, exist_ok=False)
+    except InterruptedError:
+        raise
+    except OSError as exc:
+        raise ProcessAssetExportError(f"导出目录创建失败: {exc}") from exc
+    try:
+        for kind in selected:
+            source = verified[kind]
+            destination_path = target / ASSET_FILENAMES[kind]
+            _copy_asset(source, destination_path)
+            copied.append(destination_path)
+        if include_manifest:
+            manifest_copy = target / MANIFEST_FILENAME
+            _copy_asset(discovery.manifest_path, manifest_copy)
+            copied.append(manifest_copy)
+    except InterruptedError:
+        raise
+    except OSError as exc:
+        raise ProcessAssetExportError(f"过程资产复制失败: {exc}") from exc
+    return copied
+
 
 def _normalize_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
@@ -336,6 +526,33 @@ def _copy_asset(source: Path, destination: Path) -> None:
     if source.resolve() == destination.resolve():
         return
     shutil.copy2(source, destination)
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except InterruptedError:
+        raise
+    except OSError:
+        pass
+
+
+def _write_bytes(path: Path, payload: bytes) -> None:
+    """原子写入字节载荷（下游产物写盘与 ``_write_json`` 同一约定）。"""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

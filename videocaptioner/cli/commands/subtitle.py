@@ -441,6 +441,14 @@ def run(args: Namespace, config: dict) -> int:
                 args.translation_audit_report_path = str(
                     enhanced_run.artifacts.audit_report_path
                 )
+                # 检查点产物（票 08，D21）：随 glossary/audit 一起暴露，
+                # 供 process 管线传给后处理复制进专用过程目录。
+                checkpoint_path = getattr(
+                    enhanced_run.artifacts, "translation_checkpoint_path", None
+                )
+                args.translation_checkpoint_path = (
+                    str(checkpoint_path) if checkpoint_path is not None else None
+                )
                 args.translation_audit_report = enhanced_run.result.audit_report
                 enhanced_usages = tuple(
                     getattr(enhanced_run.result.audit_report, "usages", ())

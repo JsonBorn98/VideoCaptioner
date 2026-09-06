@@ -1,3 +1,4 @@
+import json
 from argparse import Namespace
 
 import pytest
@@ -163,5 +164,78 @@ def test_analyze_mode_writes_reports_without_subtitle_output(monkeypatch, tmp_pa
 
     assert command.run(args, config) == EXIT.SUCCESS
     assert not (tmp_path / "【后处理字幕】sample.srt").exists()
-    assert (tmp_path / "【后处理字幕】sample.qa.md").exists()
-    assert (tmp_path / "【后处理字幕】sample.speed-changes.json").exists()
+    # 票 08 / D21/D28：过程报告与速度变更进入专用过程目录，
+    # 不再散落到普通输出目录。
+    workspace = tmp_path / "videocaptioner-workspace"
+    assert list(workspace.rglob("qa-report.md"))
+    assert list(workspace.rglob("speed-changes.json"))
+    assert list(workspace.rglob("postprocess-state.json"))
+    assert not (tmp_path / "【后处理字幕】sample.qa.md").exists()
+    assert not (tmp_path / "【后处理字幕】sample.speed-changes.json").exists()
+
+
+def test_export_assets_copies_manifest_listed_files_after_success(
+    monkeypatch, tmp_path, capsys
+):
+    import videocaptioner.core.postprocess as postprocess_package
+
+    source = tmp_path / "sample.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\n你好。\n", encoding="utf-8"
+    )
+    store = PostprocessProfileStore(tmp_path / "profiles.json")
+    monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
+    destination = tmp_path / "delivery"
+    args = Namespace(
+        input=str(source),
+        output=None,
+        layout="source-only",
+        profile="balanced",
+        speed_profile=None,
+        media=None,
+        speed_media=None,
+        quiet=True,
+        verbose=False,
+        export_assets=str(destination),
+    )
+
+    result = command.run(args, _config(postprocess={"qa_report": True}))
+
+    assert result == EXIT.SUCCESS
+    # 票 08 / D28：模块成功后按 manifest 显式导出（稳定文件名 + manifest 副本）。
+    assert (destination / "manifest.json").is_file()
+    assert (destination / "postprocess-state.json").is_file()
+    assert (destination / "qa-report.md").is_file()
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["assets"]["postprocess_state"] == "postprocess-state.json"
+
+
+def test_export_assets_failure_keeps_successful_exit_status(monkeypatch, tmp_path, capsys):
+    import videocaptioner.core.postprocess as postprocess_package
+
+    source = tmp_path / "sample.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\n你好。\n", encoding="utf-8"
+    )
+    store = PostprocessProfileStore(tmp_path / "profiles.json")
+    monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
+    args = Namespace(
+        input=str(source),
+        output=None,
+        layout="source-only",
+        profile="balanced",
+        speed_profile=None,
+        media=None,
+        speed_media=None,
+        quiet=False,
+        verbose=False,
+        export_assets=str(tmp_path / "blocked"),
+    )
+    (tmp_path / "blocked").write_text("occupied", encoding="utf-8")
+
+    # 导出失败只报告导出失败（票 08 / D28），不改变已完成的核心后处理结果。
+    result = command.run(args, _config(postprocess={"qa_report": True}))
+
+    assert result == EXIT.SUCCESS
+    assert (tmp_path / "【后处理字幕】sample.srt").exists()
+    assert "export failed" in capsys.readouterr().err.lower()

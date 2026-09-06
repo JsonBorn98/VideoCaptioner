@@ -605,6 +605,7 @@ def test_cli_standalone_postprocess_does_not_construct_task_gateway(
             report = SimpleNamespace(speed=None)
             precise_timing_outcome = None
             layout = None
+            continue_downstream = True
 
             @property
             def task(self_inner):

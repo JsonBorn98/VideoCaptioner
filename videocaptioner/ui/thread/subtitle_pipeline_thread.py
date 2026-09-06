@@ -136,7 +136,7 @@ class SubtitlePipelineThread(QThread):
                 logger.info("字幕优化过程中发生错误，终止流程")
                 return
 
-            # 3. 独立字幕后处理。任何可恢复失败都由线程回退到初版字幕。
+            # 3. 独立字幕后处理。可恢复失败回退初版字幕后继续；模块级失败阻断下游。
             self.progress.emit(60, self.tr("开始字幕后处理"))
             self.task.workflow_base_name = subtitle_task.workflow_base_name
             postprocess_task.source_subtitle_path = subtitle_task.output_path or ""
@@ -148,6 +148,18 @@ class SubtitlePipelineThread(QThread):
             postprocess_task.bind_translation_snapshot(
                 subtitle_task.translation_execution_snapshot
             )
+            # 上游过程资产（票 08，D21）：完整 workflow 把字幕阶段产物交给
+            # 后处理复制进专用过程目录；独立调用由资产发现按 manifest 验证。
+            explicit_assets = {}
+            for kind, attr in (
+                ("glossary", "glossary_path"),
+                ("audit", "translation_audit_report_path"),
+                ("checkpoint", "translation_checkpoint_path"),
+            ):
+                asset_path = getattr(subtitle_task, attr, None)
+                if asset_path and Path(str(asset_path)).is_file():
+                    explicit_assets[kind] = str(asset_path)
+            postprocess_task.explicit_assets = explicit_assets
             postprocess_task.export_policy = self.task.export_policy
             initial = Path(subtitle_task.output_path or "subtitle.srt")
             postprocess_task.postprocessed_subtitle_path = str(
@@ -162,6 +174,20 @@ class SubtitlePipelineThread(QThread):
 
             if self.has_error:
                 logger.info("字幕后处理输入无效，终止流程")
+                return
+
+            # 票 08 / D14：成功或局部回退用活动字幕继续下游；模块级失败、
+            # 初版无效或取消明确阻断下游，不把不可用结果当作成功交付。
+            # result 为 None 表示线程级意外失败（run_postprocess_task 抛出，
+            # 例如初版无效）——同样阻断。
+            postprocess_result = postprocess_thread.result
+            if postprocess_result is None or not postprocess_result.continue_downstream:
+                logger.warning(
+                    "字幕后处理未成功完成（状态 %s），阻断视频合成", postprocess_task.status
+                )
+                self.error.emit(
+                    self.tr("字幕后处理未成功完成，已阻断视频合成")
+                )
                 return
 
             # 4. 视频合成

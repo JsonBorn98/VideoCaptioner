@@ -72,44 +72,49 @@ def _timing_resolver(task, data, _layout):
     return bundle.windows if bundle is not None else ()
 
 
-def _write_reports(result, *, verbose: bool, base_path: str | None = None) -> None:
+def _write_sidecar(result, *, verbose: bool) -> None:
+    """保存可复用的对齐时间轴 sidecar（仍跟随字幕输出；非过程报告）。"""
+
     config = result.task.config_snapshot
-    report = result.report
-    output_path = result.task.postprocessed_subtitle_path or base_path
-    if config is None or not output_path:
-        return
-    if config.qa_report:
-        from videocaptioner.core.postprocess import build_qa_report
-
-        report.source_path = result.task.source_subtitle_path
-        report.output_path = output_path
-        report.segment_count = len(result.output_data.segments)
-        qa_path = Path(output_path).with_suffix(".qa.md")
-        qa_path.write_text(build_qa_report(report), encoding="utf-8")
-        if verbose:
-            output.info(f"QA report -> {qa_path}")
-    if report.speed is not None:
-        from videocaptioner.core.speed.report import write_changes
-
-        changes_path = Path(output_path).with_suffix(".speed-changes.json")
-        write_changes(changes_path, report.speed)
-        if verbose:
-            output.info(f"Changes -> {changes_path}")
     timing_bundle = result.task.timing_bundle
+    output_path = result.task.postprocessed_subtitle_path or result.task.active_subtitle_path
     if (
-        config.save_timing_sidecar
-        and timing_bundle is not None
-        and result.precise_timing_outcome == "applied"
+        config is None
+        or not output_path
+        or not config.save_timing_sidecar
+        or timing_bundle is None
+        or result.precise_timing_outcome != "applied"
     ):
-        from videocaptioner.core.speed.timing_archive import (
-            timing_sidecar_path,
-            write_timing_archive,
-        )
+        return
+    from videocaptioner.core.speed.timing_archive import (
+        timing_sidecar_path,
+        write_timing_archive,
+    )
 
-        sidecar_path = timing_sidecar_path(output_path)
-        write_timing_archive(sidecar_path, timing_bundle)
-        if verbose:
-            output.info(f"Timing evidence -> {sidecar_path}")
+    sidecar_path = timing_sidecar_path(output_path)
+    write_timing_archive(sidecar_path, timing_bundle)
+    if verbose:
+        output.info(f"Timing evidence -> {sidecar_path}")
+
+
+def _report_locations(result, *, verbose: bool) -> None:
+    """展示过程报告与状态的位置（票 08，D21/D28）。
+
+    过程报告 / 状态已由核心任务入口写入 ``videocaptioner-workspace``；
+    这里只展示位置，不再向普通输出目录复制过程文件。
+    """
+
+    persisted = getattr(result.task, "persisted_outputs", {})
+    labels = {
+        "qa_report": "QA report",
+        "speed_changes": "Speed changes",
+        "postprocess_state": "Postprocess state",
+    }
+    if verbose:
+        for kind, label in labels.items():
+            path = persisted.get(kind)
+            if path:
+                output.info(f"{label} -> {path}")
 
 
 def run(args: Namespace, config: dict) -> int:
@@ -196,6 +201,13 @@ def run(args: Namespace, config: dict) -> int:
     # 翻译执行快照（票 06，D15）：process 管线把字幕阶段冻结的任务快照
     # 传入；独立调用无快照，由 runner 从验证过的过程资产重建或明确提示。
     task.bind_translation_snapshot(getattr(args, "translation_execution_snapshot", None))
+    # 上游过程资产（票 08，D21）：完整 workflow 把字幕阶段产物显式传入；
+    # 独立调用可显式补充资产，其余由资产发现按 manifest 验证。
+    explicit_assets = getattr(args, "explicit_assets", None)
+    if isinstance(explicit_assets, dict):
+        task.explicit_assets = {
+            str(kind): str(path) for kind, path in explicit_assets.items()
+        }
 
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
@@ -228,9 +240,31 @@ def run(args: Namespace, config: dict) -> int:
         output.error("Postprocessing failed; input subtitle was preserved")
         return EXIT.RUNTIME_ERROR
 
-    report_base = canonical_output or task.default_output_path()
-    _write_reports(result, verbose=verbose and not quiet, base_path=report_base)
+    # 过程报告 / 状态位置由核心写入过程目录（票 08，D21/D28）：
+    # 这里只保存对齐 sidecar 并展示报告位置，不再向普通输出目录复制过程文件。
+    _write_sidecar(result, verbose=verbose and not quiet)
+    _report_locations(result, verbose=verbose and not quiet)
     args.result_data = result.output_data
+    args.postprocess_result = result
+    args.continue_downstream = result.continue_downstream
+    # 活动字幕位置（票 08，D14）：成功 = 后处理字幕；回退 / 分析模式 = 初版。
+    args.active_subtitle_path = result.task.active_subtitle_path or str(input_path)
+    # 显式交付导出（票 08，D28）：模块成功后按 manifest 复制过程资产；
+    # 运行中 / 取消 / 模块级失败不提供。导出失败只报导出失败。
+    export_dir = getattr(args, "export_assets", None)
+    if export_dir:
+        from videocaptioner.core.postprocess.workspace import (
+            ProcessAssetExportError,
+            export_process_assets,
+        )
+
+        try:
+            copied = export_process_assets(task, export_dir)
+        except ProcessAssetExportError as exc:
+            output.error(f"Process asset export failed: {exc}")
+        else:
+            if not quiet:
+                output.info(f"Exported {len(copied)} process asset(s) -> {export_dir}")
     active_path = result.task.active_subtitle_path or str(input_path)
     if not quiet:
         from videocaptioner.core.postprocess.summary import build_postprocess_stage_summary

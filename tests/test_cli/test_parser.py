@@ -610,6 +610,7 @@ class TestProcessParser:
                 no_synthesize=True,
                 dub=False,
                 dub_only=False,
+                no_postprocess=True,
                 translator="bing",
                 target_language=None,
                 config=None,

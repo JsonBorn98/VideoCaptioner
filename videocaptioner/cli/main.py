@@ -520,6 +520,15 @@ def _build_postprocess_parser(subparsers) -> None:
         default="auto",
         help="Input subtitle structure (default: auto; uncertain structure emits a warning)",
     )
+    p.add_argument(
+        "--export-assets",
+        dest="export_assets",
+        metavar="DIR",
+        help=(
+            "After a successful run, copy the workspace process assets listed in the "
+            "manifest into DIR (stable filenames, manifest included)"
+        ),
+    )
     _add_llm_options(p)
     _add_postprocess_options(p)
     p.set_defaults(func=_run_postprocess)

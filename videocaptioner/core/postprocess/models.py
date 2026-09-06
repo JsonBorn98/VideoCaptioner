@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Literal, Mapping, Optional, Protocol
 
 from ..entities import SubtitleLayoutEnum
 from ..subtitle.io import canonical_stage_path
@@ -64,6 +64,9 @@ class PostprocessTask:
     subtitle_fingerprint: str = ""
     explicit_assets: dict[str, str] = field(default_factory=dict)
     asset_discovery: Optional["ProcessAssetDiscovery"] = field(default=None, repr=False)
+    # 模块成功后写入过程目录的下游产物位置（票 08，D21/D28）：
+    # kind -> 过程目录内绝对路径；适配层据此展示报告位置。
+    persisted_outputs: dict[str, str] = field(default_factory=dict)
     export_policy: "SubtitleExportPolicy | None" = None
     enabled: bool = True
     need_next_task: bool = False
@@ -109,6 +112,15 @@ class PostprocessAssetAdapter(Protocol):
 
     def discover(self, task: PostprocessTask) -> None:
         """Create or reuse the 过程资产目录 and attach verified assets."""
+
+    def publish_downstream_outputs(
+        self, task: PostprocessTask, outputs: Mapping[str, bytes]
+    ) -> None:
+        """Register module-success outputs as manifest assets (D21/D28).
+
+        独立测试用 fake 覆盖同一接缝：下游产物在模块成功后进入过程目录，
+        未重新产生的种类从清单中移除。
+        """
 
 
 @dataclass(frozen=True)

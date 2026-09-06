@@ -166,9 +166,13 @@ def test_live_config_mutation_does_not_affect_frozen_task(tmp_path):
 class _FakeAssetAdapter:
     def __init__(self) -> None:
         self.tasks: list[PostprocessTask] = []
+        self.published: list[tuple[PostprocessTask, dict]] = []
 
     def discover(self, task: PostprocessTask) -> None:
         self.tasks.append(task)
+
+    def publish_downstream_outputs(self, task: PostprocessTask, outputs) -> None:
+        self.published.append((task, dict(outputs)))
 
 
 def test_task_seam_invokes_injected_asset_adapter(tmp_path):
@@ -188,6 +192,31 @@ def test_task_seam_invokes_injected_asset_adapter(tmp_path):
     assert assets.tasks == [result.task]
     assert assets.tasks[0].config_snapshot is not None
     assert assets.tasks[0].config_snapshot.trim_trailing_punct is True
+
+
+def test_task_seam_publishes_module_outputs_through_injected_adapter(tmp_path):
+    """模块成功后下游产物经同一注入接缝发布（票 08，D21/D28）。"""
+
+    source = tmp_path / "input.srt"
+    _write_srt(source)
+    assets = _FakeAssetAdapter()
+
+    result = run_postprocess_task(
+        PostprocessTask(
+            str(source),
+            config_snapshot=PostprocessConfig(trim_trailing_punct=True, qa_report=True),
+        ),
+        assets=assets,
+    )
+
+    assert result.succeeded
+    assert len(assets.published) == 1
+    published_task, outputs = assets.published[0]
+    assert published_task is result.task
+    assert set(outputs) == {"qa_report", "postprocess_state"}
+    assert "# 字幕质量 QA".encode("utf-8") in outputs["qa_report"]
+    assert b'"videocaptioner.postprocess_state"' in outputs["postprocess_state"]
+    assert result.task.persisted_outputs == {}  # fake 不落盘，不伪造位置
 
 
 class _BrokenAssetAdapter:

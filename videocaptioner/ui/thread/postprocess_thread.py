@@ -6,7 +6,6 @@ from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.llm import LLMGateway
 from videocaptioner.core.llm.context import clear_task_context, set_task_context
 from videocaptioner.core.postprocess.models import PostprocessTask
-from videocaptioner.core.postprocess.report import build_qa_report
 from videocaptioner.core.postprocess.runner import run_postprocess_task
 from videocaptioner.core.postprocess.summary import build_postprocess_stage_summary
 from videocaptioner.core.speed.models import CueSnapshot
@@ -131,7 +130,8 @@ class PostprocessThread(QThread):
                         self.task.warnings.append(message)
                         logger.warning(message)
                         self.warning.emit(message)
-                self._write_reports(active_path)
+                self._write_sidecar(active_path)
+                self._log_report_locations()
                 if self._finish_if_cancelled():
                     return
                 self.progress.emit(100, self.tr("字幕后处理完成"))
@@ -157,32 +157,42 @@ class PostprocessThread(QThread):
         finally:
             clear_task_context()
 
-    def _write_reports(self, output_path: str) -> None:
+    def _write_sidecar(self, output_path: str) -> None:
+        """保存可复用的对齐时间轴 sidecar（跟随字幕输出；非过程报告）。"""
+
         if self.result is None or not output_path:
             return
         config = self.task.config_snapshot
-        if config is not None and config.qa_report:
-            qa_path = Path(output_path).with_suffix(".qa.md")
-            self.result.report.source_path = self.task.source_subtitle_path
-            self.result.report.output_path = output_path
-            qa_path.write_text(build_qa_report(self.result.report), encoding="utf-8")
-        if self.result.report.speed is not None:
-            from videocaptioner.core.speed.report import write_changes
-
-            write_changes(Path(output_path).with_suffix(".speed-changes.json"), self.result.report.speed)
         timing_bundle = self.task.timing_bundle
         if (
-            config is not None
-            and config.save_timing_sidecar
-            and timing_bundle is not None
-            and self.result.precise_timing_outcome == "applied"
+            config is None
+            or not config.save_timing_sidecar
+            or timing_bundle is None
+            or self.result.precise_timing_outcome != "applied"
         ):
-            from videocaptioner.core.speed.timing_archive import (
-                timing_sidecar_path,
-                write_timing_archive,
-            )
+            return
+        from videocaptioner.core.speed.timing_archive import (
+            timing_sidecar_path,
+            write_timing_archive,
+        )
 
-            write_timing_archive(timing_sidecar_path(output_path), timing_bundle)
+        write_timing_archive(timing_sidecar_path(output_path), timing_bundle)
+
+    def _log_report_locations(self) -> None:
+        """记录过程报告与状态的位置（票 08，D21/D28）。
+
+        过程报告 / 状态由核心任务入口写入 ``videocaptioner-workspace``；
+        这里只记录位置，不再向普通输出目录复制过程文件。
+        """
+
+        for kind, label in (
+            ("qa_report", "QA 报告"),
+            ("speed_changes", "速度变更记录"),
+            ("postprocess_state", "后处理状态"),
+        ):
+            path = self.task.persisted_outputs.get(kind)
+            if path:
+                logger.info("过程报告位置（%s）: %s", label, path)
 
 
 __all__ = ["PostprocessThread"]
