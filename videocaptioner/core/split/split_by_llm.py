@@ -20,12 +20,25 @@ LLM_SPLIT_MAX_ATTEMPTS = 2
 LLM_SPLIT_RETRY_BASE_DELAY_SECONDS = 0.5
 LLM_SPLIT_REQUEST_TIMEOUT_SECONDS = 30.0
 
+# 内容语义分段目标（D11，见 docs/dev/subtitle-postprocessing-design-record.md）：
+# 上游断句只服务内容处理与模型请求输入，不再读取观看显示上限——
+# 观看限长由后处理独占（ADR-0020）。固定值，非用户配置。
+SEGMENT_TARGET_CJK = 18  # CJK 内容分段目标（字符数）
+SEGMENT_TARGET_ENGLISH = 12  # 拉丁内容分段目标（单词数）
+
+
+def segment_target_for(text: str) -> int:
+    """按主要语言返回内容分段目标（CJK 字符数 / 拉丁词数）。
+
+    常量与语言判定收敛于此（唯一来源）；split.py 的规则路径共用本函数，
+    不再各自内联同一形状。
+    """
+    return SEGMENT_TARGET_CJK if is_mainly_cjk(text) else SEGMENT_TARGET_ENGLISH
+
 
 def split_by_llm(
     text: str,
     model: str = "gpt-4o-mini",
-    max_word_count_cjk: int = 18,
-    max_word_count_english: int = 12,
     profile: Optional[LLMModelProfile] = None,
     gateway: Optional[LLMGateway] = None,
     cancelled: Optional[Callable[[], bool]] = None,
@@ -35,8 +48,6 @@ def split_by_llm(
     Args:
         text: 待断句的文本
         model: LLM模型名称（仅 profile 缺失的旧路径使用）
-        max_word_count_cjk: 中文最大字符数
-        max_word_count_english: 英文最大单词数
         profile: 工具角色模型配置方案；存在时请求一律经 LLMGateway 发出
         gateway: 可注入的 gateway 实例（None 且 profile 存在时惰性构造）
         cancelled: 可选的取消查询回调；置位后不再发出新请求
@@ -51,8 +62,6 @@ def split_by_llm(
             return _split_with_agent_loop(
                 text,
                 model,
-                max_word_count_cjk,
-                max_word_count_english,
                 profile=profile,
                 gateway=gateway,
                 cancelled=cancelled,
@@ -81,18 +90,17 @@ def split_by_llm(
 def _split_with_agent_loop(
     text: str,
     model: str,
-    max_word_count_cjk: int,
-    max_word_count_english: int,
     profile: Optional[LLMModelProfile] = None,
     gateway: Optional[LLMGateway] = None,
     cancelled: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     """使用agent loop 建立反馈循环进行文本断句，自动验证和修正"""
     prompt_path = "split/sentence"
+    # 内容语义分段目标（D11）：固定值，非观看限长配置。
     system_prompt = get_prompt(
         prompt_path,
-        max_word_count_cjk=max_word_count_cjk,
-        max_word_count_english=max_word_count_english,
+        segment_target_cjk=SEGMENT_TARGET_CJK,
+        segment_target_english=SEGMENT_TARGET_ENGLISH,
     )
 
     user_prompt = (
@@ -135,8 +143,6 @@ def _split_with_agent_loop(
         is_valid, error_message = _validate_split_result(
             original_text=text,
             split_result=split_result,
-            max_word_count_cjk=max_word_count_cjk,
-            max_word_count_english=max_word_count_english,
         )
 
         if is_valid:
@@ -160,10 +166,8 @@ def _split_with_agent_loop(
 def _validate_split_result(
     original_text: str,
     split_result: List[str],
-    max_word_count_cjk: int,
-    max_word_count_english: int,
 ) -> Tuple[bool, str]:
-    """验证断句结果: 内容一致性、Segments数量、长度限制
+    """验证断句结果: 内容一致性、Segments数量、内容分段目标
 
     Returns: (is_valid, error_feedback)
     """
@@ -235,17 +239,17 @@ def _validate_split_result(
             )
             return False, error_msg
 
-    # 检查每段长度是否超限
+    # 检查每段长度是否超出内容分段目标（非观看限长；D11）
     violations = []
     for i, segment in enumerate(split_result, 1):
         word_count = count_words(segment)
 
-        max_allowed = max_word_count_cjk if text_is_cjk else max_word_count_english
+        target = segment_target_for(original_cleaned)
 
-        if word_count > max_allowed:
+        if word_count > target:
             segment_preview = segment[:40] + "..." if len(segment) > 40 else segment
             violations.append(
-                f"Segment {i} '{segment_preview}': {word_count} {'chars' if text_is_cjk else 'words'} > {max_allowed} limit"
+                f"Segment {i} '{segment_preview}': {word_count} {'chars' if text_is_cjk else 'words'} > {target} target"
             )
 
     if violations:

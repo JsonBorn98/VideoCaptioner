@@ -428,12 +428,6 @@ def _build_subtitle_parser(subparsers) -> None:
         action="store_true",
         help="Use fast local word merging instead of LLM semantic re-segmentation",
     )
-    proc.add_argument(
-        "--max-cjk", type=int, metavar="N", help="Maximum CJK characters per subtitle cue"
-    )
-    proc.add_argument(
-        "--max-english", type=int, metavar="N", help="Maximum English words per subtitle cue"
-    )
 
     trans = p.add_argument_group("Translation options")
     trans.add_argument(
@@ -1165,8 +1159,6 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
         _set("subtitle.translate", False)
     if getattr(args, "no_split", False):
         _set("subtitle.split", False)
-    _set("subtitle.max_word_count_cjk", getattr(args, "max_cjk", None))
-    _set("subtitle.max_word_count_english", getattr(args, "max_english", None))
     _set("subtitle.thread_num", getattr(args, "thread_num", None))
     _set("subtitle.batch_size", getattr(args, "batch_size", None))
     _set("translate.enhanced_batch_size", getattr(args, "batch_size", None))

@@ -168,7 +168,6 @@ def normalize_segments(
             primary_side_only
             and seg.text.strip()
             and seg.translated_text.strip()
-            and not cfg.optimize_both_sides
         ):
             if cfg.speed_primary == "original":
                 fields_to_process = [("text", text_quote_state)]

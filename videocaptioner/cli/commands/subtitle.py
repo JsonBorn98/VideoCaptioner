@@ -320,8 +320,6 @@ def run(args: Namespace, config: dict) -> int:
                 model=_profile_model(utility_profile),
                 profile=utility_profile,
                 gateway=gateway,
-                max_word_count_cjk=get(config, "subtitle.max_word_count_cjk", 18),
-                max_word_count_english=get(config, "subtitle.max_word_count_english", 12),
                 use_llm=need_split,
             )
             asr_data = splitter.split_subtitle(asr_data)

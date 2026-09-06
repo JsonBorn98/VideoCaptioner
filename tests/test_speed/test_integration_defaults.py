@@ -263,25 +263,17 @@ def test_speed_settings_lists_custom_profiles_offscreen(tmp_path, monkeypatch):
     app.processEvents()
 
 
-def test_direct_subtitle_task_preserves_legacy_split_settings(tmp_path):
+def test_direct_subtitle_task_preserves_split_settings(tmp_path):
     from videocaptioner.ui.common.config import cfg
 
     original_split = cfg.get(cfg.need_split)
-    original_cjk = cfg.get(cfg.max_word_count_cjk)
-    original_english = cfg.get(cfg.max_word_count_english)
     try:
         cfg.set(cfg.need_split, True)
-        cfg.set(cfg.max_word_count_cjk, 8)
-        cfg.set(cfg.max_word_count_english, 8)
         task = TaskFactory.create_subtitle_task(
             file_path=str(tmp_path / "input.srt"),
             need_next_task=False,
         )
         assert task.subtitle_config.need_split
-        assert task.subtitle_config.max_word_count_cjk == 8
-        assert task.subtitle_config.max_word_count_english == 8
         assert Path(task.output_path).name.startswith("【初版字幕】")
     finally:
         cfg.set(cfg.need_split, original_split)
-        cfg.set(cfg.max_word_count_cjk, original_cjk)
-        cfg.set(cfg.max_word_count_english, original_english)

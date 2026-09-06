@@ -7,8 +7,6 @@ import time
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.split.split import (
-    MAX_WORD_COUNT_CJK,
-    MAX_WORD_COUNT_ENGLISH,
     SubtitleSplitter,
     preprocess_segments,
 )
@@ -99,8 +97,6 @@ class TestSubtitleSplitterInit:
         splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         assert splitter.thread_num == 1
         assert splitter.model == "gpt-4o-mini"
-        assert splitter.max_word_count_cjk == MAX_WORD_COUNT_CJK
-        assert splitter.max_word_count_english == MAX_WORD_COUNT_ENGLISH
         assert splitter.is_running is True
         assert splitter.executor is not None
 
@@ -109,13 +105,9 @@ class TestSubtitleSplitterInit:
         splitter = SubtitleSplitter(
             thread_num=10,
             model="gpt-4",
-            max_word_count_cjk=30,
-            max_word_count_english=20,
         )
         assert splitter.thread_num == 10
         assert splitter.model == "gpt-4"
-        assert splitter.max_word_count_cjk == 30
-        assert splitter.max_word_count_english == 20
 
     def test_thread_pool_created(self):
         """测试线程池正确创建"""
@@ -277,9 +269,7 @@ class TestSplitByCommonWords:
             ASRDataSeg(text="很", start_time=400, end_time=500),
             ASRDataSeg(text="好", start_time=500, end_time=600),
         ]
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=10
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         groups = splitter._split_by_common_words(segments)
         # 应该至少产生分割
         assert len(groups) >= 1
@@ -294,9 +284,7 @@ class TestSplitByCommonWords:
             ASRDataSeg(text="走", start_time=400, end_time=500),
             ASRDataSeg(text="吧", start_time=500, end_time=600),  # 后缀词
         ]
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=10
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         groups = splitter._split_by_common_words(segments)
         assert len(groups) >= 1
 
@@ -311,9 +299,7 @@ class TestSplitByCommonWords:
             ASRDataSeg(text="likes", start_time=500, end_time=600),
             ASRDataSeg(text="you", start_time=600, end_time=700),
         ]
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_english=10
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         groups = splitter._split_by_common_words(segments)
         assert len(groups) >= 1
 
@@ -344,9 +330,7 @@ class TestSplitLongSegment:
             ASRDataSeg(text="文", start_time=100, end_time=200),
             ASRDataSeg(text="本", start_time=200, end_time=300),
         ]
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter._split_long_segment(segments)
         assert len(result) == 1
         assert result[0].text == "短文本"
@@ -364,9 +348,7 @@ class TestSplitLongSegment:
         segments[mid].end_time = segments[mid].start_time + 50
         segments[mid + 1].start_time = segments[mid].end_time + 500
 
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter._split_long_segment(segments)
         # 应该被拆分成多个
         assert len(result) >= 2
@@ -387,9 +369,7 @@ class TestSplitLongSegment:
             ASRDataSeg(text=f"字{i}", start_time=i * 100, end_time=(i + 1) * 100)
             for i in range(100)
         ]
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter._split_long_segment(segments)
         # 应该被递归拆分
         assert len(result) >= 2
@@ -400,9 +380,7 @@ class TestSplitLongSegment:
             ASRDataSeg(text=f"字{i}", start_time=i * 100, end_time=(i + 1) * 100)
             for i in range(50)
         ]
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=10
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter._split_long_segment(segments)
         # 验证时间戳递增
         for i in range(len(result) - 1):
@@ -460,15 +438,13 @@ class TestMergeShortSegment:
         # 不应该合并（间隔太大）
         assert len(segments) == original_len
 
-    def test_merge_respects_max_word_count(self):
-        """测试合并不超过最大字数"""
+    def test_merge_respects_segment_target(self):
+        """测试合并不超过内容分段目标（固定值，D11）"""
         segments = [
             ASRDataSeg(text="这是一个中等长度的文本", start_time=0, end_time=1000),
             ASRDataSeg(text="这也是一个中等长度的文本", start_time=1100, end_time=2000),
         ]
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=10
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         original_len = len(segments)
         splitter.merge_short_segment(segments)
         # 不应该合并（会超过最大字数）
@@ -548,14 +524,6 @@ class TestEdgeCases:
         except (ValueError, Exception):
             # 如果抛出异常，这也是合理的
             pass
-
-    def test_negative_max_word_count(self):
-        """测试负数最大字数"""
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=-1
-        )
-        # 应该能够创建，但可能在使用时出问题
-        assert splitter.max_word_count_cjk == -1
 
     def test_very_large_thread_num(self):
         """测试非常大的线程数"""

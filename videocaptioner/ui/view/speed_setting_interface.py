@@ -484,22 +484,10 @@ class PostprocessSettingInterface(QWidget):
             cfg.need_remove_placeholders,
             group,
         )
-        self.optimizeBothSidesCard = SwitchSettingCard(
-            FIF.LANGUAGE,
-            self.tr("同时优化双语两侧"),
-            self.tr("默认只改写译文；开启后文本能力也可分别作用于原文"),
-            cfg.postprocess_optimize_both_sides,
-            group,
-        )
         bindings = (
             (self.trimTrailingPunctCard, cfg.trim_trailing_punct, "trim_trailing_punct"),
             (self.normalizeQuotesCard, cfg.need_normalize_quotes, "normalize_quotes"),
             (self.removePlaceholdersCard, cfg.need_remove_placeholders, "remove_placeholders"),
-            (
-                self.optimizeBothSidesCard,
-                cfg.postprocess_optimize_both_sides,
-                "optimize_both_sides",
-            ),
         )
         for card, item, field in bindings:
             self._addProfileReset(card, item, field)
@@ -1079,7 +1067,6 @@ class PostprocessSettingInterface(QWidget):
             (cfg.min_compensation_ms, "min_compensation_ms"),
             (cfg.max_compensation_gap_ms, "max_compensation_gap_ms"),
             (cfg.max_compensation_ms, "max_compensation_ms"),
-            (cfg.postprocess_optimize_both_sides, "optimize_both_sides"),
         ):
             item.valueChanged.connect(
                 lambda value, field_name=field_name: self._persistProfileValue(
@@ -1162,7 +1149,6 @@ class PostprocessSettingInterface(QWidget):
                 (cfg.min_compensation_ms, config.min_compensation_ms),
                 (cfg.max_compensation_gap_ms, config.max_compensation_gap_ms),
                 (cfg.max_compensation_ms, config.max_compensation_ms),
-                (cfg.postprocess_optimize_both_sides, config.optimize_both_sides),
             ):
                 cfg.set(item, value)
         finally:

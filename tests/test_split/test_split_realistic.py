@@ -62,7 +62,7 @@ class TestRealWorldScenarios:
         text = "今天我们要讨论的话题是人工智能在现代社会中的应用特别是在医疗健康领域的突破性进展这些技术正在深刻地改变着我们的生活方式从诊断到治疗再到康复每个环节都有AI技术的身影"
         segments = create_whisper_style_segments(text, start_ms=0, char_duration_ms=200)
 
-        SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20)
+        SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         asr_data = ASRData(segments)
 
         # 预处理：转换为词级
@@ -116,7 +116,7 @@ class TestRealWorldScenarios:
         segments = create_whisper_style_segments(text, char_duration_ms=180)
 
         # 新闻播报：时间间隔相对均匀
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=15)
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         groups = splitter._group_by_time_gaps(segments, max_gap=1000)
 
         # 没有大停顿，应该是一组
@@ -237,7 +237,7 @@ class TestEdgeCasesRealistic:
         text = "快速语速测试数据这样的字幕通常出现在快节奏的节目中"
         segments = create_whisper_style_segments(text, char_duration_ms=150)
 
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=15)
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         # 快速语速不应该导致过度分割
         result = splitter._split_long_segment(segments[:15])
         assert len(result) >= 1
@@ -391,7 +391,7 @@ class TestSplitByCommonWordsRealistic:
         text = "我觉得这个方案很好但是还需要优化一下所以我建议再讨论讨论"
         segments = create_whisper_style_segments(text)
 
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=15)
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         groups = splitter._split_by_common_words(segments)
 
         # 应该在"但是"、"所以"处考虑分割
@@ -402,7 +402,7 @@ class TestSplitByCommonWordsRealistic:
         text = "I think this is a good idea but we need more time and we should discuss it further"
         segments = create_whisper_style_segments(text)
 
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_english=12)
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         groups = splitter._split_by_common_words(segments)
 
         # 应该在 "but"、"and" 处考虑分割

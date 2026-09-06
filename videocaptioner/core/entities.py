@@ -751,8 +751,6 @@ class SubtitleConfig:
     imported_glossary_path: Optional[str] = None
     # 字幕布局和分割
     subtitle_layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP
-    max_word_count_cjk: int = 12
-    max_word_count_english: int = 18
     need_split: bool = True
     # ``auto`` delegates source-language identification to the translation
     # workflow; otherwise this is a TargetLanguage display value selected by
@@ -808,8 +806,6 @@ class SubtitleConfig:
 
         if self.need_split:
             lines.append("Split: Yes")
-            lines.append(f"  Max Words (CJK): {self.max_word_count_cjk}")
-            lines.append(f"  Max Words (English): {self.max_word_count_english}")
 
         if self.need_optimize:
             lines.append("Optimize: Yes")

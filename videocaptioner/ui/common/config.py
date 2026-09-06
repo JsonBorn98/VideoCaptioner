@@ -318,12 +318,6 @@ class Config(QConfig):
         OptionsValidator(TargetLanguage),
         EnumSerializer(TargetLanguage),
     )
-    max_word_count_cjk = ConfigItem(
-        "Subtitle", "MaxWordCountCJK", 28, RangeValidator(8, 100)
-    )
-    max_word_count_english = ConfigItem(
-        "Subtitle", "MaxWordCountEnglish", 20, RangeValidator(8, 100)
-    )
     custom_prompt_text = ConfigItem("Subtitle", "CustomPromptText", "")
     optimization_prompt_text = ConfigItem("Subtitle", "OptimizationPromptText", "")
 
@@ -372,9 +366,6 @@ class Config(QConfig):
     # 完整方案 ID。模板和自定义方案由 PostprocessProfileStore 校验。
     postprocess_profile = OptionsConfigItem(
         "Postprocess", "Profile", "balanced", SpeedProfileValidator()
-    )
-    postprocess_optimize_both_sides = ConfigItem(
-        "Postprocess", "OptimizeBothSides", False, BoolValidator()
     )
     workflow_auto_export = ConfigItem(
         "SubtitleDelivery", "AutoExport", False, BoolValidator()

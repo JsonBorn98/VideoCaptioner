@@ -177,7 +177,6 @@ def run_post_stage(
             primary_side=cfg.speed_primary,
             timing_windows=timing_windows,
             reference_audit=cfg.speed_reference_audit,
-            optimize_both_sides=cfg.optimize_both_sides,
             semantic_repair=cfg.speed_semantic_repair,
             semantic_profile=cfg.utility_llm_profile,
             semantic_window_size=cfg.speed_semantic_window,

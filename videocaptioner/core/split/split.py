@@ -6,7 +6,7 @@ from typing import Callable, List, Union
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.llm import LLMGateway, LLMModelProfile
-from videocaptioner.core.split.split_by_llm import split_by_llm
+from videocaptioner.core.split.split_by_llm import segment_target_for, split_by_llm
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.text_utils import (
     count_words,
@@ -17,11 +17,9 @@ from videocaptioner.core.utils.text_utils import (
 
 logger = setup_logger("subtitle_splitter")
 
-# ==================== 配置常量 ====================
-
-# 字数限制
-MAX_WORD_COUNT_CJK = 25  # CJK文本单行最大字数
-MAX_WORD_COUNT_ENGLISH = 18  # 英文文本单行最大单词数
+# 内容语义分段目标（D11，见 docs/dev/subtitle-postprocessing-design-record.md）：
+# 上游分段只服务内容处理与模型请求输入，不再读取观看显示上限（ADR-0020）。
+# 固定值唯一来源是 split_by_llm.segment_target_for，禁止再造多套默认值。
 
 # Segments阈值
 SEGMENT_WORD_THRESHOLD = 500  # 长文本Segments阈值(字数)
@@ -125,8 +123,6 @@ class SubtitleSplitter:
         self,
         thread_num,
         model,
-        max_word_count_cjk: int = MAX_WORD_COUNT_CJK,
-        max_word_count_english: int = MAX_WORD_COUNT_ENGLISH,
         use_llm: bool = True,
         progress_callback: Callable[[int, int], None] | None = None,
         profile: "LLMModelProfile | None" = None,
@@ -137,8 +133,6 @@ class SubtitleSplitter:
         Args:
             thread_num: 并发线程数
             model: LLM模型名称（仅 profile 缺失的旧路径使用）
-            max_word_count_cjk: CJK最大字数
-            max_word_count_english: 英文最大单词数
             use_llm: 是否使用LLM进行语义断句。False时只使用本地规则快速合并。
             profile: 工具角色模型配置方案；存在时请求一律经 LLMGateway 发出
             gateway: 可注入的 gateway 实例（None 且 profile 存在时惰性构造）
@@ -149,8 +143,6 @@ class SubtitleSplitter:
         self.gateway = gateway or (
             LLMGateway(max_concurrency=thread_num) if profile is not None else None
         )
-        self.max_word_count_cjk = max_word_count_cjk
-        self.max_word_count_english = max_word_count_english
         self.use_llm = use_llm
         self.progress_callback = progress_callback
         self.is_running = True
@@ -366,8 +358,6 @@ class SubtitleSplitter:
         sentences = split_by_llm(
             text=txt,
             model=self.model,
-            max_word_count_cjk=self.max_word_count_cjk,
-            max_word_count_english=self.max_word_count_english,
             profile=self.profile,
             gateway=self.gateway,
             # 停止后不得再发出新的断句请求（含 agent-loop 反馈步与网关重试）。
@@ -401,12 +391,8 @@ class SubtitleSplitter:
         # 2. 按常见词分割长句
         common_result_groups = []
         for group in segment_groups:
-            max_word_count = (
-                self.max_word_count_cjk
-                if is_mainly_cjk("".join(seg.text for seg in group))
-                else self.max_word_count_english
-            )
-            if count_words("".join(seg.text for seg in group)) > max_word_count:
+            segment_target = segment_target_for("".join(seg.text for seg in group))
+            if count_words("".join(seg.text for seg in group)) > segment_target:
                 split_groups = self._split_by_common_words(group)
                 common_result_groups.extend(split_groups)
             else:
@@ -563,16 +549,12 @@ class SubtitleSplitter:
         current_group = []
 
         for i, seg in enumerate(segments):
-            max_word_count = (
-                self.max_word_count_cjk
-                if is_mainly_cjk(seg.text)
-                else self.max_word_count_english
-            )
+            segment_target = segment_target_for(seg.text)
 
             # 前缀词分割
             if any(
                 seg.text.lower().startswith(word) for word in prefix_split_words
-            ) and len(current_group) >= int(max_word_count * PREFIX_WORD_RATIO):
+            ) and len(current_group) >= int(segment_target * PREFIX_WORD_RATIO):
                 result.append(current_group)
                 logger.debug(f"Split before prefix word {seg.text} ")
                 current_group = []
@@ -584,7 +566,7 @@ class SubtitleSplitter:
                     segments[i - 1].text.lower().endswith(word)
                     for word in suffix_split_words
                 )
-                and len(current_group) >= int(max_word_count * SUFFIX_WORD_RATIO)
+                and len(current_group) >= int(segment_target * SUFFIX_WORD_RATIO)
             ):
                 result.append(current_group)
                 logger.debug(f"Split after suffix word {segments[i - 1].text} ")
@@ -618,15 +600,11 @@ class SubtitleSplitter:
                 continue
 
             merged_text = "".join(seg.text for seg in current_segments)
-            max_word_count = (
-                self.max_word_count_cjk
-                if is_mainly_cjk(merged_text)
-                else self.max_word_count_english
-            )
+            segment_target = segment_target_for(merged_text)
             n = len(current_segments)
 
             # Segments足够短或无法继续拆分
-            if count_words(merged_text) <= max_word_count or n < RULE_MIN_SEGMENT_SIZE:
+            if count_words(merged_text) <= segment_target or n < RULE_MIN_SEGMENT_SIZE:
                 merged_seg = ASRDataSeg(
                     merged_text.strip(),
                     current_segments[0].start_time,
@@ -734,24 +712,20 @@ class SubtitleSplitter:
             current_words = count_words(current_seg.text)
             next_words = count_words(next_seg.text)
             total_words = current_words + next_words
-            max_word_count = (
-                self.max_word_count_cjk
-                if is_mainly_cjk(current_seg.text)
-                else self.max_word_count_english
-            )
+            segment_target = segment_target_for(current_seg.text)
 
             # 判断是否合并
             should_merge = (
                 time_gap < MERGE_SHORT_GAP
                 and (current_words < MERGE_MIN_WORDS or next_words < MERGE_MIN_WORDS)
-                and total_words <= max_word_count
+                and total_words <= segment_target
             ) or (
                 time_gap < MERGE_VERY_SHORT_GAP
                 and (
                     current_words < MERGE_VERY_SHORT_WORDS
                     or next_words < MERGE_VERY_SHORT_WORDS
                 )
-                and total_words <= max_word_count
+                and total_words <= segment_target
             )
 
             if should_merge:

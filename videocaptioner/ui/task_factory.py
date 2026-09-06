@@ -441,8 +441,6 @@ class TaskFactory:
             subtitle_style_reference_width=reference_width,
             subtitle_style_reference_height=reference_height,
             # 字幕分割
-            max_word_count_cjk=cfg.max_word_count_cjk.value,
-            max_word_count_english=cfg.max_word_count_english.value,
             need_split=cfg.need_split.value,
             # Traditional translators always use their own automatic source-language
             # detection. Keep the LLM-only preference intact in cfg, but freeze the

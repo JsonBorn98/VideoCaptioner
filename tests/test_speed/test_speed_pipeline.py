@@ -242,34 +242,6 @@ def test_reference_side_can_be_audited_without_being_rewritten():
     ]
 
 
-def test_both_sides_optimizes_reference_only_when_primary_does_not_worsen():
-    data = ASRData(
-        [
-            ASRDataSeg(
-                "This source sentence is deliberately much too long for half a second.",
-                0,
-                500,
-                "好",
-            ),
-            ASRDataSeg("End.", 1000, 2000, "结束"),
-        ]
-    )
-
-    optimized, result = optimize_speed(
-        data,
-        mode="apply",
-        layout=SubtitleLayoutEnum.ORIGINAL_ON_TOP,
-        primary_side="translate",
-        optimize_both_sides=True,
-    )
-
-    assert optimized.segments[0].end_time > 500
-    assert result.reference_before is not None
-    assert result.reference_after is not None
-    assert result.reference_after.hard_deficit <= result.reference_before.hard_deficit
-    assert [segment.translated_text for segment in optimized.segments] == ["好", "结束"]
-
-
 def test_semantic_repair_is_committed_only_after_semantic_and_metric_acceptance():
     data = ASRData(
         [

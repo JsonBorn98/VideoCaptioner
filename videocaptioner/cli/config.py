@@ -145,8 +145,6 @@ DEFAULTS: Dict[str, Any] = {
         "optimize": True,
         "translate": False,
         "split": True,
-        "max_word_count_cjk": 18,
-        "max_word_count_english": 12,
         "thread_num": 10,
         "batch_size": 20,
         "optimization_prompt": "",

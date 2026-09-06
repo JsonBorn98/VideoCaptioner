@@ -351,8 +351,6 @@ class SubtitleThread(QThread):
                     else "",
                     profile=subtitle_config.utility_llm_profile,
                     gateway=gateway,
-                    max_word_count_cjk=subtitle_config.max_word_count_cjk,
-                    max_word_count_english=subtitle_config.max_word_count_english,
                     use_llm=use_llm_split,
                     progress_callback=lambda completed, total: self.progress.emit(
                         5 + int(completed / max(total, 1) * 10),

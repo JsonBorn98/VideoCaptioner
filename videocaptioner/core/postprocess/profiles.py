@@ -55,7 +55,6 @@ def _factory_config(template_id: str) -> PostprocessConfig:
         speed_profile=template_id,
         speed_semantic_repair=True,
         precise_timing=False,
-        optimize_both_sides=False,
     )
 
 
@@ -121,6 +120,10 @@ _LEGACY_DROP_FIELDS = frozenset(
         # 票 12 退役的模型名字段：无对应新字段，直接丢弃——模型与连接由
         # utility_llm_profile 运行期注入（模型配置方案库），不来自持久化存档。
         "llm_model",
+        # 票 07（D05/D20）退役的原文改写开关：后处理绝对保护原文，不再
+        # 保留任何允许改写原文的开关。旧档残留值直接丢弃、不迁移、不兼容
+        # 读取——残留旧值不改变新任务行为；文本能力只作用于译文侧。
+        "optimize_both_sides",
     }
 )
 

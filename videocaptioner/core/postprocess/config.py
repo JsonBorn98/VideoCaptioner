@@ -126,8 +126,6 @@ class PostprocessConfig:
     """语义修复上下文窗口大小；写回仍以非重叠事务执行。"""
     speed_llm_uncertain_review: bool = True
     """确定性校验不能判定时，调用独立语义复核。"""
-    optimize_both_sides: bool = False
-    """双语字幕默认只改写译文；开启后允许文本能力分别处理原文与译文。"""
     # 领域术语：媒体增强对齐 / 对齐时间轴（见 CONTEXT.md）。代码标识符保持 precise_timing
     # 不变，UI 显示串已改称"媒体增强对齐 / 对齐时间轴"；"精准对齐 / 精准时间轴"为旧称，勿再沿用。
     precise_timing: bool = False
@@ -149,7 +147,6 @@ class PostprocessConfig:
             "speed_reference_audit",
             "speed_semantic_repair",
             "speed_llm_uncertain_review",
-            "optimize_both_sides",
             "precise_timing",
             "save_timing_sidecar",
         )

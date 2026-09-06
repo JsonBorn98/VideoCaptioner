@@ -159,8 +159,6 @@ def run(args: Namespace, config: dict) -> int:
                 translation_mode=getattr(args, "translation_mode", None),
                 target_language=getattr(args, "target_language", None),
                 reflect=getattr(args, "reflect", False),
-                max_cjk=None,
-                max_english=None,
                 prompt=getattr(args, "prompt", None),
                 prompt_file=getattr(args, "prompt_file", None),
                 review_prompt=getattr(args, "review_prompt", None),

@@ -58,7 +58,6 @@ def test_split_request_carries_profile_timeout_and_labels():
 
     result = split_by_llm(
         "第一段第二段",
-        max_word_count_cjk=18,
         profile=profile,
         gateway=gateway,
     )
@@ -82,7 +81,6 @@ def test_splitter_forwards_profile_and_gateway_to_module_call():
     splitter = SubtitleSplitter(
         thread_num=1,
         model="ignored-when-profile-is-set",
-        max_word_count_english=4,
         profile=profile,
         gateway=gateway,
     )

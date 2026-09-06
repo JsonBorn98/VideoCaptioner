@@ -220,8 +220,6 @@ class TestSubtitleThreadSplit:
         """Test sentence-based splitting (using mock LLM)."""
         config = base_config
         config.need_split = True
-        config.max_word_count_cjk = 15
-        config.max_word_count_english = 20
         config.utility_llm_profile = get_test_profile()
 
         output_path = os.path.join(output_dir, "split_sentence.srt")

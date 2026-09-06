@@ -110,8 +110,6 @@ videocaptioner subtitle <字幕文件> [选项]
 | `--no-optimize` | 跳过优化 |
 | `--no-translate` | 跳过翻译 |
 | `--no-split` | 关闭 LLM 智能断句，使用本地快速合并 |
-| `--max-cjk N` | CJK 单段最大字符数 |
-| `--max-english N` | 英文单段最大单词数 |
 | `--reflect` | 反思式翻译，仅 `single_llm` |
 | `--glossary FILE` | 导入 `.vcglossary.json`，仅 `enhanced_llm` |
 | `--review-prompt TEXT` | 高级校对 Prompt，仅 `enhanced_llm` |

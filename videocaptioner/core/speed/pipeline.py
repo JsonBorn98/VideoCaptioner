@@ -17,7 +17,6 @@ from .deterministic import (
     TimingCue,
     accepts_candidate,
     build_speed_samples,
-    candidate_is_non_worsening,
     measure,
     optimize_subtitle_timing,
 )
@@ -470,7 +469,6 @@ def optimize_speed(
     protected_indices: Iterable[int] = (),
     timing_windows: Iterable[TimingEvidenceWindow] = (),
     reference_audit: bool = False,
-    optimize_both_sides: bool = False,
     semantic_repair: bool = False,
     semantic_profile: LLMModelProfile | None = None,
     semantic_reviewer_profile: LLMModelProfile | None = None,
@@ -549,73 +547,9 @@ def optimize_speed(
             )
             changes.extend(semantic_timing_changes)
     measured_output = output if mode == "apply" else _clone_with_timings(data, optimized)
-    both_sides_applied = False
-    secondary_result = None
-    if (
-        optimize_both_sides
-        and mode == "apply"
-        and any(segment.translated_text.strip() for segment in output.segments)
-    ):
-        if primary_side == "original":
-            secondary_side: PrimarySide = "translate"
-        elif primary_side == "translate":
-            secondary_side = "original"
-        elif layout in (
-            SubtitleLayoutEnum.TRANSLATE_ON_TOP,
-            SubtitleLayoutEnum.ONLY_TRANSLATE,
-        ):
-            secondary_side = "original"
-        else:
-            secondary_side = "translate"
-        secondary_output, secondary_result = optimize_speed(
-            output,
-            policy=selected_policy,
-            profile_id=profile_id,
-            mode=mode,
-            layout=layout,
-            primary_side=secondary_side,
-            protected_indices=protected_indices,
-            timing_windows=evidence,
-            reference_audit=False,
-            optimize_both_sides=False,
-            semantic_repair=semantic_repair,
-            semantic_profile=semantic_profile,
-            semantic_reviewer_profile=semantic_reviewer_profile,
-            semantic_window_size=semantic_window_size,
-            semantic_uncertain_review=semantic_uncertain_review,
-            semantic_cache=semantic_cache,
-            semantic_rewriter=semantic_rewriter,
-            semantic_reviewer=semantic_reviewer,
-            semantic_gateway=semantic_gateway,
-        )
-        primary_candidate = measure(
-            _to_timing_cues(
-                secondary_output,
-                layout,
-                primary_side,
-                set(),
-                selected_policy,
-                (),
-            ),
-            selected_policy,
-        )
-        if candidate_is_non_worsening(after, primary_candidate):
-            output = secondary_output
-            measured_output = secondary_output
-            after = primary_candidate
-            changes.extend(secondary_result.changes)
-            structural_operations = (
-                *structural_operations,
-                *secondary_result.structural_operations,
-            )
-            semantic_records = (*semantic_records, *secondary_result.semantic_records)
-            both_sides_applied = True
     reference_before = None
     reference_after = None
-    if secondary_result is not None and both_sides_applied:
-        reference_before = secondary_result.before
-        reference_after = secondary_result.after
-    elif reference_audit or optimize_both_sides:
+    if reference_audit:
         reference_before_cues = [
             replace(
                 cue,

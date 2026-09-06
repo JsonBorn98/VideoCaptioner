@@ -148,14 +148,16 @@ class TestSubtitleSplitterEdgeCases:
         splitter = SubtitleSplitter(
             thread_num=1,
             model="gpt-4o-mini",
-            max_word_count_english=6,
             use_llm=False,
         )
         result = splitter.split_subtitle(asr_data)
 
         assert len(result.segments) < len(segments)
         assert sum(count_words(seg.text) for seg in result.segments) == len(segments)
-        assert all(count_words(seg.text) <= 6 for seg in result.segments)
+        # 内容分段目标是固定值（D11）：快速合并按它约束，不再有可配置观看限长。
+        from videocaptioner.core.split.split_by_llm import SEGMENT_TARGET_ENGLISH
+
+        assert all(count_words(seg.text) <= SEGMENT_TARGET_ENGLISH for seg in result.segments)
 
     def test_extremely_short_segments(self):
         """测试极短片段(1-2个字)"""
@@ -165,9 +167,7 @@ class TestSubtitleSplitterEdgeCases:
         ]
         asr_data = ASRData(segments)
 
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter.split_subtitle(asr_data)
 
         assert len(result.segments) < len(segments)  # 应该合并了
@@ -178,9 +178,7 @@ class TestSubtitleSplitterEdgeCases:
         segments = [ASRDataSeg(text=long_text, start_time=0, end_time=60000)]
         asr_data = ASRData(segments)
 
-        splitter = SubtitleSplitter(
-            thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20
-        )
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter.split_subtitle(asr_data)
 
         # 应该被分割成多个片段
@@ -204,7 +202,7 @@ class TestSubtitleSplitterEdgeCases:
         ]
         asr_data = ASRData(segments)
 
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20)
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter.split_subtitle(asr_data)
 
         assert len(result.segments) > len(segments)
@@ -248,7 +246,7 @@ class TestSubtitleSplitterEdgeCases:
         ]
         asr_data = ASRData(segments)
 
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20)
+        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini")
         result = splitter.split_subtitle(asr_data)
 
         assert isinstance(result, ASRData)
@@ -307,7 +305,6 @@ class TestSubtitleSplitterEdgeCases:
         splitter = SubtitleSplitter(
             thread_num=1,
             model="gpt-4o-mini",
-            max_word_count_cjk=20,
         )
 
         result = splitter._merge_segments_based_on_sentences(
@@ -331,7 +328,6 @@ class TestSubtitleSplitterEdgeCases:
         splitter = SubtitleSplitter(
             thread_num=1,
             model="gpt-4o-mini",
-            max_word_count_english=4,
         )
 
         result = splitter._merge_segments_based_on_sentences(
@@ -345,49 +341,6 @@ class TestSubtitleSplitterEdgeCases:
         assert result[0].end_time == segments[1].end_time
         assert result[1].start_time == segments[2].start_time
         assert splitter.rule_fallback_segments == 2
-
-
-class TestSplitterParameters:
-    """测试分割器参数边界"""
-
-    def test_max_word_count_zero(self):
-        """测试最大字数为0(可能被忽略或使用默认值)"""
-        segments = [ASRDataSeg(text="测试文本", start_time=0, end_time=1000)]
-        asr_data = ASRData(segments)
-
-        try:
-            splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=0,
-            )
-            result = splitter.split_subtitle(asr_data)
-            # 如果不抛异常，应该返回有效结果
-            assert isinstance(result, ASRData)
-        except (ValueError, AssertionError):
-            # 也可能抛出异常
-            pass
-
-    def test_max_word_count_very_large(self):
-        """测试最大字数超大(10000)"""
-        segments = [ASRDataSeg(text="测试" * 100, start_time=0, end_time=10000)]
-        asr_data = ASRData(segments)
-
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=10000,
-        )
-        result = splitter.split_subtitle(asr_data)
-
-        # 超大限制应该不分割
-        assert len(result.segments) <= 2
-
-    def test_max_word_count_exactly_matches(self):
-        """测试字数恰好等于限制"""
-        text = "测" * 20  # 恰好20字
-        segments = [ASRDataSeg(text=text, start_time=0, end_time=2000)]
-        asr_data = ASRData(segments)
-
-        splitter = SubtitleSplitter(thread_num=1, model="gpt-4o-mini", max_word_count_cjk=20,
-        )
-        result = splitter.split_subtitle(asr_data)
-
-        assert len(result.segments) >= 1
 
 
 class TestMergeShortSegments:
