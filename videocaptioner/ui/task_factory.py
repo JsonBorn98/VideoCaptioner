@@ -530,6 +530,7 @@ class TaskFactory:
             else:
                 layout_mode = PostprocessLayoutMode.AUTO
 
+        target = cfg.target_language.value
         task = PostprocessTask(
             source_subtitle_path=subtitle_path,
             initial_subtitle_path=subtitle_path,
@@ -542,6 +543,8 @@ class TaskFactory:
             need_next_task=need_next_task,
             input_data=input_data,
             workflow_base_name=resolved_base_name,
+            source_language=str(cfg.source_language.value),
+            target_language=str(getattr(target, "value", target) or ""),
             export_policy=export_policy or TaskFactory.create_subtitle_export_policy(),
         )
         if task_id:

@@ -4,6 +4,7 @@ from videocaptioner.core.entities import SubtitleExportPolicy, SubtitleLayoutEnu
 from videocaptioner.core.llm.models import LLMModelProfile, LLMTransport, ProviderDialect
 from videocaptioner.core.llm.profiles import LLMModelProfileStore
 from videocaptioner.core.postprocess import PostprocessConfig, PostprocessLayoutMode
+from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.task_factory import TaskFactory
 
@@ -32,6 +33,26 @@ def _seed_utility_profiles(tmp_path, monkeypatch):
     cfg.set(cfg.main_llm_profile_id, "main-profile")
     yield
     cfg.set(cfg.main_llm_profile_id, original)
+
+
+def test_postprocess_task_carries_configured_languages(tmp_path):
+    subtitle = tmp_path / "【初版字幕】sample.srt"
+    subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n你好\n", encoding="utf-8")
+    original_source = cfg.get(cfg.source_language)
+    original_target = cfg.get(cfg.target_language)
+    try:
+        cfg.set(cfg.source_language, "auto")
+        cfg.set(cfg.target_language, TargetLanguage.SIMPLIFIED_CHINESE)
+        task = TaskFactory.create_postprocess_task(str(subtitle), need_next_task=False)
+        assert task.source_language == "auto"
+        assert task.target_language in {
+            TargetLanguage.SIMPLIFIED_CHINESE,
+            TargetLanguage.SIMPLIFIED_CHINESE.value,
+            "简体中文",
+        }
+    finally:
+        cfg.set(cfg.source_language, original_source)
+        cfg.set(cfg.target_language, original_target)
 
 
 def test_workflow_postprocess_task_trusts_upstream_layout(tmp_path):

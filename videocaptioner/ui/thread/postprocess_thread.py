@@ -103,6 +103,11 @@ class PostprocessThread(QThread):
                 timing_resolver=_resolve_timing,
                 gateway=self._injected_gateway,
                 cancelled=self.isInterruptionRequested,
+                progress=lambda value, message: (
+                    None
+                    if self.isInterruptionRequested()
+                    else self.progress.emit(value, self.tr(message))
+                ),
             )
             if self._finish_if_cancelled():
                 return

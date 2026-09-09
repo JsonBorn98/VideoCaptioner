@@ -67,6 +67,59 @@ def test_postprocess_thread_unexpected_failure_continues_with_initial(
     assert task.active_subtitle_path == str(source)
 
 
+def test_postprocess_thread_forwards_progress_while_runner_is_still_working(
+    tmp_path, monkeypatch
+):
+    """卡在「正在读取初版字幕」：run_postprocess_task 期间没有后续进度。"""
+
+    source = tmp_path / "【初版字幕】sample.srt"
+    _subtitle(source)
+    task = PostprocessTask(
+        str(source),
+        config_snapshot=PostprocessConfig(
+            trim_trailing_punct=False,
+            speed_optimize=False,
+            speed_semantic_repair=False,
+        ),
+    )
+    captured = {}
+    messages = []
+
+    def capturing_runner(task, **kwargs):
+        captured["progress"] = kwargs.get("progress")
+        progress = captured["progress"]
+        if progress is not None:
+            progress(40, "正在修复观看问题")
+        from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+        from videocaptioner.core.entities import SubtitleLayoutEnum
+        from videocaptioner.core.postprocess.models import PostprocessResult
+        from videocaptioner.core.postprocess.report import QualityReport
+
+        data = ASRData([ASRDataSeg("译文", 0, 2000)])
+        return PostprocessResult(
+            task,
+            data,
+            data,
+            QualityReport(segment_count=1),
+            SubtitleLayoutEnum.ONLY_TRANSLATE,
+            1.0,
+            (),
+            True,
+            False,
+        )
+
+    monkeypatch.setattr(
+        "videocaptioner.ui.thread.postprocess_thread.run_postprocess_task",
+        capturing_runner,
+    )
+    thread = PostprocessThread(task)
+    thread.progress.connect(lambda _value, msg: messages.append(msg))
+    thread.run()
+
+    assert captured.get("progress") is not None
+    assert any("正在修复观看问题" in msg for msg in messages)
+
+
 def test_postprocess_thread_cancel_suppresses_late_finished_signal(tmp_path, monkeypatch):
     source = tmp_path / "【初版字幕】sample.srt"
     _subtitle(source)

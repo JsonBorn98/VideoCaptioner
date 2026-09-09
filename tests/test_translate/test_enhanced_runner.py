@@ -1,10 +1,17 @@
 import json
+from pathlib import Path
 
 import pytest
 
 import videocaptioner.core.translate.enhanced.runner as runner_module
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.translate.enhanced.models import EnhancedTranslationError
+
+
+def _written_checkpoint(tmp_path: Path) -> Path:
+    matches = list((tmp_path / "videocaptioner-workspace").rglob("translation-checkpoint.json"))
+    assert matches, "expected translation checkpoint in process workspace"
+    return matches[0]
 
 
 def test_audit_failure_preserves_completed_main_translation_checkpoint(
@@ -37,8 +44,7 @@ def test_audit_failure_preserves_completed_main_translation_checkpoint(
             base_name="episode",
         )
 
-    checkpoint = tmp_path / "【增强翻译检查点】episode.json"
-    assert checkpoint.is_file()
+    checkpoint = _written_checkpoint(tmp_path)
     document = json.loads(checkpoint.read_text("utf-8"))
     assert document["1"]["original_subtitle"] == "Hello"
     assert document["1"]["translated_subtitle"] == "你好"
@@ -82,8 +88,7 @@ def test_failed_later_translation_batch_keeps_only_completed_checkpoint(
             base_name="episode",
         )
 
-    checkpoint = tmp_path / "【增强翻译检查点】episode.json"
-    assert checkpoint.is_file()
+    checkpoint = _written_checkpoint(tmp_path)
     document = json.loads(checkpoint.read_text("utf-8"))
     assert document["1"]["original_subtitle"] == "Hello"
     assert document["1"]["translated_subtitle"] == "你好"
@@ -116,8 +121,7 @@ def test_cancel_after_first_translation_batch_keeps_completed_checkpoint(
             base_name="episode",
         )
 
-    checkpoint = tmp_path / "【增强翻译检查点】episode.json"
-    assert checkpoint.is_file()
+    checkpoint = _written_checkpoint(tmp_path)
     document = json.loads(checkpoint.read_text("utf-8"))
     assert document["1"]["translated_subtitle"] == "你好"
     assert document["2"]["translated_subtitle"] == ""
@@ -152,8 +156,6 @@ def test_translation_checkpoint_merges_out_of_order_batches_by_subtitle_id(
             base_name="episode",
         )
 
-    document = json.loads(
-        (tmp_path / "【增强翻译检查点】episode.json").read_text("utf-8")
-    )
+    document = json.loads(_written_checkpoint(tmp_path).read_text("utf-8"))
     assert document["1"]["translated_subtitle"] == "你好"
     assert document["2"]["translated_subtitle"] == "世界"

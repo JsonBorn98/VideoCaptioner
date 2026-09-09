@@ -146,3 +146,44 @@ def test_standalone_postprocess_discovers_translation_stage_assets(tmp_path):
     # 用户看到的警告原文：缺失项里含检查点（「没有找到中间检查文件」）。
     assert not any("过程资产缺失" in warning and "checkpoint" in warning
                    for warning in result.warnings)
+
+
+def test_standalone_postprocess_finds_assets_when_languages_do_not_match(tmp_path):
+    """GUI 独立后处理常不带语言；翻译侧则是 auto + 简体中文。"""
+
+    run = enhanced_runner_module.run_enhanced_translation(
+        ASRData([ASRDataSeg("Hello world.", 0, 2000)]),
+        EnhancedTranslationConfig(
+            main_role=TranslationRoleSnapshot("main", _profile()),
+            review_role=TranslationRoleSnapshot("review", _profile()),
+            source_language="auto",
+            target_language="简体中文",
+            execution_mode=TranslationExecutionMode.CLI,
+        ),
+        output_dir=tmp_path,
+        base_name="clip",
+    )
+    initial = _save_initial(run, tmp_path)
+
+    result = run_postprocess_task(
+        PostprocessTask(
+            str(initial),
+            postprocessed_subtitle_path=str(tmp_path / "【后处理字幕】clip.srt"),
+            workflow_base_name="clip",
+            layout_mode=PostprocessLayoutMode.ORIGINAL_ON_TOP,
+            config_snapshot=PostprocessConfig(
+                trim_trailing_punct=False, speed_semantic_repair=False
+            ),
+        )
+    )
+
+    assert result.succeeded
+    discovery = result.task.asset_discovery
+    assert discovery is not None
+    assert discovery.asset_path("checkpoint") is not None
+    assert "checkpoint" not in discovery.missing
+    assert "translation_snapshot" not in discovery.missing
+    assert result.task.translation_snapshot is not None
+    assert not any(
+        "过程资产缺失" in warning and "checkpoint" in warning for warning in result.warnings
+    )

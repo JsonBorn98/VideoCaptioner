@@ -141,10 +141,57 @@ def normalize_task_name(name: str) -> str:
     return slug
 
 
+_LANGUAGE_DIRECTORY_ALIASES: dict[str, str] | None = None
+
+
+def _slug_language_token(value: str) -> str:
+    return re.sub(
+        r"[^a-z0-9]+", "-", unicodedata.normalize("NFKC", value).strip().casefold()
+    ).strip("-")
+
+
+def _language_directory_aliases() -> dict[str, str]:
+    """Display names and vendor codes collapse to one ASCII directory token."""
+
+    global _LANGUAGE_DIRECTORY_ALIASES
+    if _LANGUAGE_DIRECTORY_ALIASES is not None:
+        return _LANGUAGE_DIRECTORY_ALIASES
+    from ..translate.types import BING_LANG_MAP, GOOGLE_LANG_MAP, TargetLanguage
+
+    aliases: dict[str, str] = {"auto": "auto", "und": "und"}
+    for language in TargetLanguage:
+        canonical = _slug_language_token(str(BING_LANG_MAP.get(language, language.name)))
+        if not canonical:
+            continue
+        aliases[language.value.casefold()] = canonical
+        aliases[language.name.casefold()] = canonical
+        aliases[canonical] = canonical
+        google = GOOGLE_LANG_MAP.get(language)
+        if google:
+            aliases[str(google).casefold()] = canonical
+            aliases[_slug_language_token(str(google))] = canonical
+    _LANGUAGE_DIRECTORY_ALIASES = aliases
+    return aliases
+
+
 def normalize_language(value: str) -> str:
-    token = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize("NFKC", value).strip().casefold())
-    token = token.strip("-")
-    return token or "und"
+    """Stable ASCII language token for task-directory identity.
+
+    ``简体中文`` / ``zh-CN`` / ``zh-Hans`` collapse to ``zh-hans``; ``auto`` stays
+    ``auto``; empty becomes ``und``. The token is a directory name, not a locale API.
+    """
+
+    original = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not original:
+        return "und"
+    folded = original.casefold()
+    aliases = _language_directory_aliases()
+    if folded in aliases:
+        return aliases[folded]
+    slug = _slug_language_token(original)
+    if slug in aliases:
+        return aliases[slug]
+    return slug or "und"
 
 
 def resolve_workspace_root(task: "PostprocessTask") -> Path:
@@ -154,6 +201,107 @@ def resolve_workspace_root(task: "PostprocessTask") -> Path:
     if not anchor.is_absolute():
         anchor = Path.cwd() / anchor
     return anchor.parent / WORKSPACE_DIRNAME
+
+
+def resolve_output_workspace_root(output_dir: str | Path) -> Path:
+    """过程资产目录 sits beside an independent translation output directory."""
+
+    return Path(output_dir) / WORKSPACE_DIRNAME
+
+
+def resolve_task_dir(
+    workspace_root: Path,
+    *,
+    task_name: str,
+    fingerprint: str,
+    source_language: str,
+    target_language: str,
+) -> Path:
+    """任务过程目录：规范化任务名 / 指纹 hex / 语言对。"""
+
+    name = normalize_task_name(task_name)
+    fingerprint_dir = fingerprint.removeprefix("sha256:") or "unknown"
+    language_dir = f"{normalize_language(source_language)}_{normalize_language(target_language)}"
+    return workspace_root / name / fingerprint_dir / language_dir
+
+
+def resolve_translation_staging_dir(
+    workspace_root: Path,
+    *,
+    task_name: str,
+    source_language: str,
+    target_language: str,
+) -> Path:
+    """翻译进行中的暂存目录：指纹在译文齐备前还不稳定。"""
+
+    name = normalize_task_name(task_name)
+    language_dir = f"{normalize_language(source_language)}_{normalize_language(target_language)}"
+    return workspace_root / name / ".in-progress" / language_dir
+
+
+def publish_translation_workspace(
+    *,
+    output_dir: str | Path,
+    task_name: str,
+    subtitle_data: "ASRData",
+    source_language: str,
+    target_language: str,
+    translation_method: str,
+    assets: Mapping[str, Path],
+    snapshot_payload: Mapping[str, Any] | None = None,
+) -> Path:
+    """把翻译过程资产复制进身份目录并写 manifest（D21/D23）。
+
+    身份按初版字幕指纹计算，与独立后处理发现使用同一套规则。
+    """
+
+    workspace_root = resolve_output_workspace_root(output_dir)
+    fingerprint = fingerprint_subtitle(subtitle_data)
+    task_dir = resolve_task_dir(
+        workspace_root,
+        task_name=task_name,
+        fingerprint=fingerprint,
+        source_language=source_language,
+        target_language=target_language,
+    )
+    task_dir.mkdir(parents=True, exist_ok=True)
+    verified: dict[str, Path] = {}
+    pending = dict(assets)
+    if snapshot_payload is not None:
+        snapshot_path = task_dir / ASSET_FILENAMES["translation_snapshot"]
+        _write_json(snapshot_path, dict(snapshot_payload))
+        pending["translation_snapshot"] = snapshot_path
+    for kind, source in pending.items():
+        if kind not in ASSET_FILENAMES:
+            continue
+        destination = task_dir / ASSET_FILENAMES[kind]
+        try:
+            _copy_asset(source, destination)
+        except InterruptedError:
+            raise
+        except OSError as exc:
+            logger.warning("过程资产 %s 复制失败: %s", kind, exc)
+            continue
+        if _asset_readable(destination, kind):
+            verified[kind] = destination
+    _write_json(
+        task_dir / MANIFEST_FILENAME,
+        {
+            "schema": MANIFEST_SCHEMA,
+            "version": MANIFEST_VERSION,
+            "task_name": normalize_task_name(task_name),
+            "input_subtitle": None,
+            "input_media": None,
+            "subtitle_fingerprint": fingerprint,
+            "source_language": normalize_language(source_language),
+            "target_language": normalize_language(target_language),
+            "translation_method": translation_method,
+            "generated_at": _now_utc(),
+            "software_version": _software_version(),
+            "assets": {kind: path.name for kind, path in verified.items()},
+        },
+    )
+    return task_dir
 
 
 class FilesystemAssetStore:
@@ -169,7 +317,14 @@ class FilesystemAssetStore:
         target_language = normalize_language(task.target_language)
         fingerprint_dir = fingerprint.removeprefix("sha256:") or "unknown"
         language_dir = f"{source_language}_{target_language}"
-        task_dir = workspace_root / name / fingerprint_dir / language_dir
+        fingerprint_parent = workspace_root / name / fingerprint_dir
+        task_dir = _select_process_task_dir(
+            fingerprint_parent,
+            language_dir,
+            fingerprint=fingerprint,
+            source_language=source_language,
+            target_language=target_language,
+        )
         task_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = task_dir / MANIFEST_FILENAME
 
@@ -481,17 +636,92 @@ def _load_manifest(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _language_compatible(task_language: str, stored_language: str) -> bool:
+    left = normalize_language(task_language)
+    right = normalize_language(stored_language)
+    if left == right:
+        return True
+    wildcards = {"und", "auto"}
+    return left in wildcards or right in wildcards
+
+
 def _identity_matches(
     manifest: Mapping[str, Any],
     fingerprint: str,
     source_language: str,
     target_language: str,
 ) -> bool:
-    return (
-        manifest.get("subtitle_fingerprint") == fingerprint
-        and normalize_language(str(manifest.get("source_language", ""))) == source_language
-        and normalize_language(str(manifest.get("target_language", ""))) == target_language
-    )
+    if manifest.get("subtitle_fingerprint") != fingerprint:
+        return False
+    return _language_compatible(
+        source_language, str(manifest.get("source_language", ""))
+    ) and _language_compatible(target_language, str(manifest.get("target_language", "")))
+
+
+def _upstream_asset_count(task_dir: Path, manifest: Mapping[str, Any]) -> int:
+    listed = manifest.get("assets")
+    if not isinstance(listed, dict):
+        return 0
+    count = 0
+    for kind, filename in listed.items():
+        if kind not in UPSTREAM_ASSET_KINDS:
+            continue
+        path = _resolve_listed_asset(task_dir, filename)
+        if path is not None and _asset_readable(path, kind):
+            count += 1
+    return count
+
+
+def _select_process_task_dir(
+    fingerprint_parent: Path,
+    preferred_language_dir: str,
+    *,
+    fingerprint: str,
+    source_language: str,
+    target_language: str,
+) -> Path:
+    """Prefer the exact language dir; else reuse a compatible sibling with upstream assets.
+
+    Independent postprocess often has empty/und languages while translation wrote
+    ``auto_und`` or ``auto_zh-hans`` for the same 初版字幕 fingerprint.
+    """
+
+    preferred = fingerprint_parent / preferred_language_dir
+    best = preferred
+    best_score = -1
+    children: list[Path] = []
+    if fingerprint_parent.is_dir():
+        children = [
+            child
+            for child in fingerprint_parent.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        ]
+    seen: set[Path] = set()
+    for directory in [preferred, *children]:
+        resolved = directory
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        manifest = _load_manifest(resolved / MANIFEST_FILENAME)
+        if manifest is None:
+            if resolved != preferred:
+                continue
+            score = 0
+        elif manifest.get("subtitle_fingerprint") != fingerprint:
+            continue
+        elif resolved != preferred and not (
+            _language_compatible(source_language, str(manifest.get("source_language", "")))
+            and _language_compatible(target_language, str(manifest.get("target_language", "")))
+        ):
+            continue
+        else:
+            score = _upstream_asset_count(resolved, manifest) * 10
+            if resolved == preferred:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best = resolved
+    return best
 
 
 def _resolve_listed_asset(task_dir: Path, filename: object) -> Path | None:
@@ -599,6 +829,14 @@ def _build_manifest(
             previous_method = previous.get("translation_method")
             if isinstance(previous_method, str):
                 translation_method = previous_method
+        if source_language in {"und", "auto"}:
+            previous_source = previous.get("source_language")
+            if isinstance(previous_source, str) and previous_source.strip():
+                source_language = previous_source
+        if target_language in {"und"}:
+            previous_target = previous.get("target_language")
+            if isinstance(previous_target, str) and previous_target.strip():
+                target_language = previous_target
     subtitle_path = Path(task.initial_subtitle_path or task.source_subtitle_path)
     media_path = Path(task.media_path) if task.media_path else None
     return {

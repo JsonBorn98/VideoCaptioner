@@ -194,6 +194,9 @@ def run(args: Namespace, config: dict) -> int:
             post_args = Namespace(
                 input=subtitle_path,
                 output=postprocessed_path,
+                source_language=get(config, "translate.source_language", "auto"),
+                target_language=get(config, "translate.target_language", ""),
+                workflow_base_name=path.stem,
                 layout=getattr(args, "layout", None) or get(
                     config, "synthesize.layout", "target-above"
                 ),

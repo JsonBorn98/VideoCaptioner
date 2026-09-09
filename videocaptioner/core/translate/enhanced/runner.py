@@ -11,6 +11,16 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.llm import LLMGateway
+from videocaptioner.core.postprocess.translation import (
+    METHOD_ENHANCED_LLM,
+    TranslationExecutionSnapshot,
+)
+from videocaptioner.core.postprocess.workspace import (
+    ASSET_FILENAMES,
+    publish_translation_workspace,
+    resolve_output_workspace_root,
+    resolve_translation_staging_dir,
+)
 from videocaptioner.core.utils.logger import setup_logger
 
 from .glossary import load_glossary, save_glossary
@@ -105,9 +115,19 @@ def run_enhanced_translation(
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    glossary_path = destination / f"【项目术语表】{base_name}.vcglossary.json"
-    audit_path = destination / f"【翻译审计】{base_name}.md"
-    checkpoint_path = destination / f"【增强翻译检查点】{base_name}.json"
+    source_language = str(getattr(config, "source_language", "") or "")
+    target_language = str(getattr(config, "target_language", "") or "")
+    workspace_root = resolve_output_workspace_root(destination)
+    staging_dir = resolve_translation_staging_dir(
+        workspace_root,
+        task_name=base_name,
+        source_language=source_language,
+        target_language=target_language,
+    )
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    glossary_path = staging_dir / ASSET_FILENAMES["glossary"]
+    audit_path = staging_dir / ASSET_FILENAMES["audit"]
+    checkpoint_path = staging_dir / ASSET_FILENAMES["checkpoint"]
     imported = (
         load_glossary(imported_glossary_path) if imported_glossary_path is not None else None
     )
@@ -167,12 +187,45 @@ def run_enhanced_translation(
     translated = _translated_copy(subtitle_data, result.translations)
     persist_translations(result.translations)
     save_audit_markdown(audit_path, result.audit_report)
+    snapshot = TranslationExecutionSnapshot(
+        method=METHOD_ENHANCED_LLM,
+        boundary_context_radius=int(getattr(config, "boundary_context_radius", 3) or 3),
+        main_profile=getattr(getattr(config, "main_role", None), "profile", None),
+        review_profile=getattr(getattr(config, "review_role", None), "profile", None),
+        main_prompt=str(getattr(getattr(config, "main_role", None), "user_prompt", "") or ""),
+        review_prompt=str(getattr(getattr(config, "review_role", None), "user_prompt", "") or ""),
+        source_language=source_language,
+        target_language=target_language,
+    )
+    published_assets = {
+        "glossary": glossary_path,
+        "audit": audit_path,
+    }
+    if checkpoint_written:
+        published_assets["checkpoint"] = checkpoint_path
+    task_dir = publish_translation_workspace(
+        output_dir=destination,
+        task_name=base_name,
+        subtitle_data=translated,
+        source_language=source_language,
+        target_language=target_language,
+        translation_method=METHOD_ENHANCED_LLM,
+        assets=published_assets,
+        snapshot_payload=snapshot.to_persisted(),
+    )
+    published_glossary = task_dir / ASSET_FILENAMES["glossary"]
+    published_audit = task_dir / ASSET_FILENAMES["audit"]
+    published_checkpoint = task_dir / ASSET_FILENAMES["checkpoint"]
     return EnhancedTranslationRun(
         subtitle_data=translated,
         result=result,
         artifacts=EnhancedTranslationArtifacts(
-            glossary_path=glossary_path,
-            audit_report_path=audit_path,
-            translation_checkpoint_path=(checkpoint_path if checkpoint_written else None),
+            glossary_path=published_glossary if published_glossary.is_file() else glossary_path,
+            audit_report_path=published_audit if published_audit.is_file() else audit_path,
+            translation_checkpoint_path=(
+                published_checkpoint
+                if checkpoint_written and published_checkpoint.is_file()
+                else (checkpoint_path if checkpoint_written else None)
+            ),
         ),
     )

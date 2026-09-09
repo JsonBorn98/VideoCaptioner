@@ -591,6 +591,35 @@ def test_module_level_failure_propagates():
         )
 
 
+def test_cancel_after_first_request_stops_further_repair_calls():
+    """取消后不得再发下一批修复请求；当前请求结束后立即 InterruptedError。"""
+
+    data = _data(("超长" * 30, "短"), ("另一段超长" * 30, "短"))
+    stop = {"flag": False}
+    calls = {"n": 0}
+
+    class _Gateway:
+        def complete(self, profile, request, *, cancelled=None):
+            if cancelled is not None and cancelled():
+                raise InterruptedError("LLM request cancelled")
+            calls["n"] += 1
+            stop["flag"] = True
+            payload = json.loads(_payload_text(request))
+            return LLMResult(text=_response(_repairs_for(payload)))
+
+    with pytest.raises(InterruptedError, match="cancelled"):
+        execute_viewing_repair(
+            data,
+            _config(),
+            QualityReport(),
+            SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+            gateway=_Gateway(),
+            profile=_profile(),
+            cancelled=lambda: stop["flag"],
+        )
+    assert calls["n"] == 1
+
+
 # ---- 请求形状可观察性 ----
 
 

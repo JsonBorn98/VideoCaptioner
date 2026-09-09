@@ -176,6 +176,17 @@ def run(args: Namespace, config: dict) -> int:
         layout_mode=_LAYOUT_MODES[layout_value],
         media_path=str(media_value) if media_value else None,
         config_snapshot=resolved,
+        source_language=str(
+            getattr(args, "source_language", None)
+            or get(config, "translate.source_language", "auto")
+            or ""
+        ),
+        target_language=str(
+            getattr(args, "target_language", None)
+            or get(config, "translate.target_language", "")
+            or ""
+        ),
+        workflow_base_name=str(getattr(args, "workflow_base_name", "") or ""),
     )
     task.input_data = getattr(args, "input_data", None)
     # 翻译执行快照（票 06，D15）：process 管线把字幕阶段冻结的任务快照

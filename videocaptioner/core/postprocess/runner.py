@@ -38,6 +38,7 @@ logger = setup_logger("postprocess.runner")
 TimingResolver = Callable[
     [PostprocessTask, ASRData, SubtitleLayoutEnum], Iterable["TimingEvidenceWindow"]
 ]
+ProgressCallback = Callable[[int, str], None]
 
 
 def _load_and_classify(
@@ -282,6 +283,7 @@ def run_postprocess_task(
     gateway: Optional["LLMGateway"] = None,
     assets: PostprocessAssetAdapter | None = None,
     cancelled: Callable[[], bool] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> PostprocessResult:
     """Run one isolated stage and fall back to its immutable initial subtitle.
 
@@ -292,6 +294,11 @@ def run_postprocess_task(
     """
 
     task.status = "running"
+
+    def report_progress(value: int, message: str) -> None:
+        if progress is not None:
+            progress(value, message)
+
     input_data, layout, confidence, warnings = _load_and_classify(task)
     logger.info(
         "后处理任务开始：%d 段（layout=%s，置信度=%.2f）",
@@ -299,6 +306,7 @@ def run_postprocess_task(
         layout.name,
         confidence,
     )
+    report_progress(10, "已读取初版字幕")
     original = clone_subtitle_data(input_data)
     # An invalid initial hand-off is not a module-level processing failure and
     # cannot be a valid fallback.  Publish a distinct status and block downstream.
@@ -344,6 +352,7 @@ def run_postprocess_task(
     adapter = assets if assets is not None else FilesystemAssetStore()
     try:
         adapter.discover(task)
+        report_progress(18, "正在发现过程资产")
     except InterruptedError:
         return _blocked_result(
             task, original, report, layout, confidence, warnings, status="cancelled"
@@ -458,6 +467,7 @@ def run_postprocess_task(
 
     try:
         working, report = run_pre_stage(clone_subtitle_data(original), config, report)
+        report_progress(25, "正在规范化字幕")
         # 批量观看问题修复（票 05）：确定性阶段结束后执行；局部回退只影响
         # 对应区域（D13/D14），模块级异常仍走整体回退。分析模式已在上方提前返回。
         # apply 路径只借一次工具网关：compress 与修复循环共用同一实例。
@@ -476,7 +486,11 @@ def run_postprocess_task(
                 timing_windows=evidence,
                 gateway=runtime,
             )
+            if cancelled is not None and cancelled():
+                raise InterruptedError("LLM request cancelled")
+            report_progress(45, "正在优化阅读速度")
             if config.any_viewing_single_line():
+                report_progress(55, "正在修复观看问题")
                 working, report = execute_viewing_repair(
                     working,
                     config,
@@ -486,6 +500,8 @@ def run_postprocess_task(
                     snapshot=snapshot,
                     profile=config.utility_llm_profile,
                     profile_resolver=repair_resolver,
+                    progress=progress,
+                    cancelled=cancelled,
                 )
                 # 修复循环的警告（回退 / 传输失败 / 容量不足）并入任务警告（D10）。
                 repair_summary = report.viewing_repair

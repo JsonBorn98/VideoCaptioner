@@ -12,6 +12,7 @@ from pathlib import Path
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
 from videocaptioner.core.postprocess.runner import run_postprocess_task
+from videocaptioner.core.postprocess.workspace import normalize_language
 
 _UPSTREAM_KINDS = (
     "glossary",
@@ -146,6 +147,40 @@ def test_task_directories_are_isolated_by_name_fingerprint_and_language(tmp_path
     assert len(dirs) == 4
     workspace = tmp_path / "videocaptioner-workspace"
     assert all(item.is_relative_to(workspace) for item in dirs)
+
+
+def test_display_language_names_normalize_to_stable_ascii_tokens():
+    assert normalize_language("简体中文") == "zh-hans"
+    assert normalize_language("zh-CN") == "zh-hans"
+    assert normalize_language("zh-Hans") == "zh-hans"
+    assert normalize_language("auto") == "auto"
+    assert normalize_language("") == "und"
+    assert normalize_language("简体中文").isascii()
+
+
+def test_standalone_postprocess_without_languages_reuses_same_fingerprint_assets(tmp_path):
+    glossary = tmp_path / "seed-glossary.json"
+    glossary.write_text('{"schema": "videocaptioner.project_glossary"}\n', encoding="utf-8")
+    seeded = _run(
+        tmp_path,
+        name="clip",
+        source_language="auto",
+        target_language="简体中文",
+        explicit_assets={"glossary": str(glossary)},
+    )
+    source = tmp_path / "clip.srt"
+    result = _run(
+        tmp_path,
+        source=source,
+        name="clip",
+        source_language="",
+        target_language="",
+    )
+
+    discovery = result.task.asset_discovery
+    assert discovery.asset_path("glossary") is not None
+    assert "glossary" not in discovery.missing
+    assert discovery.task_dir == seeded.task.asset_discovery.task_dir
 
 
 def test_non_ascii_task_name_still_uses_ascii_directory_names(tmp_path):

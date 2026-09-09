@@ -28,7 +28,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 import json_repair
 
@@ -425,6 +425,7 @@ def _review_pass(
     segment_problems: Dict[int, List[PlanProblem]],
     radius: int,
     guidance: str = "",
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, List[str]]:
     """对一个已拼接主体执行高级校对复校（增强流程第二段，票 06）。
 
@@ -515,6 +516,8 @@ def _review_pass(
         ],
         "feedback": [],
     }
+    if cancelled is not None and cancelled():
+        raise InterruptedError("LLM request cancelled")
     try:
         response = runtime.complete(
             review_profile,
@@ -523,6 +526,7 @@ def _review_pass(
                 max_output_tokens=review_profile.max_output_tokens,
                 metadata={"stage": "viewing_repair_review", "role": "utility"},
             ),
+            cancelled=cancelled,
         )
     except InterruptedError:
         raise
@@ -716,6 +720,8 @@ def execute_viewing_repair(
     profile: Optional["LLMModelProfile"] = None,
     profile_resolver=None,
     boundary_context_radius: Optional[int] = None,
+    progress: Optional[Callable[[int, str], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[ASRData, QualityReport]:
     """执行批量观看问题修复循环（票 05/06 核心入口，供任务入口调用）。
 
@@ -784,8 +790,13 @@ def execute_viewing_repair(
         for identity in [i for i in accepted if i[0] in set(indices)]:
             accepted.discard(identity)
 
+    def _raise_if_cancelled() -> None:
+        if cancelled is not None and cancelled():
+            raise InterruptedError("LLM request cancelled")
+
     with borrow_utility_gateway(gateway) as runtime:
         while summary.rounds < MAX_ROUNDS:
+            _raise_if_cancelled()
             summary.rounds += 1
             data = state.as_data()
             # 扫描结果统一适配为 PlanProblem（票 04 的身份契约），
@@ -845,7 +856,13 @@ def execute_viewing_repair(
             round_transport_failed = False
             # 批间与批内主体均按起始段降序应用：先 splice / 回退高段序区间，
             # 低段序批次的区间索引保持有效（同一轮快照内的索引一致）。
+            if progress is not None:
+                progress(
+                    min(90, 55 + summary.rounds * 4),
+                    f"正在修复观看问题（第 {summary.rounds} 轮，{len(open_problems)} 个未解决）",
+                )
             for batch in reversed(plan.batches):
+                _raise_if_cancelled()
                 batch_problem_map = {
                     problem.problem_id: problem
                     for problem in open_problems
@@ -866,6 +883,7 @@ def execute_viewing_repair(
                             max_output_tokens=repair_profile.max_output_tokens,
                             metadata={"stage": "viewing_repair", "role": "utility"},
                         ),
+                        cancelled=cancelled,
                     )
                 except InterruptedError:
                     raise
@@ -970,6 +988,7 @@ def execute_viewing_repair(
                             segment_problems=segment_problems,
                             radius=radius,
                             guidance=review_guidance,
+                            cancelled=cancelled,
                         )
                         summary.review_corrections += applied
                         summary.warnings.extend(

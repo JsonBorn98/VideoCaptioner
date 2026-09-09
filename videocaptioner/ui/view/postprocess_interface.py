@@ -128,6 +128,7 @@ class PostprocessInterface(QWidget):
         self.subtitle_path: str | None = None
         self.media_path: str | None = None
         self._thread: Any | None = None
+        self._cancelling = False
         self._workflow_mode = False
         self.primary_srt_path: str | None = None
         self._dirty = False
@@ -573,6 +574,7 @@ class PostprocessInterface(QWidget):
                 parent=self,
             )
             return
+        self._cancelling = False
         self._thread = PostprocessThread(self.task)
         self._thread.progress.connect(self._on_progress)
         self._thread.finished.connect(self._on_finished)
@@ -600,6 +602,7 @@ class PostprocessInterface(QWidget):
                 self._thread.stop()
             else:
                 self._thread.requestInterruption()
+            self._cancelling = True
             self.status_label.setText(self.tr("正在取消，等待当前步骤安全结束…"))
             return
         self._set_processing(False)
@@ -618,7 +621,8 @@ class PostprocessInterface(QWidget):
 
     def _on_progress(self, value: int, status: str) -> None:
         self.progress_bar.setValue(value)
-        self.status_label.setText(status)
+        if not self._cancelling:
+            self.status_label.setText(status)
 
     def _on_warning(self, message: str) -> None:
         InfoBar.warning(
@@ -629,11 +633,13 @@ class PostprocessInterface(QWidget):
         )
 
     def _on_cancelled(self) -> None:
+        self._cancelling = False
         self._set_processing(False)
         self.progress_bar.pause()
         self.status_label.setText(self.tr("已取消"))
 
     def _on_finished(self, video_path: str, output_path: str) -> None:
+        self._cancelling = False
         self._set_processing(False)
         self.progress_bar.setValue(100)
         try:
