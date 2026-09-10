@@ -58,3 +58,4 @@ videocaptioner/_version.py
 # Matt-flow local issue tracker (public fork — maps/tickets may reference
 # internal gateway endpoints and API key locations)
 .scratch/
+.alma-snapshots
