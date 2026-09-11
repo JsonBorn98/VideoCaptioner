@@ -56,6 +56,9 @@ class PostprocessTask:
     source_language: str = ""
     target_language: str = ""
     translation_method: str = ""
+    # 任务开始时冻结的并发请求数（票 04，ADR-0018）：GUI/编排/CLI 各入口
+    # 从现有执行配置传入；None = 未提供，核心按权威默认冻结并记录。
+    thread_num: Optional[int] = None
     # 任务开始时冻结的翻译执行快照（票 06，D15）：完整 workflow 由调用方
     # 冻结注入；独立任务由 runner 从验证过的过程资产重建身份快照。
     translation_snapshot: Optional["TranslationExecutionSnapshot"] = field(

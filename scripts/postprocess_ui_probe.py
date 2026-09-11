@@ -326,6 +326,9 @@ def run_ui_probe(directory: Path | None = None) -> dict:
         postprocessed_subtitle_path=str(output),
         layout_mode=PostprocessLayoutMode.ORIGINAL_ON_TOP,
         config_snapshot=config,
+        # 停止/静默探针固定并发 1（票 04）：本探针测量「在途请求期间停止
+        # 的 GUI 呈现与响应」，窗口并发行为由修复并发测试与基准覆盖。
+        thread_num=1,
         translation_snapshot=TranslationExecutionSnapshot(
             method="enhanced_llm",
             main_profile=profiles["main"],

@@ -20,6 +20,14 @@
 
 修复主体沿用 planning（票 04）：主体 + 边界上下文分开表示，上下文不作为
 修改目标；``boundary_context_radius`` 沿用上游默认值（D18，完整接线见票 06）。
+
+主修复受控并发（票 04，ADR-0018）：同轮各批载荷只读 ``round_snapshot``
+（ADR-0021），批间无数据依赖 → 有界滑动窗口重叠发出；响应到达后按
+``reversed(plan.batches)`` 固定序游标归并，任意完成顺序产生相同字幕、
+验收与报告顺序。窗口 = 修复角色 ``clamped_concurrency``（任务并发请求数
+经每 profile 显式保护上限钳制）；全部请求走同一网关的 per-profile
+信号量，不在批内嵌套第二套限流把上限相乘。主修复到其高级校对保持
+先后依赖：复校在游标推进时发出（批量化属票 05）。
 """
 
 from __future__ import annotations
@@ -27,8 +35,22 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import json_repair
 
@@ -78,10 +100,17 @@ MAX_FRAGMENTS_CAP = 8
 MAX_TRANSPORT_FAILURE_ROUNDS = 2
 # 修复循环轮数安全上界：每个问题至多 1+4 次请求后封闭，超出即异常路径。
 MAX_ROUNDS = 16
+# 并发请求数权威默认（ADR-0018）：与 GUI/CLI ``thread_num`` 默认一致；
+# 任务入口从冻结配置传入实际值，缺省不悄悄回退网关隐藏默认。
+DEFAULT_THREAD_NUM = 10
 
 # 问题稳定身份：working 段序会因拆分漂移，跨轮计数一律用
 # (初版段序, 显示侧, 问题类别)；problem_id 只在一次请求内对模型显式绑定。
 ProblemIdentity = Tuple[int, str, str]
+
+# 受控并发取消轮询窗口（秒）：wait(FIRST_COMPLETED) 的超时粒度；
+# 不依赖该间隔判断正确性，取消正确性由请求内/请求前检查保证。
+CONCURRENT_CANCEL_POLL_SECONDS = 0.05
 
 
 def select_repair_flow(
@@ -172,6 +201,18 @@ class RepairSummary:
     """本轮实际使用的边界上下文半径（默认取快照中的上游设置，D18）。"""
     review_corrections: int = 0
     """高级校对复校实际修正的译文处数（仅 main_review 方式计数）。"""
+    # 受控并发观测（票 04，spec 第 7 条：报告有效并发与最大在途，
+    # 不声称真实模型吞吐证据——冷缓存下的窗口行为观察）。
+    thread_num: int = 0
+    """任务开始时冻结的并发请求数（0 = 旧调用方未提供，未启用观测）。"""
+    concurrency_gate: int = 0
+    """主修复窗口实际生效的并发闸（thread_num 经 profile 保护上限钳制）。"""
+    effective_concurrency: int = 0
+    """本轮窗口并发上限（批数不足窗口时收缩到批数）。"""
+    max_inflight: int = 0
+    """冷缓存下观测到的最大同时在途主修复请求数。"""
+    concurrent_rounds: int = 0
+    """窗口并发 > 1 的轮次数（供配置贯通核对）。"""
 
 
 class _WorkingState:
@@ -677,6 +718,76 @@ def _review_pass(
     return corrections_applied, warnings
 
 
+def _dispatch_ordered(
+    batch_count: int,
+    send: Callable[[int], "_BatchOutcome"],
+    *,
+    window: int,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> List["_BatchOutcome"]:
+    """有界滑动窗口发出全部主修复请求，按固定批序返回结果（票 04）。
+
+    批间无数据依赖（ADR-0021 同轮快照）→ 全部请求立即进入窗口，无固定
+    首批串行预热；窗口有界（``window`` = 并发闸与批数的较小值），不按
+    整片问题数创建队列。取消：worker 入口先查一次（请求发送前的最后
+    一次取消检查）；在途请求按在途处理（由网关 ``cancelled`` 通道抢占，
+    票 06 范围），此处轮询只让等待侧尽快退出。返回值按批序排列，
+    完成顺序不影响归并输入（02 确定性语义）。
+    """
+    if window < 1:
+        raise ValueError("window must be a positive integer")
+    if window == 1 or batch_count <= 1:
+        return [send(order) for order in range(batch_count)]
+
+    results: List[Optional["_BatchOutcome"]] = [None] * batch_count
+    with ThreadPoolExecutor(max_workers=window) as executor:
+        pending: Dict["Future[_BatchOutcome]", int] = {
+            executor.submit(send, order): order for order in range(batch_count)
+        }
+        try:
+            while pending:
+                if cancelled is not None and cancelled():
+                    for future in pending:
+                        future.cancel()
+                    raise InterruptedError("LLM request cancelled")
+                completed, _ = wait(
+                    tuple(pending),
+                    timeout=CONCURRENT_CANCEL_POLL_SECONDS,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not completed:
+                    continue
+                for future in completed:
+                    order = pending.pop(future)
+                    results[order] = future.result()
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
+    return [outcome for outcome in results if outcome is not None]
+
+
+class _BatchOutcome(NamedTuple):
+    """一个主修复请求的落账载荷（票 04 并发执行）。
+
+    执行（网络等待）与归并（写共享状态）分离：worker 只产生结果与
+    观测，不触碰共享字幕 / 重试簿记（ADR-0021「worker 只产生候选」）。
+    """
+
+    batch_order: int
+    """请求按 ``reversed(plan.batches)`` 固定序的序号（归并顺序）。"""
+    response: Optional[Any]
+    """成功响应（LLMResult）；传输级失败为 None。"""
+    error: Optional[BaseException] = None
+    """传输级失败原因（整体请求失败；业务级拒绝在响应解析后落账）。"""
+    cache_hit: bool = False
+    """该请求是网关缓存命中（不计入真实 adapter 在途观测）。"""
+    duration: float = 0.0
+    """请求墙钟秒（性能观测；主线程归并时汇总）。"""
+    inflight: int = 0
+    """进入请求时的冷缓存在途观测（供 max_inflight；0 = 缓存命中）。"""
+
+
 def _parse_response(
     text: str, batch_problems: Dict[str, PlanProblem]
 ) -> Tuple[Optional[str], Dict[int, List[Dict[str, Any]]]]:
@@ -828,6 +939,7 @@ def execute_viewing_repair(
     profile: Optional["LLMModelProfile"] = None,
     profile_resolver=None,
     boundary_context_radius: Optional[int] = None,
+    thread_num: Optional[int] = None,
     progress: Optional[Callable[[int, str], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[ASRData, QualityReport]:
@@ -837,11 +949,15 @@ def execute_viewing_repair(
     增强型翻译跟随主翻译 + 高级校对两段流程；普通 LLM 翻译只复用主翻译，
     不自动增加高级校对；非 LLM 翻译与缺失快照不静默发起 LLM 请求，只执行
     确定性处理并仅报告。``profile`` 是无快照时的显式备用翻译角色。
-    每轮：扫描 → 规划（主体 + 边界上下文）→ 批量请求 → 显式绑定验收 →
-    （增强流程）高级校对复校 → 拼回完整字幕 → 重新验收进入下一轮；
-    耗尽 / 重复 / 容量不足的区域局部回退到修复入口快照并标记未解决
-    （D13/D14），不阻断下游。``boundary_context_radius`` 缺省取快照中
-    的上游设置（D18），显式传入时覆盖（独立任务用当前任务配置）。
+    每轮：扫描 → 规划（主体 + 边界上下文）→ 受控并发批量请求（票 04）→
+    定序归并 + 显式绑定验收 →（增强流程）高级校对复校 → 拼回完整字幕 →
+    重新验收进入下一轮；耗尽 / 重复 / 容量不足的区域局部回退到修复入口
+    快照并标记未解决（D13/D14），不阻断下游。``boundary_context_radius``
+    缺省取快照中的上游设置（D18），显式传入时覆盖（独立任务用当前任务
+    配置）。
+    ``thread_num`` 是任务冻结的并发请求数（票 04，ADR-0018）：缺省用
+    权威默认 10；每 profile 显式保护上限经 ``clamped_concurrency`` 钳制，
+    同 profile 主修复 / 校对共享网关 per-profile 信号量（嵌套调度不相乘）。
     """
     flow = select_repair_flow(snapshot, profile, profile_resolver)
     summary = RepairSummary()
@@ -854,6 +970,11 @@ def execute_viewing_repair(
         if boundary_context_radius is not None
         else flow.boundary_context_radius
     )
+    # 并发闸冻结（票 04，ADR-0018）：调用方（任务入口）从冻结配置传入；
+    # 无配置值时用权威默认（与 CLI/GUI 默认一致），不悄悄回退网关隐藏值。
+    if thread_num is None or type(thread_num) is not int or thread_num < 1:
+        thread_num = DEFAULT_THREAD_NUM
+    summary.thread_num = thread_num
     report.viewing_repair = summary
     if flow.mode == "report_only":
         # 非 LLM / 缺失快照：不静默发起 LLM 请求（D15），仅确定性处理与报告。
@@ -864,6 +985,10 @@ def execute_viewing_repair(
     repair_profile = flow.main_profile
     assert repair_profile is not None  # mode main / main_review 保证非空
     radius = summary.boundary_context_radius
+    # 并发闸在任务开始时冻结并进入报告（票 04）：窗口值随修复角色
+    # ``clamped_concurrency`` 钳制（显式 profile 保护上限生效，ADR-0018）。
+    concurrency_gate = repair_profile.clamped_concurrency(thread_num)
+    summary.concurrency_gate = concurrency_gate
     # 任务冻结的原翻译提示配置（D15）：只作为修复请求的补充指引，
     # 不替换修复系统提示词；非快照路径（显式备用角色）为空。
     main_guidance = snapshot.main_prompt if snapshot is not None else ""
@@ -1014,23 +1139,33 @@ def execute_viewing_repair(
                     min(90, 55 + summary.rounds * 4),
                     f"正在修复观看问题（第 {summary.rounds} 轮，{len(open_problems)} 个未解决）",
                 )
-            # 阶段 1：载荷构建 + 候选计算（按固定批序发出请求，验收候选，
-            # 不直接修改共享字幕）；阶段 2：统一归并（固定段序降序 splice、
-            # 区域守卫与高级校对）。本票保持串行执行，分离只为确定性语义。
-            for batch in reversed(plan.batches):
+            # 阶段 1（受控并发发出，票 04）+ 阶段 2（定序归并）：worker 只
+            # 发请求并带回响应 / 传输错误与观测，不触碰共享字幕与重试簿记
+            # （ADR-0021「worker 只产生候选」）；归并按 ``reversed(plan.batches)``
+            # 固定序在协调线程执行，任意完成顺序产生相同字幕、验收与报告。
+            # 窗口 = 并发闸与批数的较小值：少量批次收缩到批数，不因无收益
+            # 的固定首批预热强制串行（spec「有界并发与入口配置」）。
+            ordered_batches = list(reversed(plan.batches))
+            window = min(concurrency_gate, len(ordered_batches))
+            # 有效并发取各轮最大值：尾轮批数收缩不抹掉此前轮次的真实窗口。
+            summary.effective_concurrency = max(summary.effective_concurrency, window)
+            if window > 1:
+                summary.concurrent_rounds += 1
+            inflight_state = {"active": 0, "max": 0}
+            inflight_lock = threading.Lock()
+
+            def _send(order: int) -> "_BatchOutcome":
+                batch = ordered_batches[order]
                 _raise_if_cancelled()
-                batch_problem_map = {
-                    problem.problem_id: problem
-                    for problem in open_problems
-                    if any(
-                        subject.start_index
-                        <= problem.segment_index
-                        < subject.end_index
-                        for subject in batch.subjects
-                    )
-                }
+                with inflight_lock:
+                    # 发出层计数（票 04）：通过发送前取消检查、真正进入
+                    # 网关调用的请求才计数；取消拦下的未发请求不计。
+                    summary.requests += 1
                 payload = _build_payload(round_snapshot, cfg, batch, segment_problems, feedback)
-                summary.requests += 1
+                started = time.perf_counter()
+                with inflight_lock:
+                    inflight_state["active"] += 1
+                    inflight_state["max"] = max(inflight_state["max"], inflight_state["active"])
                 try:
                     response = runtime.complete(
                         repair_profile,
@@ -1045,9 +1180,45 @@ def execute_viewing_repair(
                     raise
                 except Exception as exc:  # noqa: BLE001 —— 传输级失败不消耗业务重试
                     logger.warning("观看问题修复请求失败（传输级）: %s", exc)
+                    return _BatchOutcome(
+                        order, None, error=exc, duration=time.perf_counter() - started
+                    )
+                finally:
+                    with inflight_lock:
+                        inflight_state["active"] -= 1
+                return _BatchOutcome(
+                    order,
+                    response,
+                    cache_hit=response.duration_ms is None,
+                    duration=time.perf_counter() - started,
+                )
+
+            outcomes = _dispatch_ordered(
+                len(ordered_batches), _send, window=window, cancelled=cancelled
+            )
+            # 在途观测是发出层口径（含瞬时缓存命中）；真实 adapter 在途由
+            # 传输探针口径覆盖（spec：缓存命中不冒充模型吞吐）。
+            summary.max_inflight = max(summary.max_inflight, inflight_state["max"])
+            for order, outcome in enumerate(outcomes):
+                # 归并前重确认取消（spec「停止全路径」）：在途请求按在途处理，
+                # 已返回的迟到候选不得在停止后写回共享状态。
+                _raise_if_cancelled()
+                batch = ordered_batches[order]
+                batch_problem_map = {
+                    problem.problem_id: problem
+                    for problem in open_problems
+                    if any(
+                        subject.start_index
+                        <= problem.segment_index
+                        < subject.end_index
+                        for subject in batch.subjects
+                    )
+                }
+                if outcome.error is not None:
+                    # 传输级失败：不消耗业务重试（D09），同轮其他批次照常归并。
                     round_transport_failed = True
                     continue
-                fatal, grouped = _parse_response(response.text, batch_problem_map)
+                fatal, grouped = _parse_response(outcome.response.text, batch_problem_map)
                 # 本批请求覆盖的问题身份：请求已发生，计入业务次数并记录区域。
                 for subject in batch.subjects:
                     region = state.initial_indices(subject.start_index, subject.end_index)
@@ -1179,11 +1350,22 @@ def execute_viewing_repair(
         len(summary.rollbacks),
         summary.unplannable_subjects,
     )
+    if summary.requests:
+        # 受控并发观测（票 04，spec 第 7 条）：有效并发、最大在途与冻结闸
+        # 进入日志；这是窗口行为观察，不是真实模型吞吐证据。
+        logger.info(
+            "观看问题修复并发：冻结 %d / 闸 %d / 最大在途 %d（窗口轮 %d）",
+            summary.thread_num,
+            summary.concurrency_gate,
+            summary.max_inflight,
+            summary.concurrent_rounds,
+        )
     return repaired, report
 
 
 __all__ = [
     "DEFAULT_BUSINESS_RETRIES",
+    "DEFAULT_THREAD_NUM",
     "MAX_FRAGMENTS_CAP",
     "MAX_TRANSPORT_FAILURE_ROUNDS",
     "RegionRollback",

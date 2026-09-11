@@ -124,6 +124,8 @@ def test_stop_during_first_main_repair_measures_gui_silence_and_cancel_wait(tmp_
     assert outcome["task_status"] == "cancelled"
     assert outcome["hard_cap_exceeded"] is False
     assert outcome["repair_flow"]["mode"] == "main_review"  # 真实增强两段修复路径
+    # 停止探针固定并发 1（票 04）：测「在途请求期间停止」的呈现与响应；
+    # 修复并发（多批重叠 / 完成顺序 / 保护闸）由票 04 修复并发测试覆盖。
     assert outcome["repair_flow"]["requests"] == 1  # 恰好首个主修复请求在途
     gating = outcome["gating"]
     assert gating["source_unchanged"] is True

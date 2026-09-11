@@ -477,7 +477,13 @@ def run_postprocess_task(
         # 修复方式按任务冻结快照选择（票 06，D15）：快照角色连接缺失时按
         # 角色身份从方案库显式解析（可验证的资产身份才复用）。
         repair_resolver = store_profile_resolver()
-        with borrow_utility_gateway(gateway) if needs_repair else _nullcontext(gateway) as runtime:
+        # 任务冻结并发（票 04，ADR-0018）：自建网关按任务值定闸；
+        # 注入网关由注入方定闸（编排/完整 workflow 共享任务线程池网关）。
+        with (
+            borrow_utility_gateway(gateway, max_concurrency=task.thread_num)
+            if needs_repair
+            else _nullcontext(gateway)
+        ) as runtime:
             working, report = run_post_stage(
                 working,
                 config,
@@ -500,6 +506,7 @@ def run_postprocess_task(
                     snapshot=snapshot,
                     profile=config.utility_llm_profile,
                     profile_resolver=repair_resolver,
+                    thread_num=task.thread_num,
                     progress=progress,
                     cancelled=cancelled,
                 )

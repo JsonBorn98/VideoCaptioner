@@ -511,6 +511,12 @@ def build_postprocess_state_payload(
                     for item in repair.rollbacks
                 ],
                 "warnings": list(repair.warnings),
+                # 受控并发观测（票 04）：冻结值与实际生效闸进入状态载荷，
+                # 供核对配置贯通与实际在途（不声称真实模型吞吐证据）。
+                "thread_num": repair.thread_num,
+                "concurrency_gate": repair.concurrency_gate,
+                "effective_concurrency": repair.effective_concurrency,
+                "max_inflight": repair.max_inflight,
             }
         ),
         "precise_timing_outcome": precise_timing_outcome,

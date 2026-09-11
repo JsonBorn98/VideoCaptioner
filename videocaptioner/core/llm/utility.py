@@ -23,6 +23,10 @@ from .request_options import (
 
 UTILITY_PROFILE_CARD = "翻译设置页·工具模型卡"
 
+# 自建网关的权威默认并发（ADR-0018）：与 GUI/CLI ``thread_num`` 默认一致；
+# 调用方从任务冻结配置传入实际值，无值时用此默认并保持可观察。
+DEFAULT_GATEWAY_CONCURRENCY = 10
+
 # 解析器与 GUI 启动预检共用的「无可解析方案」报错文案（原为三处字面量复制）。
 UTILITY_PROFILE_UNRESOLVED_MESSAGE = (
     "未找到可用的模型配置方案：主翻译方案与工具模型绑定均为空，"
@@ -114,7 +118,10 @@ def validate_utility_profile(profile: LLMModelProfile) -> None:
 
 
 @contextmanager
-def borrow_utility_gateway(gateway: Optional[LLMGateway]) -> Iterator[LLMGateway]:
+def borrow_utility_gateway(
+    gateway: Optional[LLMGateway],
+    max_concurrency: Optional[int] = None,
+) -> Iterator[LLMGateway]:
     """Yield a gateway for one functional consumer call, closing it if owned.
 
     Shared seam for the function-shaped utility consumers (dub rewrite,
@@ -123,12 +130,21 @@ def borrow_utility_gateway(gateway: Optional[LLMGateway]) -> Iterator[LLMGateway
     lazily here and released on exit, so self-built gateways can never leak.
     Long-lived constructor-held consumers (split/optimize, translation paths)
     hold their gateway for the object's lifetime and stay out of this seam.
+
+    ``max_concurrency`` is the task-frozen concurrency request count (票 04,
+    ADR-0018): it sizes the per-profile semaphores of a self-built gateway so
+    an injected caller's task setting also governs the standalone path —
+    a standalone postprocess task no longer silently falls back to the
+    gateway's hidden default. An injected gateway ignores it: the injecting
+    caller owns the gate sizing.
     """
 
     if gateway is not None:
         yield gateway
         return
-    runtime = LLMGateway()
+    if max_concurrency is None or type(max_concurrency) is not int or max_concurrency < 1:
+        max_concurrency = DEFAULT_GATEWAY_CONCURRENCY
+    runtime = LLMGateway(max_concurrency=max_concurrency)
     try:
         yield runtime
     finally:
@@ -136,6 +152,7 @@ def borrow_utility_gateway(gateway: Optional[LLMGateway]) -> Iterator[LLMGateway
 
 
 __all__ = [
+    "DEFAULT_GATEWAY_CONCURRENCY",
     "MAIN_LLM_PROFILE_MISSING_MESSAGE",
     "UTILITY_PROFILE_CARD",
     "UTILITY_PROFILE_UNRESOLVED_MESSAGE",

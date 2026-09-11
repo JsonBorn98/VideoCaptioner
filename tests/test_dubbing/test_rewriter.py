@@ -153,7 +153,7 @@ def test_missing_gateway_is_constructed_lazily_and_closed(monkeypatch):
     owned = []
 
     class _OwnedGateway:
-        def __init__(self) -> None:
+        def __init__(self, **_kwargs) -> None:  # 票 04：自建网关带 max_concurrency
             owned.append(self)
             self.closed = False
 

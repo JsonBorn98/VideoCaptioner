@@ -216,6 +216,7 @@ def run(args: Namespace, config: dict) -> int:
                 config=getattr(args, "config", None),
                 input_data=active_data,
                 gateway=owned_gateway,
+                thread_num=getattr(args, "thread_num", None),
             )
             # 翻译执行快照（票 06，D15）：后处理修复方式与字幕阶段冻结的任务对齐。
             if translation_snapshot is not None:

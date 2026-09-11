@@ -72,6 +72,23 @@ def _timing_resolver(task, data, _layout):
     return bundle.windows if bundle is not None else ()
 
 
+def _resolve_thread_num(arg_value, config: dict) -> int:
+    """Freeze the task concurrency request count (ticket 04, ADR-0018).
+
+    Resolution order: explicit CLI argument, then the shared ``subtitle.thread_num``
+    config (same knob as the GUI), then the authoritative default 10. Keeps CLI
+    and GUI on one execution policy instead of a hidden gateway default.
+    """
+
+    for candidate in (
+        arg_value,
+        get(config, "subtitle.thread_num", None),
+    ):
+        if candidate is not None and type(candidate) is int and candidate >= 1:
+            return candidate
+    return 10
+
+
 def _write_sidecar(result, *, verbose: bool) -> None:
     """保存可复用的对齐时间轴 sidecar（共享守卫，见 core/postprocess/sidecar.py）。"""
 
@@ -187,6 +204,9 @@ def run(args: Namespace, config: dict) -> int:
             or ""
         ),
         workflow_base_name=str(getattr(args, "workflow_base_name", "") or ""),
+        # 任务开始时冻结并发请求数（票 04，ADR-0018）：CLI 与 GUI 同一
+        # ``subtitle.thread_num`` 配置；显式 ``--thread-num`` 参数优先。
+        thread_num=_resolve_thread_num(getattr(args, "thread_num", None), config),
     )
     task.input_data = getattr(args, "input_data", None)
     # 翻译执行快照（票 06，D15）：process 管线把字幕阶段冻结的任务快照

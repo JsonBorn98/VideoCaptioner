@@ -368,6 +368,7 @@ def _measure_case(
         postprocessed_subtitle_path=str(output),
         layout_mode=PostprocessLayoutMode.ORIGINAL_ON_TOP,
         config_snapshot=config,
+        thread_num=concurrency,
         translation_snapshot=TranslationExecutionSnapshot(
             method="non_llm" if case == "local-long" else "enhanced_llm",
             main_profile=profiles["main"],
@@ -513,7 +514,21 @@ def _measure_case(
         "concurrency": {
             "gateway_requested": concurrency,
             "profile_clamp": None,
-            "task_snapshot_field": "not available in baseline version",
+            "task_thread_num": task.thread_num,
+            "repair_summary": (
+                {
+                    key: getattr(result.report.viewing_repair, key)
+                    for key in (
+                        "thread_num",
+                        "concurrency_gate",
+                        "effective_concurrency",
+                        "max_inflight",
+                        "concurrent_rounds",
+                    )
+                }
+                if result.report.viewing_repair is not None
+                else None
+            ),
         },
         "controlled_response": {
             "protocol": "synthetic-v1",

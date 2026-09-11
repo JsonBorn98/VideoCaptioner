@@ -545,6 +545,9 @@ class TaskFactory:
             workflow_base_name=resolved_base_name,
             source_language=str(cfg.source_language.value),
             target_language=str(getattr(target, "value", target) or ""),
+            # 任务开始时冻结并发请求数（票 04，ADR-0018）：与翻译阶段同一
+            # 「并发请求数」设置；任务启动后改设置不影响本任务。
+            thread_num=cfg.thread_num.value,
             export_policy=export_policy or TaskFactory.create_subtitle_export_policy(),
         )
         if task_id:
