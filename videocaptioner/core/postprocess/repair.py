@@ -28,7 +28,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import json_repair
 
@@ -42,8 +42,10 @@ from ..utils.text_utils import is_mainly_cjk
 from .config import SINGLE_LINE, PostprocessConfig
 from .planning import (
     DEFAULT_BOUNDARY_CONTEXT_RADIUS,
+    BoundaryContext,
     PlanProblem,
     RepairBatch,
+    RepairSubject,
     plan_repair_batches,
     problems_from_viewing,
 )
@@ -139,6 +141,19 @@ class RepairSummary:
     rollbacks: List[RegionRollback] = field(default_factory=list)
     unplannable_subjects: int = 0
     warnings: List[str] = field(default_factory=list)
+    # 容量规划观测（票 03）：实际发出的批次容量口径，供报告 / 基准
+    # 记录请求数、估计 token 与各收缩原因（spec 第 7 条：不声称真实
+    # 模型吞吐证据——这里只有规划侧估计值）。
+    planned_requests: int = 0
+    """规划批次总数（含收缩后重规划的轮次内累加）。"""
+    planned_input_tokens: int = 0
+    """规划批次输入估计之和（完整请求口径，票 03）。"""
+    planned_output_reserve_tokens: int = 0
+    """规划批次输出预留之和（一对多输出 + 协议开销）。"""
+    shrunk_subject_batches: int = 0
+    """因容量收缩主体数量的批次数（先减主体，D26 顺序第一级）。"""
+    shrunk_context_batches: int = 0
+    """因容量收缩边界上下文的批次数（单主体后减上下文，第二级）。"""
     # 修复方式选择（票 06）：翻译方式与角色身份进入报告与任务状态，
     # 便于核对实际行为（D15「翻译方式选择和资产身份进入报告」）。
     translation_method: str = ""
@@ -343,21 +358,106 @@ def _build_payload(
     }
 
 
-def _request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMessage]:
-    """构造一次请求消息；``guidance`` 是任务冻结的原翻译提示配置（可空）。"""
-    system_prompt = get_prompt("optimize/viewing_repair")
-    guidance_block = ""
+# 主修复输出比例（票 03，对齐 ADR-0019 比例式输出预留）：一个输入段的
+# 合法输出覆盖其原文 + 译文两侧（一对多拆分原译对应），再加 JSON 协议
+# 开销。比例值保守取 1.5（高于上游翻译的 1.2/1.3：修复候选同时携带
+# original / translated 双侧文本与绑定键）。
+REPAIR_OUTPUT_INPUT_RATIO = 1.5
+REPAIR_OUTPUT_PROTOCOL_OVERHEAD_TOKENS = 256
+
+
+def _estimate_request_input(
+    round_snapshot: ASRData,
+    cfg: PostprocessConfig,
+    subjects: Sequence["RepairSubject"],
+    context: "BoundaryContext",
+    segment_problems: Dict[int, List[PlanProblem]],
+    feedback: List[str],
+    guidance: str,
+    *,
+    include_system_prompt: bool = True,
+) -> int:
+    """估算一批主修复请求的完整输入 token（票 03 容量口径）。
+
+    覆盖完整序列化请求（spec「主修复与高级校对的容量规划」）：系统
+    提示词 + guidance 块 + 用户消息包装 + ``_build_payload`` 同形状载荷
+    （limits / 主/译文本 / 问题 / 上下文 / feedback 协议开销），不只估
+    主体裸文本。载荷与实际请求共用 ``_build_payload`` 构造（同一来源），
+    规划时零上下文收缩即同一函数对 radius 的复用。
+    """
+    from ..translate.enhanced.token_planner import estimate_tokens
+
+    batch = RepairBatch(
+        subjects=list(subjects),
+        context=context,
+    )
+    payload = _build_payload(round_snapshot, cfg, batch, segment_problems, feedback)
+    user_body = (
+        guidance_block(guidance)
+        + "Repair the following subtitle viewing problems:\n<input>"
+        + json.dumps(payload, ensure_ascii=False)
+        + "</input>"
+    )
+    parts = [user_body]
+    if include_system_prompt:
+        parts.append(get_prompt("optimize/viewing_repair"))
+    return estimate_tokens("\n".join(parts))
+
+
+def _estimate_output_reserve(
+    round_snapshot: ASRData,
+    cfg: PostprocessConfig,
+    subjects: Sequence["RepairSubject"],
+    segment_problems: Dict[int, List[PlanProblem]],
+    *,
+    work_context_tokens: Optional[int] = None,
+    max_output_tokens: Optional[int] = None,
+) -> int:
+    """估算一批主修复请求的输出预留（票 03，一对多输出 + 协议开销）。
+
+    比例式预留（ADR-0019）：主体输入载荷 × 输出比 + 协议开销，
+    受工作上下文与用户请求输出上限钳制（不自动抬升用户配置）。
+    主体输入按载荷编码（含文本 / 问题 / 协议），不只按裸文本。
+    """
+    from ..translate.enhanced.token_planner import estimate_tokens
+
+    batch = RepairBatch(
+        subjects=list(subjects),
+        context=BoundaryContext(),
+    )
+    payload = _build_payload(round_snapshot, cfg, batch, segment_problems, [])
+    subject_input = estimate_tokens(
+        json.dumps(payload["repair_subjects"], ensure_ascii=False)
+    )
+    reserve = int(subject_input * REPAIR_OUTPUT_INPUT_RATIO) + (
+        REPAIR_OUTPUT_PROTOCOL_OVERHEAD_TOKENS * max(1, len(subjects))
+    )
+    if work_context_tokens is not None:
+        reserve = min(reserve, work_context_tokens - 1)
+    if max_output_tokens is not None:
+        reserve = min(reserve, max_output_tokens)
+    return max(reserve, 1)
+
+
+def guidance_block(guidance: str) -> str:
+    """任务冻结的原翻译提示配置块（``_request_messages`` / 估算共用形状）。"""
     if guidance.strip():
-        guidance_block = (
+        return (
             "Custom translation guidance from the original task:\n"
             + guidance.strip()
             + "\n\n"
         )
+    return ""
+
+
+def _request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMessage]:
+    """构造一次请求消息；``guidance`` 是任务冻结的原翻译提示配置（可空）。"""
+    system_prompt = get_prompt("optimize/viewing_repair")
     return [
         LLMMessage("system", system_prompt),
         LLMMessage(
             "user",
-            guidance_block
+            guidance_block(guidance)
             + "Repair the following subtitle viewing problems:\n<input>"
             + json.dumps(payload, ensure_ascii=False)
             + "</input>",
@@ -368,16 +468,17 @@ def _request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMe
 def _review_request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMessage]:
     """构造高级校对复校请求消息（增强流程第二段，票 06）。"""
     system_prompt = get_prompt("optimize/viewing_repair_review")
-    guidance_block = ""
-    if guidance.strip():
-        guidance_block = (
-            "Custom review guidance from the original task:\n" + guidance.strip() + "\n\n"
-        )
+
+    def _block() -> str:
+        if guidance.strip():
+            return "Custom review guidance from the original task:\n" + guidance.strip() + "\n\n"
+        return ""
+
     return [
         LLMMessage("system", system_prompt),
         LLMMessage(
             "user",
-            guidance_block
+            _block()
             + "Review the following proposed repair fragments:\n<input>"
             + json.dumps(payload, ensure_ascii=False)
             + "</input>",
@@ -832,7 +933,42 @@ def execute_viewing_repair(
             ]
             if not open_problems:
                 break
-            plan = plan_repair_batches(data, open_problems, boundary_context_radius=radius)
+            # 容量规划（票 03）：每批按真实请求口径估算输入与输出预留，
+            # 预算取修复角色真实工作上下文（快照 / 角色方案的
+            # ``work_context_tokens``），受用户请求输出上限钳制；
+            # 超预算先减少主体数量，再缩减边界上下文，零上下文单主体
+            # 仍不足时进入 ``unplannable`` 明确报告（不截断原文）。
+            segment_problems: Dict[int, List[PlanProblem]] = {}
+            for problem in open_problems:
+                segment_problems.setdefault(problem.segment_index, []).append(problem)
+            feedback = [
+                f"{problem.problem_id}: {last_error[_identity(problem)]}"
+                for problem in open_problems
+                if _identity(problem) in last_error
+            ]
+            plan = plan_repair_batches(
+                data,
+                open_problems,
+                boundary_context_radius=radius,
+                token_budget=repair_profile.work_context_tokens,
+                batch_input_estimator=lambda subjects_in_batch, context: _estimate_request_input(
+                    data,
+                    cfg,
+                    subjects_in_batch,
+                    context,
+                    segment_problems,
+                    feedback,
+                    main_guidance,
+                ),
+                output_reserve_estimator=lambda subjects_in_batch: _estimate_output_reserve(
+                    data,
+                    cfg,
+                    subjects_in_batch,
+                    segment_problems,
+                    work_context_tokens=repair_profile.work_context_tokens,
+                    max_output_tokens=repair_profile.max_output_tokens,
+                ),
+            )
             for subject in plan.unplannable:
                 # 容量不足（D26）：明确报告、封闭区域、不截断内容。
                 indices = state.initial_indices(subject.start_index, subject.end_index)
@@ -843,6 +979,20 @@ def execute_viewing_repair(
                         f"问题 {subject.problem_ids}"
                     )
                 closed_regions.update(indices)
+            # 容量收缩观测（票 03，spec 第 7 条）：区分「先减主体」与
+            # 「再缩上下文」两级；批内 ``context_radius`` 低于请求 radius
+            # 即上下文被缩，主体数多于批次数即批被拆小。
+            summary.planned_requests += len(plan.batches)
+            for batch in plan.batches:
+                summary.planned_input_tokens += batch.estimated_tokens
+                summary.planned_output_reserve_tokens += batch.output_reserve_tokens
+                if batch.context_radius < radius:
+                    summary.shrunk_context_batches += 1
+            if plan.batches and sum(len(b.subjects) for b in plan.batches) < len(
+                {p.segment_index for p in open_problems}
+            ) and len(plan.batches) > 1:
+                # 主体被拆批（>1 批覆盖全部主体）：至少一批因容量收缩主体数量。
+                summary.shrunk_subject_batches += len(plan.batches)
             if not plan.batches:
                 break
 
@@ -865,15 +1015,6 @@ def execute_viewing_repair(
                     )
                     _rollback(region, "业务修复重试耗尽")
                 continue
-
-            segment_problems: Dict[int, List[PlanProblem]] = {}
-            for problem in open_problems:
-                segment_problems.setdefault(problem.segment_index, []).append(problem)
-            feedback = [
-                f"{problem.problem_id}: {last_error[_identity(problem)]}"
-                for problem in open_problems
-                if _identity(problem) in last_error
-            ]
 
             round_accepted = False
             round_transport_failed = False

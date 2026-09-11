@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Literal, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, List, Literal, Optional, Sequence
 
 from .viewing import Side, ViewingProblem
 
@@ -206,12 +206,19 @@ class RepairBatch:
     """一批修复请求：主体列表 + 分开表示的边界上下文。
 
     响应必须显式包含问题 ID 与输出段序号（票 05 消费）；
-    ``estimated_tokens`` 是保守输入估算，不含输出预留。
+    ``estimated_tokens`` 是请求输入估算：默认路径只计主体/上下文
+    载荷，调用方注入 ``batch_input_estimator``（票 03）时为完整
+    序列化请求（系统提示词 + guidance + limits + feedback 协议开销）。
+    ``output_reserve_tokens`` 是输出预留（票 03：一对多拆分 + 原译
+    对应 + 协议开销）；``context_radius`` 是本批实际使用的上下文
+    半径（收缩可观察，票 03 验收）。
     """
 
     subjects: List[RepairSubject]
     context: BoundaryContext
     estimated_tokens: int = 0
+    output_reserve_tokens: int = 0
+    context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS
 
 
 @dataclass
@@ -285,11 +292,23 @@ def plan_repair_batches(
     boundary_context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS,
     token_budget: Optional[int] = None,
     max_subjects_per_batch: int = 10,
+    batch_input_estimator: Optional[
+        Callable[[Sequence[RepairSubject], BoundaryContext], int]
+    ] = None,
+    output_reserve_estimator: Optional[
+        Callable[[Sequence[RepairSubject]], int]
+    ] = None,
 ) -> RepairPlan:
-    """把问题规划为批量修复请求（D16/D22/D26）。
+    """把问题规划为批量修复请求（D16/D22/D26，票 03 接通容量）。
 
     - 主体先合并（重叠 / 相邻），每批主体各带 ``boundary_context_radius``
       个相邻段上下文；上下文与主体分开表示。
+    - 容量口径（票 03，对齐上游 ``plan_translation_batches`` 的 estimator
+      先例）：``batch_input_estimator`` 估算一批的完整请求输入（调用方
+      覆盖真实 payload 形状：提示词、guidance、limits、feedback、主/译
+      文本、问题、上下文与协议开销），``output_reserve_estimator``
+      预留输出（一对多拆分 + 原译对应 + 协议开销）；缺省回退到
+      ``estimate_plan_tokens`` 的主体/上下文载荷估算（不设输出预留）。
     - 请求超出 ``token_budget`` 时沿用上游收缩顺序：先减少单批主体
       数量，再逐步减少上下文；单个主体在零上下文下仍超出预算时
       列入 ``unplannable`` 明确报告，不截断字幕内容。
@@ -301,6 +320,24 @@ def plan_repair_batches(
         raise ValueError("boundary_context_radius must not be negative")
     if max_subjects_per_batch <= 0:
         raise ValueError("max_subjects_per_batch must be positive")
+
+    def _input_estimate(
+        subjects_in_batch: Sequence[RepairSubject], context: BoundaryContext
+    ) -> int:
+        if batch_input_estimator is not None:
+            estimated = batch_input_estimator(subjects_in_batch, context)
+            if estimated < 0:
+                raise ValueError("batch_input_estimator must not return a negative value")
+            return estimated
+        return estimate_plan_tokens(asr_data, subjects_in_batch, context)
+
+    def _output_reserve(subjects_in_batch: Sequence[RepairSubject]) -> int:
+        if output_reserve_estimator is None:
+            return 0
+        estimated = output_reserve_estimator(subjects_in_batch)
+        if estimated < 0:
+            raise ValueError("output_reserve_estimator must not return a negative value")
+        return estimated
 
     segment_count = len(asr_data.segments)
     # 已解决问题不进入修复请求（D27：只重试仍未解决问题）。
@@ -314,11 +351,16 @@ def plan_repair_batches(
         subjects_in_batch: Sequence[RepairSubject], radius: int
     ) -> Optional[RepairBatch]:
         context = _context_spans(subjects_in_batch, radius, segment_count)
-        estimated = estimate_plan_tokens(asr_data, subjects_in_batch, context)
-        if token_budget is not None and estimated > token_budget:
+        estimated = _input_estimate(subjects_in_batch, context)
+        reserve = _output_reserve(subjects_in_batch)
+        if token_budget is not None and estimated + reserve > token_budget:
             return None
         return RepairBatch(
-            subjects=list(subjects_in_batch), context=context, estimated_tokens=estimated
+            subjects=list(subjects_in_batch),
+            context=context,
+            estimated_tokens=estimated,
+            output_reserve_tokens=reserve,
+            context_radius=radius,
         )
 
     cursor = 0
