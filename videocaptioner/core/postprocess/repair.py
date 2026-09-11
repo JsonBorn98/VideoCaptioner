@@ -281,17 +281,29 @@ def _active_single_line_sides(
     )
 
 
+def _context_entry(index: int, seg: ASRDataSeg) -> Dict[str, Any]:
+    """轮次快照坐标上的一个边界上下文条目（主修复 / 复校载荷共用形状）。"""
+    return {"id": index, "text": seg.text, "translated": seg.translated_text}
+
+
 def _build_payload(
-    state: _WorkingState,
+    round_snapshot: ASRData,
     cfg: PostprocessConfig,
     batch: "RepairBatch",
     segment_problems: Dict[int, List[PlanProblem]],
     feedback: List[str],
 ) -> Dict[str, Any]:
-    """构造一次批量修复请求载荷（主体 / 上下文 / 问题显式分开表示）。"""
+    """构造一次批量修复请求载荷（主体 / 上下文 / 问题显式分开表示）。
+
+    载荷只读 ``round_snapshot``（修复轮次快照，ADR-0021）：同轮各批的
+    主体与边界上下文共享同一版本，邻批已归并的拆分 / 校对结果不进入
+    本批载荷。``id`` 是轮次快照内的段序。
+    """
+
+    segments = round_snapshot.segments
 
     def _segment_payload(index: int) -> Dict[str, Any]:
-        seg = state.segments[index]
+        seg = segments[index]
         problems = segment_problems.get(index, [])
         return {
             "id": index,
@@ -310,11 +322,7 @@ def _build_payload(
             "target_latin": cfg.single_line_target_latin,
         },
         "boundary_context": [
-            {
-                "id": index,
-                "text": state.segments[index].text,
-                "translated": state.segments[index].translated_text,
-            }
+            _context_entry(index, segments[index])
             for start, end in batch.context.spans
             for index in range(start, end)
         ],
@@ -415,6 +423,7 @@ def _review_pass(
     runtime: LLMGateway,
     review_profile: "LLMModelProfile",
     state: "_WorkingState",
+    round_snapshot: ASRData,
     cfg: PostprocessConfig,
     layout: "SubtitleLayoutEnum",
     *,
@@ -432,6 +441,12 @@ def _review_pass(
     ``accepted_entries`` 按主体内偏移携带主翻译已接受候选的显式绑定；
     ``replacements`` 提供主体内各输入段的片段数（复校定位用）。
     只复校译文侧；原文侧与时间由主翻译候选保证（D05/D24）。
+    复校上下文（ADR-0021）以 ``round_snapshot``（修复轮次快照）为基：
+    主体区间叠加本次合法候选，主体外一律是轮次快照内容——邻批
+    （或同批其他主体）刚归并的拆分结果不进入本主体复校上下文。
+    ``region_length`` 是拼接后片段数（复校定位坐标）；
+    上下文窗口在轮次快照坐标上以 ``len(replacements)``（主体输入段数）
+    为界，不随候选拆分片段数扩张。
     返回 (修正数, 警告列表)；复校失败不回退已接受候选（保守保留
     主翻译，prompt 规则 7）。
     """
@@ -463,27 +478,35 @@ def _review_pass(
             bindings[(problem_id, entry["output_index"])] = proposal
     if not proposals:
         return 0, []
-    # 边界上下文取拼接后当前状态的相邻段（D16 语义：边界参考，非修改目标）。
+
+    # 复校上下文视图（轮次快照语义，ADR-0021）：以修复轮次快照为基，
+    # 只在主体区间内叠加本次已接受候选（拼接后的片段文本 / 译文）。
+    # 主体外相邻段保持轮次快照内容：同轮邻批 / 其他主体的归并
+    # 结果不进入本主体的复校上下文（完成顺序无关）。
+    candidate_view: Dict[int, Dict[str, Any]] = {}
+    for offset in sorted(accepted_entries):
+        fragments = replacements[offset]
+        index = region_start + offset
+        candidate_view[index] = {
+            "id": index,
+            "text": " ".join(fragment.text for fragment in fragments),
+            "translated": " ".join(fragment.translated_text for fragment in fragments),
+        }
+
+    def _context_view(index: int) -> Dict[str, Any]:
+        entry = candidate_view.get(index)
+        if entry is not None:
+            return entry
+        return _context_entry(index, round_snapshot.segments[index])
+
+    # 上下文窗口在轮次快照坐标上取主体输入段数（``len(replacements)``）
+    # 为界：上文 [start-radius, start)，下文 [start+span, start+span+radius)。
+    subject_span = len(replacements)
     context: List[Dict[str, Any]] = []
-    for index in range(max(0, region_start - radius), region_start):
-        context.append(
-            {
-                "id": index,
-                "text": state.segments[index].text,
-                "translated": state.segments[index].translated_text,
-            }
-        )
-    for index in range(
-        region_start + region_length,
-        min(len(state.segments), region_start + region_length + radius),
-    ):
-        context.append(
-            {
-                "id": index,
-                "text": state.segments[index].text,
-                "translated": state.segments[index].translated_text,
-            }
-        )
+    for index in range(max(0, region_start - radius), region_start + subject_span + radius):
+        if index >= len(round_snapshot.segments):
+            break
+        context.append(_context_view(index))
     payload = {
         "limits": {
             "absolute_cjk": cfg.single_line_absolute_cjk,
@@ -854,13 +877,19 @@ def execute_viewing_repair(
 
             round_accepted = False
             round_transport_failed = False
-            # 批间与批内主体均按起始段降序应用：先 splice / 回退高段序区间，
-            # 低段序批次的区间索引保持有效（同一轮快照内的索引一致）。
+            # 修复轮次快照（ADR-0021）：本轮全部请求的主体与边界上下文
+            # 共享 ``round_snapshot``（轮初 state 的冻结副本）；同轮邻批
+            # 已归并的拆分 / 校对结果不进入本批载荷。下一轮才读取归并后
+            # 的字幕状态（轮首重建快照）。
+            round_snapshot = state.as_data()
             if progress is not None:
                 progress(
                     min(90, 55 + summary.rounds * 4),
                     f"正在修复观看问题（第 {summary.rounds} 轮，{len(open_problems)} 个未解决）",
                 )
+            # 阶段 1：载荷构建 + 候选计算（按固定批序发出请求，验收候选，
+            # 不直接修改共享字幕）；阶段 2：统一归并（固定段序降序 splice、
+            # 区域守卫与高级校对）。本票保持串行执行，分离只为确定性语义。
             for batch in reversed(plan.batches):
                 _raise_if_cancelled()
                 batch_problem_map = {
@@ -873,7 +902,7 @@ def execute_viewing_repair(
                         for subject in batch.subjects
                     )
                 }
-                payload = _build_payload(state, cfg, batch, segment_problems, feedback)
+                payload = _build_payload(round_snapshot, cfg, batch, segment_problems, feedback)
                 summary.requests += 1
                 try:
                     response = runtime.complete(
@@ -905,6 +934,7 @@ def execute_viewing_repair(
                         last_error[_identity(problem)] = fatal
                     continue
 
+                # 阶段 2（批内）：固定段序降序归并本批候选。
                 for subject in reversed(batch.subjects):
                     region = state.initial_indices(
                         subject.start_index, subject.end_index
@@ -916,7 +946,7 @@ def execute_viewing_repair(
                     splice_ok = True
                     any_accepted = False
                     for index in range(subject.start_index, subject.end_index):
-                        seg = state.segments[index]
+                        seg = round_snapshot.segments[index]
                         entries = grouped.get(index, [])
                         problems = segment_problems.get(index, [])
                         identities = [_identity(problem) for problem in problems]
@@ -974,11 +1004,13 @@ def execute_viewing_repair(
                     summary.spliced_fragments += spliced
                     # 增强流程（票 06，D07）：拼接成功后对已接受候选执行
                     # 高级校对复校；失败保留主翻译候选，不回退已接受区域。
+                    # 复校上下文以轮次快照为底（ADR-0021）：不读邻批刚完成的归并。
                     if flow.mode == "main_review" and flow.review_profile is not None:
                         applied, review_warnings = _review_pass(
                             runtime,
                             flow.review_profile,
                             state,
+                            round_snapshot,
                             cfg,
                             layout,
                             region_start=subject.start_index,
