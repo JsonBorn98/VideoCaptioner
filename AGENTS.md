@@ -34,6 +34,8 @@ Pytest discovers `test_*.py`, `Test*` classes, and `test_*` functions under `tes
 
 Recent history uses short imperative summaries and occasional Conventional Commit prefixes, for example `feat: make Edge TTS the default dubbing provider`. Prefer messages such as `fix: handle empty subtitles` or `Add desktop smoke coverage`. Pull requests should describe the change, link issues, list tests run, and include screenshots for visible GUI or documentation changes.
 
+This repository is a fork of `WEIFENG2333/VideoCaptioner` maintained for private use. **Never open pull requests against the upstream repository** (`WEIFENG2333/VideoCaptioner`), for any reason. All PRs go to `JsonBorn98/VideoCaptioner` only; when creating PRs, always pass `--repo JsonBorn98/VideoCaptioner` explicitly instead of relying on `gh`'s default target. Never push to the `upstream` remote.
+
 ## Security & Configuration Tips
 
 Do not commit API keys, cookies, generated bundles, or local config. Use `VIDEOCAPTIONER_*` environment variables or `videocaptioner config set ...`, and keep test-only secrets in your shell or CI store.
