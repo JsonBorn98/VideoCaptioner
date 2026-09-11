@@ -76,9 +76,12 @@ def _resolve_thread_num(arg_value, config: dict) -> int:
     """Freeze the task concurrency request count (ticket 04, ADR-0018).
 
     Resolution order: explicit CLI argument, then the shared ``subtitle.thread_num``
-    config (same knob as the GUI), then the authoritative default 10. Keeps CLI
+    config (same knob as the GUI), then the authoritative default. Keeps CLI
     and GUI on one execution policy instead of a hidden gateway default.
+    A present-but-invalid value warns and falls back to the authoritative
+    default (observable via the repair summary), never silently.
     """
+    from videocaptioner.core.postprocess.repair import DEFAULT_THREAD_NUM
 
     for candidate in (
         arg_value,
@@ -86,7 +89,12 @@ def _resolve_thread_num(arg_value, config: dict) -> int:
     ):
         if candidate is not None and type(candidate) is int and candidate >= 1:
             return candidate
-    return 10
+        if candidate is not None:
+            output.warn(
+                f"Invalid subtitle.thread_num value ({candidate!r}); "
+                f"falling back to the default {DEFAULT_THREAD_NUM}"
+            )
+    return DEFAULT_THREAD_NUM
 
 
 def _write_sidecar(result, *, verbose: bool) -> None:

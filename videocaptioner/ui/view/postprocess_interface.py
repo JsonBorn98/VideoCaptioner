@@ -484,6 +484,8 @@ class PostprocessInterface(QWidget):
                 profile_id=profile_id,
                 layout_mode=self.layout_mode,
                 config_snapshot=config,
+                # 兜底构造同样冻结并发请求数（票 04）：不回退隐藏网关默认。
+                thread_num=cfg.thread_num.value,
             )
         if hasattr(task, "profile_id"):
             task.profile_id = profile_id
@@ -491,6 +493,9 @@ class PostprocessInterface(QWidget):
             task.layout_mode = self.layout_mode
         if hasattr(task, "config_snapshot"):
             task.config_snapshot = config
+        if getattr(task, "thread_num", None) is None:
+            # TaskFactory 未冻结（含兜底路径外的旧调用方）：页面冻结当前值。
+            task.thread_num = cfg.thread_num.value
         return task
 
     def _snapshot_task_input(self, task: PostprocessTask) -> None:

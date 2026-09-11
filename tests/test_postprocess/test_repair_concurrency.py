@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import SubtitleLayoutEnum
@@ -661,3 +662,111 @@ def test_transport_failure_in_one_batch_keeps_other_batches_merging():
     assert all(
         len(s.text) <= 20 for s in repaired.segments if s.text.startswith("超长")
     )
+
+
+# ---- 验收 6：暖缓存不冒充并发提速（spec：缓存命中不冒充真实模型并发）----
+
+
+def test_warm_cache_real_gateway_zero_attempts(tmp_path):
+    """真实 ``LLMGateway`` + 受控 adapter + 暖缓存：复跑零 adapter 尝试。
+
+    穿过真实网关（含 per-profile 信号量与响应缓存路径）证明缓存命中
+    不是 adapter 尝试：第一次任务产生缓存源，第二次任务 logical 请求
+    照常发出、全部命中缓存、adapter ``complete`` 零调用（修复执行的
+    验收 / 归并不因缓存跳过，提速不冒充模型并发）。
+    pytest conftest 全局关闭缓存：本测试在受控范围内临时启用并复原
+    （与基准 ``run_case`` 同一管理模式），缓存隔离在 tmp 磁盘目录。
+    """
+    from diskcache import Cache
+
+    from videocaptioner.core.llm.gateway import LLMGateway
+    from videocaptioner.core.llm.response_cache import GatewayResponseCache
+    from videocaptioner.core.utils import cache as cache_control
+
+    response_cache = GatewayResponseCache(cache=Cache(str(tmp_path / "cache")))
+    adapter_attempts = {"main": 0, "review": 0}
+    adapter_lock = threading.Lock()
+
+    class _CountingAdapter:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, request):
+            payload = json.loads(_payload_text(request))
+            role = "review" if "review_subjects" in payload else "main"
+            with adapter_lock:
+                adapter_attempts[role] += 1
+            import time
+
+            time.sleep(0.02 if role == "main" else 0.005)
+            if role == "review":
+                text = json.dumps(
+                    {"reviews": _confirm_reviews(payload)}, ensure_ascii=False
+                )
+            else:
+                text = json.dumps({"repairs": _split_entries(payload)}, ensure_ascii=False)
+            return LLMResult(text=text)
+
+        def close(self):
+            pass
+
+    class _CountingGateway:
+        """真实网关外包一层：只注入 adapter 工厂与缓存，不转发语义。"""
+
+        def __init__(self):
+            self.runtime = LLMGateway(
+                adapter_factory=_CountingAdapter,
+                response_cache=response_cache,
+                sleep=time.sleep,
+                random_source=lambda: 0.5,
+            )
+
+        def complete(self, profile, request, **kwargs):
+            return self.runtime.complete(profile, request, **kwargs)
+
+        def close(self):
+            self.runtime.close()
+
+    data = _data(*_problem_pairs(12))
+    gateway = _CountingGateway()
+    was_enabled = cache_control.is_cache_enabled()
+    cache_control.enable_cache()
+    try:
+
+        def run_once():
+            return execute_viewing_repair(
+                data,
+                _config(),
+                QualityReport(),
+                SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+                gateway=gateway,
+                snapshot=_enhanced_snapshot(),
+                thread_num=4,
+            )
+
+        repaired_cold, report_cold = run_once()
+        assert not report_cold.unresolved_viewing_problems()
+        assert adapter_attempts["main"] == 2  # 冷：2 批真实 adapter 调用
+        assert adapter_attempts["review"] == 12
+
+        repaired_warm, report_warm = run_once()
+        summary = report_warm.viewing_repair
+        assert summary is not None
+        # 暖：logical 请求照常发生（请求计数进 summary），但零新增 adapter 尝试。
+        assert summary.requests >= 2
+        assert adapter_attempts["main"] == 2  # 无新增
+        assert adapter_attempts["review"] == 12  # 无新增
+        # 缓存命中复跑产生逐段一致的修复结果（确定性归并对缓存命中同样成立）。
+        a = [
+            (s.text, s.start_time, s.end_time, s.translated_text)
+            for s in repaired_cold.segments
+        ]
+        b = [
+            (s.text, s.start_time, s.end_time, s.translated_text)
+            for s in repaired_warm.segments
+        ]
+        assert a == b
+        assert not report_warm.unresolved_viewing_problems()
+    finally:
+        if not was_enabled:
+            cache_control.disable_cache()

@@ -36,7 +36,6 @@ import hashlib
 import json
 import math
 import threading
-import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import (
@@ -210,7 +209,8 @@ class RepairSummary:
     effective_concurrency: int = 0
     """本轮窗口并发上限（批数不足窗口时收缩到批数）。"""
     max_inflight: int = 0
-    """冷缓存下观测到的最大同时在途主修复请求数。"""
+    """发出层观测的最大同时在途主修复请求数（含瞬时缓存命中；真实
+    adapter 在途由传输探针口径覆盖——spec：缓存命中不冒充模型吞吐）。"""
     concurrent_rounds: int = 0
     """窗口并发 > 1 的轮次数（供配置贯通核对）。"""
 
@@ -764,6 +764,8 @@ def _dispatch_ordered(
             for future in pending:
                 future.cancel()
             raise
+    if len([outcome for outcome in results if outcome is not None]) != batch_count:
+        raise RuntimeError("dispatch lost outcomes; batch order must stay dense")
     return [outcome for outcome in results if outcome is not None]
 
 
@@ -771,7 +773,10 @@ class _BatchOutcome(NamedTuple):
     """一个主修复请求的落账载荷（票 04 并发执行）。
 
     执行（网络等待）与归并（写共享状态）分离：worker 只产生结果与
-    观测，不触碰共享字幕 / 重试簿记（ADR-0021「worker 只产生候选」）。
+    错误，不触碰共享字幕 / 重试簿记（ADR-0021「worker 只产生候选」）。
+    性能观测（在途窗口）由协调侧 ``inflight_state`` 单独持有，缓存
+    命中不区分——真实 adapter 在途由传输探针口径覆盖（spec：缓存
+    命中不冒充模型吞吐）。
     """
 
     batch_order: int
@@ -780,12 +785,6 @@ class _BatchOutcome(NamedTuple):
     """成功响应（LLMResult）；传输级失败为 None。"""
     error: Optional[BaseException] = None
     """传输级失败原因（整体请求失败；业务级拒绝在响应解析后落账）。"""
-    cache_hit: bool = False
-    """该请求是网关缓存命中（不计入真实 adapter 在途观测）。"""
-    duration: float = 0.0
-    """请求墙钟秒（性能观测；主线程归并时汇总）。"""
-    inflight: int = 0
-    """进入请求时的冷缓存在途观测（供 max_inflight；0 = 缓存命中）。"""
 
 
 def _parse_response(
@@ -1162,7 +1161,6 @@ def execute_viewing_repair(
                     # 网关调用的请求才计数；取消拦下的未发请求不计。
                     summary.requests += 1
                 payload = _build_payload(round_snapshot, cfg, batch, segment_problems, feedback)
-                started = time.perf_counter()
                 with inflight_lock:
                     inflight_state["active"] += 1
                     inflight_state["max"] = max(inflight_state["max"], inflight_state["active"])
@@ -1180,18 +1178,11 @@ def execute_viewing_repair(
                     raise
                 except Exception as exc:  # noqa: BLE001 —— 传输级失败不消耗业务重试
                     logger.warning("观看问题修复请求失败（传输级）: %s", exc)
-                    return _BatchOutcome(
-                        order, None, error=exc, duration=time.perf_counter() - started
-                    )
+                    return _BatchOutcome(order, None, error=exc)
                 finally:
                     with inflight_lock:
                         inflight_state["active"] -= 1
-                return _BatchOutcome(
-                    order,
-                    response,
-                    cache_hit=response.duration_ms is None,
-                    duration=time.perf_counter() - started,
-                )
+                return _BatchOutcome(order, response)
 
             outcomes = _dispatch_ordered(
                 len(ordered_batches), _send, window=window, cancelled=cancelled
@@ -1199,10 +1190,11 @@ def execute_viewing_repair(
             # 在途观测是发出层口径（含瞬时缓存命中）；真实 adapter 在途由
             # 传输探针口径覆盖（spec：缓存命中不冒充模型吞吐）。
             summary.max_inflight = max(summary.max_inflight, inflight_state["max"])
-            for order, outcome in enumerate(outcomes):
+            for outcome in outcomes:
                 # 归并前重确认取消（spec「停止全路径」）：在途请求按在途处理，
                 # 已返回的迟到候选不得在停止后写回共享状态。
                 _raise_if_cancelled()
+                order = outcome.batch_order
                 batch = ordered_batches[order]
                 batch_problem_map = {
                     problem.problem_id: problem
