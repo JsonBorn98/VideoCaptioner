@@ -211,7 +211,8 @@ class RepairBatch:
     序列化请求（系统提示词 + guidance + limits + feedback 协议开销）。
     ``output_reserve_tokens`` 是输出预留（票 03：一对多拆分 + 原译
     对应 + 协议开销）；``context_radius`` 是本批实际使用的上下文
-    半径（收缩可观察，票 03 验收）。
+    半径，``subjects_shrunk`` / ``context_shrunk`` 标记本批因容量
+    收缩到该形状的原因（票 03 收缩观测，规划器单一来源）。
     """
 
     subjects: List[RepairSubject]
@@ -219,6 +220,10 @@ class RepairBatch:
     estimated_tokens: int = 0
     output_reserve_tokens: int = 0
     context_radius: int = DEFAULT_BOUNDARY_CONTEXT_RADIUS
+    subjects_shrunk: bool = False
+    """本批主体数量因容量收缩低于规划起点（先减主体，D26 第一级）。"""
+    context_shrunk: bool = False
+    """本批上下文半径因容量收缩低于请求值（单主体后减上下文，第二级）。"""
 
 
 @dataclass
@@ -348,7 +353,11 @@ def plan_repair_batches(
         return plan
 
     def fits(
-        subjects_in_batch: Sequence[RepairSubject], radius: int
+        subjects_in_batch: Sequence[RepairSubject],
+        radius: int,
+        *,
+        subjects_shrunk: bool = False,
+        context_shrunk: bool = False,
     ) -> Optional[RepairBatch]:
         context = _context_spans(subjects_in_batch, radius, segment_count)
         estimated = _input_estimate(subjects_in_batch, context)
@@ -361,6 +370,8 @@ def plan_repair_batches(
             estimated_tokens=estimated,
             output_reserve_tokens=reserve,
             context_radius=radius,
+            subjects_shrunk=subjects_shrunk,
+            context_shrunk=context_shrunk,
         )
 
     cursor = 0
@@ -383,7 +394,11 @@ def plan_repair_batches(
         max_take = min(max_subjects_per_batch, len(subjects) - cursor)
         for take in range(max_take, 0, -1):
             window = subjects[cursor : cursor + take]
-            candidate = fits(window, boundary_context_radius)
+            candidate = fits(
+                window,
+                boundary_context_radius,
+                subjects_shrunk=take < max_take,
+            )
             if candidate is not None:
                 batch = candidate
                 break
@@ -391,7 +406,12 @@ def plan_repair_batches(
         # 单主体仍放不下：再逐步减少上下文（radius -> 0）。
         if batch is None:
             for radius in range(boundary_context_radius - 1, -1, -1):
-                candidate = fits([subject], radius)
+                candidate = fits(
+                    [subject],
+                    radius,
+                    subjects_shrunk=True,
+                    context_shrunk=radius < boundary_context_radius,
+                )
                 if candidate is not None:
                     batch = candidate
                     break

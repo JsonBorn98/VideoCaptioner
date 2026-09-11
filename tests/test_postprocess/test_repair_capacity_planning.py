@@ -193,7 +193,14 @@ def test_sent_requests_respect_work_context_budget():
     assert summary is not None
     assert summary.requests >= 2  # 12 主体收紧后被拆成多批
     budget = main_profile.work_context_tokens
-    for payload, request in zip(gateway.main_payloads(), gateway.raw_requests[: summary.requests]):
+    # 主修复请求按载荷判别切片（review 请求不配进主修复断言）。
+    main_requests = [
+        request
+        for request in gateway.raw_requests
+        if "repair_subjects" in _payload_text(request)
+    ]
+    assert len(main_requests) == summary.requests
+    for request in main_requests:
         input_tokens = _request_input_tokens(request)
         # 输出预留按主体载荷比例（执行侧同口径）；请求的输出上限即钳制值。
         assert request.max_output_tokens is None or request.max_output_tokens < budget
@@ -203,6 +210,9 @@ def test_sent_requests_respect_work_context_budget():
     assert summary.planned_requests >= 2
     assert summary.planned_input_tokens > 0
     assert summary.planned_output_reserve_tokens > 0
+    # 主体 / 问题计数分列：12 主体、12 问题（每主体单问题），与段数分口径。
+    assert summary.planned_subjects >= 12
+    assert summary.planned_problems >= 12
     # 内容不被截断：原文顺序完整。
     assert "".join("".join(s.text.split()) for s in repaired.segments) == "".join(
         "".join(t.split()) for t, _ in pairs
@@ -231,12 +241,65 @@ def test_capacity_check_covers_full_request_not_bare_text():
     )
     summary = report.viewing_repair
     assert summary is not None
-    # 全部请求的完整输入（含 guidance）都在预算内。
-    for request in gateway.raw_requests[: summary.requests]:
-        if "repair_subjects" in _payload_text(request) or True:
+    # 全部主修复请求的完整输入（含 guidance）都在预算内。
+    for request in gateway.raw_requests:
+        if "repair_subjects" in _payload_text(request):
             assert _request_input_tokens(request) <= main_profile.work_context_tokens
     # guidance 实际进入请求（可观察到）。
     assert any(long_guidance[:20] in r.messages[1].content for r in gateway.raw_requests)
+
+
+def test_long_feedback_counts_into_request_budget():
+    """长 feedback（上一轮失败原因）计入请求输入并占预算：随轮次真实膨胀。
+
+    第 1 轮响应结构错误（非 repairs 数组）→ last_error 进第 2 轮
+    feedback；feedback 进载荷并计入估算——请求仍不超预算，
+    且观测口径与实际请求一致（估算复用 ``_request_messages``）。
+    """
+
+    class _StructuralErrorThenSplitGateway(_RecordingGateway):
+        """第 1 次主修复响应结构错误（缺 repairs 数组），之后正常拆分。"""
+
+        def __init__(self):
+            super().__init__()
+            self.main_calls = 0
+
+        def _main_repairs(self, payload: dict) -> list[dict]:
+            self.main_calls += 1
+            if self.main_calls == 1:
+                # 结构错误形状：整体致命（响应缺 repairs 数组），
+                # 该轮不落 splice，全部问题身份进 last_error。
+                return [{"problem_id": "x", "output_index": 0,
+                          "original": "非法", "translated": "坏"}]
+            return _split_entries(payload, translated=self.main_translated)
+
+    data = _data(*[("超长" * 30, f"乙{i}译") for i in range(6)])
+    gateway = _StructuralErrorThenSplitGateway()
+    main_profile = _profile("capacity-main", work_context_tokens=16_384)
+    repaired, report = execute_viewing_repair(
+        data,
+        _config(),
+        QualityReport(),
+        SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        gateway=gateway,
+        snapshot=_enhanced_snapshot(radius=2, main_profile=main_profile),
+    )
+    summary = report.viewing_repair
+    assert summary is not None
+    # 第 2 轮请求的 feedback 非空且可见于载荷（结构错误原因进 feedback）。
+    second = next(
+        payload
+        for payload in gateway.main_payloads()
+        if payload["feedback"]
+    )
+    assert any("未知问题绑定" in item for item in second["feedback"])
+    # 带长 feedback 的请求仍在预算内（feedback 计入估算口径）。
+    for request in gateway.raw_requests:
+        if "repair_subjects" in _payload_text(request):
+            assert _request_input_tokens(request) <= main_profile.work_context_tokens
+    # 结构错误按整体致命处理：该轮不落 splice；下一轮带 feedback 重试成功。
+    assert summary.requests >= 2
+    assert not report.unresolved_viewing_problems()
 
 
 # ---- 验收 2：先减主体数量，再缩边界上下文，保持主体完整 ----
@@ -586,12 +649,15 @@ def test_full_task_capacity_clamp_at_config_boundary(tmp_path):
     assert result.succeeded and result.continue_downstream
     summary = result.report.viewing_repair
     assert summary is not None
-    # 实际发出的每个请求都在最小工作上下文预算内。
-    for request in gateway.raw_requests[: summary.requests]:
-        assert _request_input_tokens(request) <= 16_384
-    # 规划观测可核对（报告口径，不声称真实吞吐）。
+    # 实际发出的每个主修复请求都在最小工作上下文预算内。
+    for request in gateway.raw_requests:
+        if "repair_subjects" in _payload_text(request):
+            assert _request_input_tokens(request) <= 16_384
+    # 规划观测可核对（报告口径，不声称真实吞吐）；计数按主体/问题分列。
     assert summary.planned_requests >= 1
     assert summary.planned_input_tokens > 0
+    assert summary.planned_subjects >= 2  # 两个超长主体
+    assert summary.planned_problems >= 2
     assert not result.report.unresolved_viewing_problems()
     # 原文保护。
     assert "".join("".join(s.text.split()) for s in result.output_data.segments) == "".join(
@@ -618,7 +684,7 @@ def test_max_output_tokens_clamp_does_not_raise_user_cap():
     summary = report.viewing_repair
     assert summary is not None
     # 请求的输出上限 ≤ 用户配置（钳制不抬升）。
-    for request in gateway.raw_requests[: summary.requests]:
+    for request in gateway.raw_requests:
         if "repair_subjects" in _payload_text(request):
             assert request.max_output_tokens == 512
     # 输出预留钳到 512：主体载荷小，预留本身受 max_output_tokens 钳制。

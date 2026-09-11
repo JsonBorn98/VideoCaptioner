@@ -150,10 +150,14 @@ class RepairSummary:
     """规划批次输入估计之和（完整请求口径，票 03）。"""
     planned_output_reserve_tokens: int = 0
     """规划批次输出预留之和（一对多输出 + 协议开销）。"""
+    planned_subjects: int = 0
+    """规划覆盖的修复主体数（主体计数与段数 / 问题数分列，票 03）。"""
+    planned_problems: int = 0
+    """规划覆盖的问题数（含同段多问题；与主体数分开口径）。"""
     shrunk_subject_batches: int = 0
-    """因容量收缩主体数量的批次数（先减主体，D26 顺序第一级）。"""
+    """主体数量因容量收缩的批次数（先减主体，D26 顺序第一级）。"""
     shrunk_context_batches: int = 0
-    """因容量收缩边界上下文的批次数（单主体后减上下文，第二级）。"""
+    """边界上下文因容量收缩的批次数（单主体后减上下文，第二级）。"""
     # 修复方式选择（票 06）：翻译方式与角色身份进入报告与任务状态，
     # 便于核对实际行为（D15「翻译方式选择和资产身份进入报告」）。
     translation_method: str = ""
@@ -374,16 +378,14 @@ def _estimate_request_input(
     segment_problems: Dict[int, List[PlanProblem]],
     feedback: List[str],
     guidance: str,
-    *,
-    include_system_prompt: bool = True,
 ) -> int:
     """估算一批主修复请求的完整输入 token（票 03 容量口径）。
 
-    覆盖完整序列化请求（spec「主修复与高级校对的容量规划」）：系统
-    提示词 + guidance 块 + 用户消息包装 + ``_build_payload`` 同形状载荷
-    （limits / 主/译文本 / 问题 / 上下文 / feedback 协议开销），不只估
-    主体裸文本。载荷与实际请求共用 ``_build_payload`` 构造（同一来源），
-    规划时零上下文收缩即同一函数对 radius 的复用。
+    覆盖完整序列化请求（spec「主修复与高级校对的容量规划」）：直接
+    复用 ``_request_messages`` 构造与实际请求逐字一致的消息（系统
+    提示词 + guidance 块 + ``_build_payload`` 载荷：limits / 主译文本 /
+    问题 / 上下文 / feedback 协议开销），不只估主体裸文本。估算与
+    实际请求共用同一构造（单一来源），协议变化不会静默漂移。
     """
     from ..translate.enhanced.token_planner import estimate_tokens
 
@@ -392,16 +394,8 @@ def _estimate_request_input(
         context=context,
     )
     payload = _build_payload(round_snapshot, cfg, batch, segment_problems, feedback)
-    user_body = (
-        guidance_block(guidance)
-        + "Repair the following subtitle viewing problems:\n<input>"
-        + json.dumps(payload, ensure_ascii=False)
-        + "</input>"
-    )
-    parts = [user_body]
-    if include_system_prompt:
-        parts.append(get_prompt("optimize/viewing_repair"))
-    return estimate_tokens("\n".join(parts))
+    messages = _request_messages(payload, guidance)
+    return estimate_tokens("\n".join(message.content for message in messages))
 
 
 def _estimate_output_reserve(
@@ -439,14 +433,10 @@ def _estimate_output_reserve(
     return max(reserve, 1)
 
 
-def guidance_block(guidance: str) -> str:
-    """任务冻结的原翻译提示配置块（``_request_messages`` / 估算共用形状）。"""
+def guidance_block(guidance: str, label: str = "translation") -> str:
+    """任务冻结的原翻译提示配置块（主修复 / 复校消息构造共用形状）。"""
     if guidance.strip():
-        return (
-            "Custom translation guidance from the original task:\n"
-            + guidance.strip()
-            + "\n\n"
-        )
+        return f"Custom {label} guidance from the original task:\n" + guidance.strip() + "\n\n"
     return ""
 
 
@@ -468,17 +458,11 @@ def _request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMe
 def _review_request_messages(payload: Dict[str, Any], guidance: str = "") -> List[LLMMessage]:
     """构造高级校对复校请求消息（增强流程第二段，票 06）。"""
     system_prompt = get_prompt("optimize/viewing_repair_review")
-
-    def _block() -> str:
-        if guidance.strip():
-            return "Custom review guidance from the original task:\n" + guidance.strip() + "\n\n"
-        return ""
-
     return [
         LLMMessage("system", system_prompt),
         LLMMessage(
             "user",
-            _block()
+            guidance_block(guidance, label="review")
             + "Review the following proposed repair fragments:\n<input>"
             + json.dumps(payload, ensure_ascii=False)
             + "</input>",
@@ -979,20 +963,22 @@ def execute_viewing_repair(
                         f"问题 {subject.problem_ids}"
                     )
                 closed_regions.update(indices)
-            # 容量收缩观测（票 03，spec 第 7 条）：区分「先减主体」与
-            # 「再缩上下文」两级；批内 ``context_radius`` 低于请求 radius
-            # 即上下文被缩，主体数多于批次数即批被拆小。
-            summary.planned_requests += len(plan.batches)
+            # 容量收缩观测（票 03，spec 第 7 条）：收缩原因由规划器在
+            # 批次上标记（``subjects_shrunk`` / ``context_shrunk``），
+            # 执行侧只按批次聚合——主体计数用批次主体数（不用问题段数
+            # 代替主体数），问题计数按显式绑定分列。
             for batch in plan.batches:
+                summary.planned_requests += 1
                 summary.planned_input_tokens += batch.estimated_tokens
                 summary.planned_output_reserve_tokens += batch.output_reserve_tokens
-                if batch.context_radius < radius:
+                summary.planned_subjects += len(batch.subjects)
+                summary.planned_problems += sum(
+                    len(subject.problem_ids) for subject in batch.subjects
+                )
+                if batch.subjects_shrunk:
+                    summary.shrunk_subject_batches += 1
+                if batch.context_shrunk:
                     summary.shrunk_context_batches += 1
-            if plan.batches and sum(len(b.subjects) for b in plan.batches) < len(
-                {p.segment_index for p in open_problems}
-            ) and len(plan.batches) > 1:
-                # 主体被拆批（>1 批覆盖全部主体）：至少一批因容量收缩主体数量。
-                summary.shrunk_subject_batches += len(plan.batches)
             if not plan.batches:
                 break
 
