@@ -1,0 +1,3 @@
+## Shoals
+- [Windows离线基准必须显式UTF-8读取报告和脚本](scripts/postprocess_benchmark.py) — 本机uv Python默认GBK，Path.read_text()读取含中文基准脚本复现UnicodeDecodeError；JSON/脚本/日志读取显式encoding='utf-8'，子进程文本捕获也指定编码，避免把编码失败误判为业务或性能失败。
+- [test_runner_owns_single_cancelled_terminal_event 偶发失败的等待循环对不上事件时序](tests/test_postprocess/test_progress_frontends.py:186) — offscreen Qt 子进程测试用 processEvents 轮询等首个 waiting 事件（10s 预算）再 thread.stop()，之后 15s 等 cancelled 信号。实测干净 HEAD 复现 6 次中 2 次失败：AssertionError: [] ——stop 后 15s 内 cancelled 信号未到。可能原因：queued pyqtSignal 在无人 processEvents 的间隙积压、QThread 清理慢于 15s、或 stop() 路径本身有慢分支。该 flake 与票 08 分槽修复无关（stash 验证），但拖慢全量回归判断（每次全量跑都可能红）。修复方向：把等待循环改为事件驱动（信号槽触发置位），或延长预算/重试。

@@ -55,7 +55,9 @@ CLAUDE.md
 /.agents/
 videocaptioner/_version.py
 
-# Matt-flow local issue tracker (public fork — maps/tickets may reference
-# internal gateway endpoints and API key locations)
-.scratch/
-.alma-snapshots
+# Matt-flow: specs/tickets/reviews are tracked in git; only local runtime
+# state stays untracked (resolved-draft ID map, snapshot bookkeeping)
+.scratch/.resolved-drafts.json
+.alma-snapshots/index.json
+.alma-snapshots/objects/
+.alma-snapshots/snapshots/
