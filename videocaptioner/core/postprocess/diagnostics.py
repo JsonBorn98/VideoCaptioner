@@ -207,34 +207,104 @@ def render_event_line(event: Dict[str, Any]) -> str:
     return " · ".join(part for part in parts if part)
 
 
+def merge_waiting_event(fields: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    """把一个 waiting 事件并入按角色分槽的最新事实（票 08 点验修复）。
+
+    并发等待（票 04/05 后的常态）：主修复与高级校对各在途请求的
+    ``WaitRefresher`` 并发发射 waiting 事件（0.2s 各自节流）。单槽
+    「最新一条」存储让两类消息交替覆盖（实机闪烁：主修复 230.3s
+    与校对 12.0s 互相刷掉）。``waiting_slots`` 按角色分槽存储最新
+    口径；非等待字段照旧平铺（round / batch 事实与角色无关）。
+    返回新 dict，``fields`` 不被就地修改（GUI 累积口径可安全复用）。
+    """
+    if event.get("kind") != "waiting":
+        return dict(fields)
+    merged = dict(fields)
+    counts = event.get("counts") or {}
+    merged["waiting_slots"] = {
+        **{str(role): slot for role, slot in (fields.get("waiting_slots") or {}).items()},
+        str(event.get("role")): {
+            "message": event.get("message"),
+            "window": counts.get("window"),
+            "inflight": counts.get("inflight"),
+            "queued": counts.get("queued"),
+            "wait_elapsed_ms": counts.get("wait_elapsed_ms"),
+            "request_window_s": event.get("request_window_s"),
+            "round": event.get("round"),
+        },
+    }
+    return merged
+
+
+def drop_waiting_role(fields: Dict[str, Any], role: str) -> Dict[str, Any]:
+    """移除一个角色的等待槽（角色请求已返回 / 轮次推进）。
+
+    单槽口径下这一步隐含在「下一条事件覆盖」里；分槽后旧槽不再
+    被新事件覆盖，必须显式清理，否则已返回角色陈旧闪烁。
+    返回新 dict，``fields`` 不被就地修改。
+    """
+    slots = {str(key): slot for key, slot in (fields.get("waiting_slots") or {}).items()}
+    slots.pop(role, None)
+    merged = dict(fields)
+    merged["waiting_slots"] = slots
+    return merged
+
+
+def _render_waiting_slot(role: str, slot: Dict[str, Any]) -> list[str]:
+    wait_ms = slot.get("wait_elapsed_ms")
+    wait_s = f"{wait_ms / 1000.0:.1f}s" if wait_ms is not None else "?"
+    lines = [
+        "{label}等待中：已等待 {wait}（在途 {inflight} / 排队 {queued}）".format(
+            label=role_label(role),
+            wait=wait_s,
+            inflight=slot.get("inflight") if slot.get("inflight") is not None else 0,
+            queued=slot.get("queued") if slot.get("queued") is not None else 0,
+        )
+    ]
+    request_window = slot.get("request_window_s")
+    if request_window:
+        lines.append(f"单次请求窗口（等待期限）{request_window:.0f}s")
+    return lines
+
+
 def render_detail(fields: Dict[str, Any]) -> str:
     """把最新事实渲染成展开详情多行文本（GUI 展开区 / 诊断输出）。
 
-    ``fields`` 是跨事件累积的最新口径：窗口 / 在途 / 排队来自 waiting，
-    已通过 / 未解决来自 batch / round，等待期限来自 waiting。
+    ``fields`` 是跨事件累积的最新口径：分槽后的并发等待
+    （``waiting_slots``，主修复与高级校对并列，不互相覆盖），
+    已通过 / 未解决来自 batch / round。
     """
     lines: list[str] = []
-    message = fields.get("message")
-    if message:
-        lines.append(str(message))
-    role = fields.get("role")
-    if role:
-        lines.append(f"角色：{role_label(str(role))}")
-    window = fields.get("window")
-    if window is not None:
-        lines.append(
-            "有效并发窗口 {window} · 在途 {inflight} · 排队 {queued}".format(
-                window=window,
-                inflight=fields.get("inflight", 0),
-                queued=fields.get("queued", 0),
+    slots = fields.get("waiting_slots") or {}
+    if slots:
+        # 并发等待按固定角色序并列（先主修复后校对）：单角色场景
+        # 与单槽口径呈现一致；并发双角色同屏（票 08 点验修复）。
+        for role in ("main", "review"):
+            if role in slots:
+                lines.extend(_render_waiting_slot(role, slots[role]))
+        for role, slot in slots.items():
+            if role not in ("main", "review"):
+                lines.extend(_render_waiting_slot(role, slot))
+    else:
+        # 无并发等待（旧单事件 / 离线渲染路径）：单槽等待口径。
+        message = fields.get("message")
+        if message:
+            lines.append(str(message))
+        window = fields.get("window")
+        if window is not None:
+            lines.append(
+                "有效并发窗口 {window} · 在途 {inflight} · 排队 {queued}".format(
+                    window=window,
+                    inflight=fields.get("inflight", 0),
+                    queued=fields.get("queued", 0),
+                )
             )
-        )
-    wait_ms = fields.get("wait_elapsed_ms")
-    if wait_ms is not None:
-        lines.append(f"本次等待时长 {wait_ms / 1000.0:.1f}s")
-    request_window = fields.get("request_window_s")
-    if request_window:
-        lines.append(f"单次请求窗口（等待期限）{request_window:.0f}s")
+        wait_ms = fields.get("wait_elapsed_ms")
+        if wait_ms is not None:
+            lines.append(f"本次等待时长 {wait_ms / 1000.0:.1f}s")
+        request_window = fields.get("request_window_s")
+        if request_window:
+            lines.append(f"单次请求窗口（等待期限）{request_window:.0f}s")
     accepted = fields.get("accepted_total")
     unresolved = fields.get("open_problems")
     if accepted is not None or unresolved is not None:
@@ -316,6 +386,8 @@ __all__ = [
     "WAITING_REFRESH_INTERVAL_S",
     "WaitRefresher",
     "batch_event",
+    "drop_waiting_role",
+    "merge_waiting_event",
     "render_detail",
     "render_event_line",
     "retry_event",

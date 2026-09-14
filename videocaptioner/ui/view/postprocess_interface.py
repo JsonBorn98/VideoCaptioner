@@ -668,7 +668,9 @@ class PostprocessInterface(QWidget):
         connection）；dict 直传供测试 / 编程调用方使用。取消后迟到
         事件不回写进度（进度不复活）：``_cancelling`` 置位后只更新
         终态。waiting 事件持续更新等待时长（worker 侧节流，不依赖
-        token streaming）。
+        token streaming）。并发等待（票 08 点验修复）：主修复与高级
+        校对的等待事件按角色分槽（``merge_waiting_event``），详情
+        两角色并列——单槽「最新一条」会让两类消息交替覆盖闪烁。
         """
         if isinstance(event, str):
             try:
@@ -693,16 +695,18 @@ class PostprocessInterface(QWidget):
         counts = event.get("counts") or {}
         fields["message"] = event.get("message")
         if kind == "waiting":
-            fields["role"] = event.get("role")
-            fields["window"] = counts.get("window")
-            fields["inflight"] = counts.get("inflight")
-            fields["queued"] = counts.get("queued")
-            fields["wait_elapsed_ms"] = counts.get("wait_elapsed_ms")
-            fields["request_window_s"] = event.get("request_window_s")
+            fields = diagnostics.merge_waiting_event(fields, event)
         elif kind == "round":
+            # 新一轮开始：上一轮的全部等待已结束，槽位清理
+            # （陈旧等待不清会一直挂在详情里闪烁）。
+            fields = diagnostics.drop_waiting_role(fields, "main")
+            fields = diagnostics.drop_waiting_role(fields, "review")
             fields["open_problems"] = counts.get("open_problems")
             fields["window"] = counts.get("window")
         elif kind == "batch":
+            # 一批归并验收完成：对应主修复请求已返回，其等待槽
+            # 清理；校对窗口的等待继续（主修复与校对独立分槽）。
+            fields = diagnostics.drop_waiting_role(fields, "main")
             fields["accepted_total"] = counts.get("accepted_total")
             if event.get("round") is not None:
                 fields["open_problems"] = self._latest_event_fields.get("open_problems")

@@ -232,6 +232,20 @@ def run(args: Namespace, config: dict) -> int:
         )
     progress = None if quiet else output.ProgressLine("Postprocessing subtitles").start()
 
+    # 普通模式的并发等待分槽（票 08 点验修复）：主修复与高级校对的
+    # waiting 事件并发到达，单槽「最新一条」会让进度行两类消息交替覆盖
+    # 闪烁；分槽后单行并列呈现两角色最新等待。
+    _waiting_fields: dict = {}
+
+    def _waiting_line(fields: dict) -> str:
+        from videocaptioner.core.postprocess.diagnostics import render_detail
+
+        detail = render_detail(fields)
+        # 单行进度：等待两行并为一行（"; " 分隔），其余行照旧。
+        return "；".join(
+            line for line in detail.splitlines() if "等待" in line or "窗口" in line
+        )
+
     def on_event(event: dict) -> None:
         """CLI 事件消费（票 07）：普通 / 详细 / 安静模式来自同一事实。
 
@@ -239,7 +253,8 @@ def run(args: Namespace, config: dict) -> int:
         terminal）；普通模式只用 waiting 事件刷新进度行（阶段摘要 +
         等待时长），不逐行刷屏。``progress.update`` / ``output.info`` 各自
         串行（ProgressLine 锁 + stderr 单写），事件回调可从修复窗口线程
-        并发到达。
+        并发到达。并发等待分槽（票 08 点验修复）：主修复与高级校对的
+        等待并列，不互相覆盖。
         """
         if quiet or progress is None:
             return
@@ -249,11 +264,24 @@ def run(args: Namespace, config: dict) -> int:
 
             output.info(render_event_line(event))
             return
+        nonlocal _waiting_fields
         if kind == "waiting":
+            from videocaptioner.core.postprocess.diagnostics import merge_waiting_event
+
+            _waiting_fields = merge_waiting_event(_waiting_fields, event)
             progress.update(
                 int(event.get("percent") or 0),
-                str(event.get("message") or ""),
+                _waiting_line(_waiting_fields) or str(event.get("message") or ""),
             )
+        elif kind == "round":
+            from videocaptioner.core.postprocess.diagnostics import drop_waiting_role
+
+            _waiting_fields = drop_waiting_role(_waiting_fields, "main")
+            _waiting_fields = drop_waiting_role(_waiting_fields, "review")
+        elif kind == "batch":
+            from videocaptioner.core.postprocess.diagnostics import drop_waiting_role
+
+            _waiting_fields = drop_waiting_role(_waiting_fields, "main")
         elif kind == "terminal" and event.get("status") == "report_only":
             progress.update(0, str(event.get("message") or ""))
 

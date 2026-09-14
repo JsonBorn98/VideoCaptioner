@@ -270,18 +270,37 @@ widget._on_progress_event(diagnostics.round_event(
 widget._on_progress_event(diagnostics.waiting_event(
     round_index=1, wait_elapsed_ms=2400, inflight=2, queued=1,
     window=2, request_window_s=128.0, role="main"))
-widget._on_progress_event(diagnostics.batch_event(
-    round_index=1, batch_index=0, accepted_in_batch=2, accepted_total=2, subjects=2))
+# 并发等待分槽（票 08 点验修复）：校对等待与主修复等待并列，
+# 不互相覆盖；主修复的最新刷新保留校对槽。
+widget._on_progress_event(diagnostics.waiting_event(
+    round_index=1, wait_elapsed_ms=900, inflight=3, queued=0,
+    window=3, request_window_s=64.0, role="review"))
+widget._on_progress_event(diagnostics.waiting_event(
+    round_index=1, wait_elapsed_ms=2500, inflight=1, queued=0,
+    window=1, request_window_s=128.0, role="main"))
 # 未展开：不渲染但保留最新字段。
 assert widget.detail_text.isHidden()
 widget._toggle_detail()
 assert not widget.detail_text.isHidden()
 text = widget.detail_text.text()
-assert "在途 2" in text and "排队 1" in text, text
-assert "2.4s" in text, text
-assert "128" in text, text  # 等待期限
+# 并发等待并列：主修复（已等待 2.5s / 在途 1）与校对（0.9s / 在途 3）
+# 同屏，单槽口径的互相覆盖闪烁消除。
+assert "主修复" in text and "高级校对" in text, text
+assert "已等待 2.5s" in text, text  # 主修复最新（非 2.4s 旧值）
+assert "已等待 0.9s" in text, text  # 校对未被主修复覆盖
+assert "在途 1" in text and "在途 3" in text, text
+assert "128" in text and "64" in text, text  # 两角色等待期限
+widget._toggle_detail()
+# batch 事件：一批归并验收完成 → 主修复请求已返回，槽清理
+# （陈旧主修复等待不再挂着）；校对窗口等待保留。
+widget._on_progress_event(diagnostics.batch_event(
+    round_index=1, batch_index=0, accepted_in_batch=2, accepted_total=2, subjects=2))
+widget._toggle_detail()
+text = widget.detail_text.text()
 assert "已通过 2" in text, text
 assert "未解决 12" in text, text
+assert "主修复等待中" not in text, text  # 主修复槽已清理
+assert "高级校对等待中" in text, text  # 校对槽保留
 widget._toggle_detail()
 assert widget.detail_text.isHidden()
 print(json.dumps({"detail": text}))

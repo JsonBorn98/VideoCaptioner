@@ -109,17 +109,60 @@ gating 七项全过）——**无清理失败**。
 | 原翻译方式保持 | `test_ordinary_llm_flow_never_issues_review_requests`（普通 LLM 不自动加校对）+ `test_standalone_report_only_and_analyze_do_not_call_gateway`（仅报告/分析不发请求）+ `test_monolingual_bilingual_independent_modes_and_one_to_many`（布局/模式矩阵） | 提速不改翻译方式，非 LLM/仅报告不静默发请求 |
 | GUI/CLI 呈现一致 | `test_progress_frontends.py::test_gui_page_summary_and_expandable_detail_render` + `test_progress_frontends.py::test_cli_modes_render_from_the_same_event_facts` | 同一事件事实渲染，摘要/详情、安静/普通/详细同源 |
 
-审计未发现需修复的集成缺陷；本票不新增代码，回归即 12 个 commit 累计的现有测试集。
+自动化审计未发现需修复的集成缺陷；**实机人工点验发现 1 个呈现层集成缺陷**
+（下节），当场修复并补回归。
+
+## 人工点验发现：并发等待呈现闪烁（已修复）
+
+实机点验观测到详情页消息交替闪烁：
+
+```
+正在等待高级校对模型返回：已等待 12.0s（在途 3 / 排队 0）
+正在等待主修复模型返回：已等待 230.3s（在途 1 / 排队 0）
+（两条消息来回覆盖刷新）
+```
+
+**机制**：票 04/05 落地后并发成为常态——每个在途请求各起一个 `WaitRefresher`
+（主修复 1 + 校对窗口 3，每 0.2s 各自发射 `waiting_event`）。GUI `_latest_event_fields`
+是单槽「最新一条」平铺 dict：主修复消息（已等 230.3s）与校对消息（12.0s）
+以 ~10 次/秒交替**整体覆盖**。这违反 spec「展开详情展示主修复**与**高级校对」
+——两类等待应并列，不是互斥竞争同一显示位。CLI 普通模式同样覆盖（单行进度）。
+
+**修复**（消费端，事件流本身不动——生产者按请求粒度发射是正确的观测口径）：
+`diagnostics.merge_waiting_event` / `drop_waiting_role` 按角色分槽
+（`waiting_slots[role]`），`render_detail` 先主修复后校对并列渲染；
+GUI `postprocess_interface`、CLI 普通模式接分槽口径。槽清理时机：
+`round` 事件清全部槽（新一轮 = 上一轮等待全结束）、`batch` 事件清主修复槽
+（该批主修复请求已返回）；校对槽由角色自身等待刷新维持。
+
+回归测试（TDD 先红后绿）：
+`test_progress_diagnostics.py::test_concurrent_waiting_events_render_both_roles_side_by_side`
+（并发双角色同屏，主修复刷新不覆盖校对槽）、
+`::test_waiting_slot_clears_when_role_goes_silent`（角色返回后槽清理）；
+`test_progress_frontends.py::test_gui_page_summary_and_expandable_detail_render`
+更新为并发断言（两角色并列 + batch 后主修复槽清理、校对保留）。
+CLI 单行渲染：`主修复等待中：已等待 230.5s（在途 1 / 排队 0）；…；高级校对等待中：已等待 12.0s（在途 3 / 排队 0）`。
+
+**既有 flake 披露（非本修复引入）**：`test_progress_frontends.py::test_runner_owns_single_cancelled_terminal_event`
+子进程用 `processEvents` 轮询 10s/15s 预算等信号，机器负载高时偶发超时
+（干净 HEAD 复现 2/6 次；`AssertionError: []` 为等待循环超时，非产品取消路径
+失败——取消传输级失败被正确处理）。stash 验证与本修复无关；修复方向
+（事件驱动等待循环）已记 shoals，本票不冒称修复。
 
 ## 全量回归与 lint/类型检查
 
 - `QT_QPA_PLATFORM=offscreen uv run --no-sync pytest -m 'not integration and not llm' -q`：
-  **1538 passed、5 skipped、61 deselected、17 warnings**，195.74s。01 时 1472 →
-  02–07 各票新增 66 个测试，无删除、无跳过增加（5 skipped 与 61 deselected 与
-  01 完全同口径）。
+  **1540 passed、5 skipped、61 deselected、17 warnings**（218.00s）。
+  01 时 1472 → 02–07 各票新增 66 + 本票并发分槽修复新增 2；无删除、无跳过增加
+  （5 skipped 与 61 deselected 与 01 完全同口径）。
+  首跑出现 2 个失败，复跑全套 1540 全绿，两个均为已记录的既有 flake
+  （单跑均过、stash 验证与本修复无关）：
+  `test_runner_owns_single_cancelled_terminal_event`（等待循环预算超时，
+  干净 HEAD 2/6 复现，已记 shoal）、`test_ffmpeg_source_toggle_rebuilds_encoder_menu`
+  （Qt offscreen 偶发，票 07 交付已记录同型）。
 - `ruff check .`：全过。`pyright`：**0 errors / 20 warnings**（与 01 基线完全一致，
   无新增告警）。
-- 后处理专项：`tests/test_postprocess` 249 passed；UI `test_postprocess_interface`
+- 后处理专项：`tests/test_postprocess` 249 + 2 = 251 passed；UI `test_postprocess_interface`
   16 passed；CLI postprocess/process gating 38 passed（含 2 skipped 既有口径）。
 
 ## 人工点验清单（供 09 复核；本次未执行 GUI 实机点验）

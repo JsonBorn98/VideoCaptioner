@@ -479,3 +479,64 @@ def test_event_rendering_supports_summary_and_detail_consumers():
     assert "未解决" in detail
     assert "3.2" in detail  # 等待时长秒
     assert "128" in detail  # 单次尝试窗口（等待期限）
+
+
+# ---- 验收 6：并发等待分槽呈现 —— 主修复与高级校对并列，不互相覆盖 ----
+
+
+def test_concurrent_waiting_events_render_both_roles_side_by_side():
+    """并发双角色等待：主修复与高级校对并列显示，不互相覆盖（票 08 点验修复）。
+
+    票 04/05 落地后并发成为常态：主修复请求与校对窗口请求各有
+    ``WaitRefresher``（0.2s 各自发射）。单槽「最新一条」存储让两类
+    消息以 ~10 次/秒交替覆盖（实机闪烁）：主修复已等 230.3s 被
+    校对 12.0s 覆盖、又被主修复覆盖……分槽按 role 存储/渲染
+    （spec「展开详情展示主修复与高级校对」），detail 同时呈现两行。
+    """
+    fields: dict = {}
+    # 主修复等待与校对等待交替到达（并发真实顺序）。
+    for event in (
+        diagnostics.waiting_event(
+            round_index=1, wait_elapsed_ms=230_300, inflight=1, queued=0,
+            window=1, request_window_s=300.0, role="main",
+        ),
+        diagnostics.waiting_event(
+            round_index=1, wait_elapsed_ms=12_000, inflight=3, queued=0,
+            window=3, request_window_s=128.0, role="review",
+        ),
+        # 主修复的下一次刷新：只更新 main 槽，review 槽保留。
+        diagnostics.waiting_event(
+            round_index=1, wait_elapsed_ms=230_500, inflight=1, queued=0,
+            window=1, request_window_s=300.0, role="main",
+        ),
+    ):
+        fields = diagnostics.merge_waiting_event(fields, event)
+    detail = diagnostics.render_detail(fields)
+    # 两角色并列（不闪烁）：主修复等待时长与校对等待时长同屏。
+    assert "主修复" in detail and "高级校对" in detail, detail
+    assert "230.3" in detail or "230.5" in detail, detail  # 主修复最新等待
+    assert "12.0" in detail, detail  # 校对等待未被主修复覆盖
+    # 各角色独立口径：主修复在途 1 / 校对在途 3 同屏。
+    assert "在途 1" in detail and "在途 3" in detail, detail
+
+
+def test_waiting_slot_clears_when_role_goes_silent():
+    """角色请求返回后：该槽不再显示，另一角色照常（无陈旧闪烁）。"""
+    fields: dict = {}
+    for event in (
+        diagnostics.waiting_event(
+            round_index=1, wait_elapsed_ms=1_000, inflight=1, queued=0,
+            window=1, request_window_s=300.0, role="main",
+        ),
+        diagnostics.waiting_event(
+            round_index=1, wait_elapsed_ms=500, inflight=2, queued=0,
+            window=2, request_window_s=128.0, role="review",
+        ),
+    ):
+        fields = diagnostics.merge_waiting_event(fields, event)
+    # 主修复请求返回（无新 main waiting）：仅校对在途等待。
+    fields = diagnostics.drop_waiting_role(fields, "main")
+    detail = diagnostics.render_detail(fields)
+    assert "主修复" not in detail, detail
+    assert "高级校对" in detail, detail
+    assert "0.5" in detail, detail
