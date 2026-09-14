@@ -31,8 +31,9 @@ httpx 0.28.1 / diskcache 5.6.3 / PyQt5 5.15.11 / pytest 9.0.2）。
 | independent / warm | 0.295649（0.282444–0.298691） | — | 记录（暖缓存分层，不混算） |
 
 重叠证据（同批 5 次一致）：slow-main 四个主修复批 **peak overlap = 4**，全部主请求
-在 0.42–0.58s 窗口内同时在途；主请求区间并集 0.436s vs 串行和 1.69s——**请求确有
-重叠**。01 基线同场景串行 median 2.401658s → 0.926296s。
+在 0.42–0.58s 窗口内同时在途；主请求区间并集 0.436s vs 主修复请求 duration 串行和
+1.640–1.673s（五次逐次 1.640/1.665/1.664/1.645/1.673s）——**请求确有重叠**。
+01 基线同场景串行 median 2.401658s → 0.926296s。
 
 噪声说明：slow-main 五次跨度 16.19%（> median 的 15%），但 01 的 15% 规则只约束
 local-long 组有效性；local-long 本次跨度 5.3% 组有效。slow-main 最慢样本
@@ -63,7 +64,7 @@ local-long 组有效性；local-long 本次跨度 5.3% 组有效。slow-main 最
 | queue（gate=2：2 排队未发 + 2 真实在途） | 0.0621（0.0745） | ≤ 0.30 每请求 | **通过** | 全部先于受控释放完成（completed_without_release）；迟到结果无交付（before/after_cancel 均空） |
 | network（SDK 重试） | 0.0607（0.0715） | ≤ 0.30 且无新 HTTP | **通过** | adapter=HTTP=1（SDK max_retries=0，无隐式重试乘积） |
 | backoff（gateway 1.2s 退避中取消） | 0.0132（0.0227） | ≤ 0.30 | **通过** | 取消唤醒退避等待，不忽略 Retry-After 提前重发 |
-| ui（完整任务在途停止） | 0.0122–0.0131 | ≤ 0.30 | **通过** | 见下 |
+| ui（完整任务在途停止） | 0.0121–0.0131 | ≤ 0.30 | **通过** | 见下 |
 
 01 基线现状 median 分别为 queue 1.36s / network 5.09s / backoff 0.90s / ui 1.20s
 ——**四项全部从「不满足」翻转为满足**，无一项靠缩短受控延迟达标（服务计划释放
@@ -80,8 +81,8 @@ hard cap 未超。等待刷新窗口（barrier→stop 毫秒级）未开即关�
 
 ### 状态刷新与观测开销
 
-- Qt 信号送达 max 0.048–0.617ms（门槛 ≤100ms）；事件循环心跳 max 27.8–41.7ms
-  （门槛 ≤600ms 硬断言 / 01 口径 ≤100ms 同量级）。
+- Qt 信号送达 max 0.048–0.617ms（01 冻结门槛 ≤100ms）；事件循环心跳 max 27.8–41.7ms
+  （01 冻结门槛 ≤100ms 同量级满足；回归测试硬断言为 ≤600ms，`test_ui_baseline.py`）。
 - `progress_max_gap_s` 0.361–0.376s：为「最后进度→终态」口径（含尾部静默），
   非 01 遗漏尾部静默的旧口径；等待期间刷新由 waiting 事件保证（07）。
 
@@ -90,8 +91,9 @@ hard cap 未超。等待刷新窗口（barrier→stop 毫秒级）未开即关�
 全部场景、全部采样：原文非空白字符顺序不变；初版文件字节不变；QA 报告与过程
 状态交付且状态一致；`local-long` 零模型调用；必要校对覆盖不减少（上述主体/片段
 数）；partial-failure 局部回退、失败区域不记通过；取消/模块失败阻断下游且不交付。
-所有探针 `ok=true`，server 线程退出、handler 作答排空、worker 全部 join——
-**无清理失败**。
+三个传输探针（queue/network/backoff）`ok=true`，server 线程退出、handler 作答
+排空、worker 全部 join；ui 探针以 outcome/gating 字段验收（hard cap 未超、
+gating 七项全过）——**无清理失败**。
 
 ## 本票补做的集成审计（不汇总各票测试，专查跨票交叉）
 
@@ -99,15 +101,17 @@ hard cap 未超。等待刷新窗口（barrier→stop 毫秒级）未开即关�
 | --- | --- | --- |
 | 乱序完成 × 校对批量化 | `test_review_groups_follow_fixed_batch_order_not_completion_order`（乱序证据 + 相同分组/字幕/计数）+ `test_completion_order_does_not_change_results_under_concurrency` | 相同响应集合乱序完成产生相同字幕与报告 |
 | 并发重叠 × 保护上限 | `test_profile_clamp_lowers_window`（闸 2 生效）+ slow-main 峰值 4 = 额度 | 实际在途不超配置/保护上限 |
-| 校对绑定主候选版本 × 并发 | `_review_subject_entry` 捕获对象引用 + `test_round_snapshot_merge` 邻批不读归并 | 校对视图以轮次快照为底 |
+| 校对绑定主候选版本 × 并发 | `repair.py` `_review_subject_entry` 捕获对象引用 + `test_round_snapshot_merge.py::test_review_reads_round_base_not_neighbor_merge` 邻批不读归并 | 校对视图以轮次快照为底 |
 | 停止 × 归并/交付竞态 | `test_stop_accepted_means_no_new_requests_or_late_writeback` + `test_delivery_race_stop_before_commit_blocks_and_after_commit_completes` | 迟到结果无写回、终态竞争规则明确 |
 | 入口一致性 | GUI `task_factory` 550 / CLI `_resolve_thread_num` / 编排 `process.py` 共享 owned gateway——三入口同一 `subtitle.thread_num` 旋钮 | 无入口静默回退网关默认 |
 | 共享连接取消隔离 | `test_shared_gateway_cancellation_is_isolated_per_task` | 取消不关其他任务连接 |
 | 重复启停泄漏 | `test_repeated_start_stop_leaks_no_threads_or_slots` | 无持续泄漏 |
+| 原翻译方式保持 | `test_ordinary_llm_flow_never_issues_review_requests`（普通 LLM 不自动加校对）+ `test_standalone_report_only_and_analyze_do_not_call_gateway`（仅报告/分析不发请求）+ `test_monolingual_bilingual_independent_modes_and_one_to_many`（布局/模式矩阵） | 提速不改翻译方式，非 LLM/仅报告不静默发请求 |
+| GUI/CLI 呈现一致 | `test_progress_frontends.py::test_gui_page_summary_and_expandable_detail_render` + `test_progress_frontends.py::test_cli_modes_render_from_the_same_event_facts` | 同一事件事实渲染，摘要/详情、安静/普通/详细同源 |
 
 审计未发现需修复的集成缺陷；本票不新增代码，回归即 12 个 commit 累计的现有测试集。
 
-## 全量回归与三连
+## 全量回归与 lint/类型检查
 
 - `QT_QPA_PLATFORM=offscreen uv run --no-sync pytest -m 'not integration and not llm' -q`：
   **1538 passed、5 skipped、61 deselected、17 warnings**，195.74s。01 时 1472 →
