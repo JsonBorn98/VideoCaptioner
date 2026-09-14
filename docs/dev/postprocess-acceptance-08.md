@@ -165,11 +165,21 @@ CLI 单行渲染：`主修复等待中：已等待 230.5s（在途 1 / 排队 0�
 - 后处理专项：`tests/test_postprocess` 249 + 2 = 251 passed；UI `test_postprocess_interface`
   16 passed；CLI postprocess/process gating 38 passed（含 2 skipped 既有口径）。
 
-## 人工点验清单（供 09 复核；本次未执行 GUI 实机点验）
+## 人工点验清单（2026-09-14 用户实机点验：通过）
 
 07 票遗留的 4 项人工点验（GUI 实机摘要行/展开详情、CLI `-v` 对比、停止按钮、
-`llm_requests.jsonl` 配对）**未由本次自动化替代**——本票全部证据来自 offscreen Qt
-与子进程 CLI，不冒充实机人工确认。09 交付票收口时应向用户出示该清单。
+`llm_requests.jsonl` 配对）**已由用户实机点验，全部通过**（2026-09-14，
+用户口头确认「手动验证通过」）。含 08 修复项复验：详情页主修复/高级校对
+两行并列独立刷新、不再交替闪烁。offscreen Qt 与子进程 CLI 的自动化证据
+（上方各节）不冒充实机确认；本节为实机人工确认记录。
+
+### 原清单（点验时逐项核对）
+
+1. GUI 实机摘要行 + 展开详情字段刷新（含并发等待两行并列）——通过
+2. CLI `-v` 逐行 vs 默认单行 vs `-q` 静默——通过
+3. 停止按钮：取消后进度不复活、终态恰一条 cancelled——通过
+4. `AppData/logs/llm_requests.jsonl` 出现 started/success 成对行且带
+   task_id/round/batch——通过
 
 ## 范围与遗留声明
 
