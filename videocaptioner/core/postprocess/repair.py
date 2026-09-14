@@ -634,7 +634,6 @@ class _ReviewSubjectEntry:
 
 
 def _review_subject_entry(
-    round_snapshot: ASRData,
     *,
     region_start: int,
     accepted_entries: Dict[int, List[Dict[str, Any]]],
@@ -745,7 +744,7 @@ def _apply_review_corrections(
     layout: "SubtitleLayoutEnum",
     entries: Sequence["_ReviewSubjectEntry"],
     corrections: Dict[Tuple[str, int], str],
-) -> Tuple[int, List[str]]:
+) -> Tuple[int, int, List[str]]:
     """把一批复校校订按显式绑定应用到拼接后字幕（票 05 应用段）。
 
     逐项验收：非空性守恒 / 单行换行 / 有效绝对上限与主翻译验收同一
@@ -756,10 +755,15 @@ def _apply_review_corrections(
     active_sides = _active_single_line_sides(cfg, layout)
     warnings: List[str] = []
     corrections_applied = 0
+    missing = 0
     for entry in entries:
         for key, proposal in entry.bindings.items():
             translated = corrections.get(key)
             if translated is None:
+                # 缺项可观察（票 05 验收 5）：响应遗漏的提案逐项计数并
+                # 告警——不静默跳过（截断 / 部分恢复同样落到这条路径，
+                # 该主体提案保留主翻译候选）。
+                missing += 1
                 continue
             position = entry.region_start + proposal["region_position"]
             if entry.state_refs:
@@ -793,7 +797,11 @@ def _apply_review_corrections(
             if translated.strip() and translated != ref.translated_text:
                 ref.translated_text = translated
                 corrections_applied += 1
-    return corrections_applied, warnings
+    if missing:
+        warnings.append(
+            f"高级校对复校响应缺少 {missing} 个提案的校订（保留主翻译候选）"
+        )
+    return corrections_applied, missing, warnings
 
 
 # 复校输出比例（票 05）：复校只改译文侧，输出 ≈ 校订后的 reviews
@@ -835,12 +843,10 @@ def _review_group_output_reserve(
     比例式预留（ADR-0019）：主体输入载荷 × 输出比 + 协议开销，
     受工作上下文与用户请求输出上限钳制（不自动抬升用户配置）。
     """
-    import json as _json
-
     from ..translate.enhanced.token_planner import estimate_tokens
 
     subject_input = estimate_tokens(
-        _json.dumps(
+        json.dumps(
             [{"segments": entry.segments} for entry in entries], ensure_ascii=False
         )
     )
@@ -1404,6 +1410,9 @@ def execute_viewing_repair(
                 if flow.mode == "main_review" and flow.review_profile is not None
                 else None
             )
+            # 复校观测锁（票 05，对齐票 04 inflight_lock 先例）：review
+            # 窗口多线程并发自增计数必须加锁——``+=`` 非原子可丢计数。
+            review_lock = threading.Lock()
             review_futures: "List[Future[Tuple[int, List[str]]]]" = []
             # 修复轮次快照（ADR-0021）：本轮全部请求的主体与边界上下文
             # 共享 ``round_snapshot``（轮初 state 的冻结副本）；同轮邻批
@@ -1584,7 +1593,6 @@ def execute_viewing_repair(
                             subject.start_index : subject.start_index + spliced
                         ]
                         entry = _review_subject_entry(
-                            round_snapshot,
                             region_start=subject.start_index,
                             accepted_entries=accepted_entries,
                             replacements=replacements,
@@ -1664,8 +1672,10 @@ def execute_viewing_repair(
                         ) -> Tuple[int, List[str]]:
                             _raise_if_cancelled()
                             # 发出层计数（票 05）：进入网关调用前计数——传输
-                            # 失败的请求已发生，照常计入（缓存命中不减）。
-                            summary.review_requests += 1
+                            # 失败的请求已发生，照常计入（缓存命中不减）；
+                            # review 窗口多线程并发，加锁（票 04 同型先例）。
+                            with review_lock:
+                                summary.review_requests += 1
                             payload = _build_review_payload(
                                 round_snapshot, cfg, group.subjects, group.radius
                             )
@@ -1706,7 +1716,10 @@ def execute_viewing_repair(
                                 return 0, [
                                     f"高级校对复校响应被拒（保留主翻译候选）: {fatal}"
                                 ]
-                            applied, warnings = _apply_review_corrections(
+                            # 应用前重确认取消（spec「停止全路径」：请求返回后、
+                            # 校对应用前重新确认——取消竞态下迟到校订不得写回）。
+                            _raise_if_cancelled()
+                            applied, _missing, warnings = _apply_review_corrections(
                                 state, cfg, layout, group.subjects, corrections
                             )
                             return applied, warnings

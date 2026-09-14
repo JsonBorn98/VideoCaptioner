@@ -525,6 +525,53 @@ def test_review_single_item_violations_are_rejected_per_item():
     assert not report.unresolved_viewing_problems()
 
 
+def test_review_missing_proposals_are_observable_not_silent():
+    """响应遗漏部分提案：逐项计数 + 告警，缺项保留主翻译候选（验收 5）。
+
+    截断 / json_repair 部分恢复的响应只覆盖部分提案：缺失项不静默
+    跳过——告警进入 summary.warnings，缺项提案保留主修复译文；
+    已覆盖提案照常应用（缺项不误伤合法项）。
+    """
+    pairs = _problem_pairs(6)
+    data = _data(*pairs)
+    gateway = _RecordingGateway()
+
+    def _partial(payload: dict) -> str:
+        # 只返回每个主体第一个提案（其余缺项）。
+        reviews: list[dict] = []
+        for subject in payload["review_subjects"]:
+            for segment in subject["segments"]:
+                for proposal in segment["proposals"][:1]:
+                    reviews.append(
+                        {
+                            "problem_id": segment["problem_ids"][0],
+                            "output_index": proposal["output_index"],
+                            "translated": "校后",
+                        }
+                    )
+        return json.dumps({"reviews": reviews}, ensure_ascii=False)
+
+    gateway._review_text = lambda payload: _partial(payload)  # type: ignore[method-assign]
+    repaired, report = execute_viewing_repair(
+        data,
+        _config(),
+        QualityReport(),
+        SubtitleLayoutEnum.ORIGINAL_ON_TOP,
+        gateway=gateway,
+        snapshot=_enhanced_snapshot(),
+        thread_num=4,
+    )
+    summary = report.viewing_repair
+    assert summary is not None
+    # 缺项告警可观察（6 主体 × 3 提案 → 缺 12 项）。
+    assert any("缺少 12 个提案的校订" in w for w in summary.warnings)
+    # 已覆盖提案应用（每主体 1 处「校后」），缺项保留主修复「改后」。
+    translated = [s.translated_text for s in repaired.segments if "超长" in s.text]
+    assert translated.count("校后") == 6
+    assert translated.count("改后") == 12
+    assert not report.unresolved_viewing_problems()
+
+
 # ---- 验收 4：普通 LLM / 非 LLM 不被静默增加校对角色 ----
 
 
