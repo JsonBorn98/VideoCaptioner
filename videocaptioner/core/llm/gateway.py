@@ -79,6 +79,21 @@ def _deadline_exceeded(profile: LLMModelProfile, attempt: int, budget: float) ->
     )
 
 
+def request_deadline_hint(request: "LLMRequest") -> float:
+    """One attempt's network window (output-scaled; gateway + callers share).
+
+    公开给调用方复用同一缩放口径（票 07 审查修复）：修复层等待事件的
+    「等待期限」展示与网关钳制窗口不再各自硬编码 baseline，协议变化
+    不会静默漂移。
+    """
+    from .adapters import request_timeout_seconds
+
+    return request_timeout_seconds(
+        request.max_output_tokens,
+        baseline=request.timeout if request.timeout is not None else 120.0,
+    )
+
+
 class _CancellableAcquire:
     """可取消的信号量获取（票 06：排队等待不挂在 ``BoundedSemaphore`` 上）。
 
@@ -268,8 +283,14 @@ class LLMGateway:
                         request = replace(request, timeout=attempt_window)
                     # started line lands on disk first (ticket 07): an abrupt exit
                     # leaves identifiable open requests, never faked successes.
+                    # Scope (ticket 07 review fix): only postprocess requests
+                    # (carrying the task_id correlation field) write the extra
+                    # started row; other callers keep one row per attempt.
                     log_handle = begin_gateway_request(
-                        profile, request, attempt=attempt, emit_started=True
+                        profile,
+                        request,
+                        attempt=attempt,
+                        emit_started=bool(request.metadata.get("task_id")),
                     )
                     try:
                         if cancelled is None:
@@ -333,12 +354,7 @@ class LLMGateway:
     @staticmethod
     def _request_deadline_hint(request: LLMRequest) -> float:
         """One attempt's network window for this request (output-scaled)."""
-        from .adapters import request_timeout_seconds
-
-        return request_timeout_seconds(
-            request.max_output_tokens,
-            baseline=request.timeout if request.timeout is not None else 120.0,
-        )
+        return request_deadline_hint(request)
 
     def _cancellable_sleep(
         self,
@@ -370,4 +386,4 @@ class LLMGateway:
                 raise InterruptedError("LLM request cancelled")
 
 
-__all__ = ["LLMGateway"]
+__all__ = ["LLMGateway", "request_deadline_hint"]

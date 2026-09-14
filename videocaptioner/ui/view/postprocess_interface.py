@@ -687,7 +687,7 @@ class PostprocessInterface(QWidget):
                 self.status_label.setText(self.tr("处理失败"))
             elif status == "report_only":
                 self.status_label.setText(self.tr("仅报告：未发起模型请求"))
-        if self._cancelling and kind in ("waiting", "round", "batch"):
+        if self._cancelling and kind in ("waiting", "round", "batch", "retry"):
             return  # 停止请求后的迟到事件不再推进进度文案
         fields = dict(self._latest_event_fields)
         counts = event.get("counts") or {}

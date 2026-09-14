@@ -183,6 +183,67 @@ print(json.dumps({"kinds": kinds, "waiting": len(waiting)}))
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_runner_owns_single_cancelled_terminal_event(tmp_path):
+    """完整任务入口：取消终态恰发一次（runner 持有，修复层不重复）。"""
+    code = (
+        _task_code(tmp_path)
+        + """
+import json, time
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.ui.thread.postprocess_thread import PostprocessThread
+
+app = QApplication.instance() or QApplication([])
+task = make_task()
+gateway = ControlledGateway()
+# 首个主修复请求挂起等待停止：barrier 用网关首次调用时刻起 0.05s 置停止。
+_stop = {"armed": False}
+_real_complete = gateway.complete
+def hanging_complete(profile, request, **kwargs):
+    user = request.messages[-1].content
+    payload = json.loads(user.split("<input>", 1)[1].split("</input>", 1)[0])
+    is_main = "review_subjects" not in payload
+    if is_main and not _stop["armed"]:
+        _stop["armed"] = True
+        deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < deadline:
+            if kwargs.get("cancelled") is not None and kwargs["cancelled"]():
+                raise RuntimeError("hanging request cancelled in flight")
+            time.sleep(0.01)
+    return _real_complete(profile, request, **kwargs)
+gateway.complete = hanging_complete
+
+thread = PostprocessThread(task, gateway=gateway)
+events = []
+thread.progress_event.connect(lambda payload: events.append(json.loads(payload)))
+terminal = []
+thread.cancelled.connect(
+    lambda: terminal.append(True),
+    __import__("PyQt5.QtCore", fromlist=["Qt"]).Qt.DirectConnection,
+)
+thread.start()
+# 等首个 waiting 事件（刷新已可见）再请求停止。
+deadline = time.perf_counter() + 10
+while time.perf_counter() < deadline and not any(
+    event.get("kind") == "waiting" for event in events
+):
+    app.processEvents()
+thread.stop()
+deadline = time.perf_counter() + 15
+while time.perf_counter() < deadline and not terminal:
+    app.processEvents()
+assert terminal, "thread did not reach cancelled: " + repr([
+    event.get("kind") for event in events[-8:]])
+cancelled_events = [event for event in events
+                    if event.get("kind") == "terminal" and event.get("status") == "cancelled"]
+assert len(cancelled_events) == 1, cancelled_events  # 恰发一次（无重复完成）
+assert cancelled_events[0]["counts"]["requests"] >= 1
+print(json.dumps({"cancelled_terminal": 1}))
+"""
+    )
+    completed = _run_python(code, tmp_path)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_gui_page_summary_and_expandable_detail_render(tmp_path):
     """GUI 页面：摘要行 + 展开/收起详情渲染最新事件字段。"""
     code = (

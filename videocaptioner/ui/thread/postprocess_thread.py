@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -76,6 +77,14 @@ class PostprocessThread(QThread):
         self.result = None
         self._injected_gateway = gateway
 
+    def _emit_progress_event(self, event: dict) -> None:
+        """worker 侧事件 → JSON 字符串信号（queued 送达 GUI 线程，票 07）。
+
+        ``pyqtSignal(dict)`` 不支持 dict 载荷；这里只做序列化转发，
+        不触碰任何控件（ADR-0009：GUI worker 不直接操作控件）。
+        """
+        self.progress_event.emit(json.dumps(event, ensure_ascii=False, default=str))
+
     def stop(self) -> None:
         """Request cooperative cancellation at the next safe stage boundary."""
 
@@ -112,9 +121,7 @@ class PostprocessThread(QThread):
                     if self.isInterruptionRequested()
                     else self.progress.emit(value, self.tr(message))
                 ),
-                on_event=lambda event: self.progress_event.emit(
-                    __import__("json").dumps(event, ensure_ascii=False, default=str)
-                ),
+                on_event=self._emit_progress_event,
             )
             if self._finish_if_cancelled():
                 return

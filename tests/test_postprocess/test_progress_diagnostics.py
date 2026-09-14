@@ -316,9 +316,10 @@ def test_cancel_stops_event_stream_and_terminal_is_cancelled():
         )
     # 取消后不再发新事件（进度不复活）：无归并验收事件。
     assert collector.by_kind("batch") == []
-    terminal = collector.by_kind("terminal")
-    assert len(terminal) == 1
-    assert terminal[0]["status"] == "cancelled"
+    # 取消终态由调用方（runner）统一发射（票 07 审查修复：修复层与
+    # 任务层各发一次会重复「修复已停止」终态）；修复层只上抛。完整
+    # 任务入口的取消终态由 runner 测试口径覆盖（无重复完成）。
+    assert collector.by_kind("terminal") == []
 
 
 # ---- 验收 4：关联字段 —— 事件 / metadata / 请求日志 ----

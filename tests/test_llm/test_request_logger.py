@@ -90,12 +90,11 @@ def test_gateway_logs_concurrent_attempts_without_cross_pairing(tmp_path, monkey
     entries = _terminal_lines(log_path)
     assert len(entries) == 2
     assert len({entry["request_id"] for entry in entries}) == 2
-    # Ticket 07：每次尝试 started 行先落盘，request_id 与终态行一一配对。
+    # Ticket 07（审查修复后口径）：started 行只对携带 task_id 关联字段的
+    # 后处理请求多落（日志量不因本票翻倍）；这里无 task_id → 一次尝试
+    # 恰一行。带 task_id 的 started/终态配对由 progress_diagnostics 覆盖。
     started = [entry for entry in _log_lines(log_path) if entry.get("status") == "started"]
-    assert len(started) == 2
-    assert {entry["request_id"] for entry in started} == {
-        entry["request_id"] for entry in entries
-    }
+    assert started == []
     by_stage = {entry["stage"]: entry for entry in entries}
     for value in ("slow", "fast"):
         entry = by_stage[f"stage-{value}"]
@@ -130,7 +129,7 @@ def test_env_api_key_override_marks_entries_with_key_source(tmp_path, monkeypatc
         request_logger.set_env_api_key_override(False)
 
     entries = _log_lines(log_path)
-    assert [entry["status"] for entry in entries] == ["started", "success"]
+    assert [entry["status"] for entry in entries] == ["success"]
     assert all(entry["key_source"] == "env_override" for entry in entries)
 
 
@@ -149,7 +148,7 @@ def test_entries_without_the_env_override_marker_keep_their_shape(tmp_path, monk
     )
 
     entries = _log_lines(log_path)
-    assert [entry["status"] for entry in entries] == ["started", "success"]
+    assert [entry["status"] for entry in entries] == ["success"]
     assert all("key_source" not in entry for entry in entries)
 
 
@@ -172,7 +171,7 @@ def test_request_metadata_key_source_wins_over_the_process_marker(tmp_path, monk
         request_logger.set_env_api_key_override(False)
 
     entries = _log_lines(log_path)
-    assert [entry["status"] for entry in entries] == ["started", "success"]
+    assert [entry["status"] for entry in entries] == ["success"]
     assert all(entry["key_source"] == "store" for entry in entries)
 
 
@@ -316,8 +315,8 @@ def test_content_logging_only_adds_prompts_and_normalized_final_text(
 
     assert result.text == "subtitle"
     entries = _log_lines(log_path)
-    assert [entry["status"] for entry in entries] == ["started", "success"]
-    entry = entries[1]
+    assert [entry["status"] for entry in entries] == ["success"]
+    entry = entries[0]
     assert entry["request"] == {
         "messages": [
             {"role": "system", "content": "rules"},

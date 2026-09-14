@@ -55,6 +55,7 @@ import json_repair
 
 from ..asr.asr_data import ASRData, ASRDataSeg
 from ..llm import LLMGateway, LLMMessage, LLMRequest
+from ..llm.gateway import request_deadline_hint
 from ..llm.utility import borrow_utility_gateway
 from ..prompts import get_prompt
 from ..subtitle.io import clone_subtitle_data
@@ -122,16 +123,42 @@ CONCURRENT_CANCEL_POLL_SECONDS = 0.05
 def _request_window_seconds(profile: "LLMModelProfile") -> float:
     """本次修复请求的单次尝试网络窗口（等待期限展示口径，票 07）。
 
-    与网关 ``LLMGateway._request_deadline_hint`` 同一缩放口径
-    （``request_timeout_seconds``：baseline + 输出 token 缩放），
-    供等待事件展示「等待期限」；这是展示估计值，不是承诺的完成时限。
+    复用网关 ``request_deadline_hint`` 的同一缩放口径（票 07 审查
+    修复：不再各自硬编码 baseline，协议变化不静默漂移）；这是展示
+    估计值，不是承诺的完成时限。
     """
-    from ..llm.adapters import request_timeout_seconds
+    from ..llm.models import LLMRequest
 
-    return request_timeout_seconds(
-        profile.max_output_tokens,
-        baseline=120.0,
+    return request_deadline_hint(
+        LLMRequest(messages=(), max_output_tokens=profile.max_output_tokens)
     )
+
+
+def _start_refresher(
+    emit: Callable[[Dict[str, Any]], None],
+    on_event: Optional[Callable[[Dict[str, Any]], None]],
+    snapshot: Callable[[], Dict[str, int]],
+    *,
+    round_index: Callable[[], int],
+    role: str,
+    request_window_s: float,
+) -> Optional[WaitRefresher]:
+    """启动一次在途请求的等待刷新器（票 07 审查修复：两处同型收编）。
+
+    ``on_event`` 缺省时返回 None（不启动刷新器、零观测开销）；
+    ``round_index`` / percent 由闭包按发射时点取值（轮次推进后
+    仍读最新值，等待事件不携带过期轮次口径）。
+    """
+    if on_event is None:
+        return None
+    return WaitRefresher(
+        emit,
+        snapshot,
+        round_index=round_index(),
+        role=role,
+        request_window_s=request_window_s,
+        percent_provider=lambda: min(90, 55 + round_index() * 4),
+    ).start()
 
 
 def select_repair_flow(
@@ -1483,22 +1510,17 @@ def execute_viewing_repair(
                     # 等待刷新（票 07）：请求在途期间以节流间隔持续更新等待
                     # 时长 / 在途 / 排队（01 冻结门槛 ≤0.50s 的 2.5 倍余量）；
                     # 不依赖 token streaming，请求返回即停（下个请求重新起算）。
-                    request_window_s = _request_window_seconds(repair_profile)
-                    refresher = (
-                        WaitRefresher(
-                            _emit,
-                            lambda: {
-                                "window": window,
-                                "inflight": inflight_state["active"],
-                                "queued": max(0, len(ordered_batches) - summary.requests),
-                            },
-                            round_index=summary.rounds,
-                            role="main",
-                            request_window_s=request_window_s,
-                            percent_provider=lambda: min(90, 55 + summary.rounds * 4),
-                        ).start()
-                        if on_event is not None
-                        else None
+                    refresher = _start_refresher(
+                        _emit,
+                        on_event,
+                        lambda: {
+                            "window": window,
+                            "inflight": inflight_state["active"],
+                            "queued": max(0, len(ordered_batches) - summary.requests),
+                        },
+                        round_index=lambda: summary.rounds,
+                        role="main",
+                        request_window_s=_request_window_seconds(repair_profile),
                     )
                     try:
                         response = runtime.complete(
@@ -1747,9 +1769,15 @@ def execute_viewing_repair(
                         review_profile = flow.review_profile
                         assert review_profile is not None
                         for group in review_plan.groups:
+                            # review_index 由协调线程在 submit 前分配（票 07 审查
+                            # 修复）：worker 内读 ``len(review_futures)`` 与协调线程
+                            # 的 append 并发竞争，索引可能重复 / 错位——默认参数
+                            # 捕获同 ``group=group`` 先例。
+                            review_index = len(review_futures)
 
                             def _run_review(
                                 group: "_ReviewGroup" = group,
+                                review_index: int = review_index,
                             ) -> Tuple[int, List[str]]:
                                 # 停止被接受后不再发新校对请求（票 06：请求发送前
                                 # 的最后一次取消检查；竞态中已发出的按在途处理）。
@@ -1765,27 +1793,21 @@ def execute_viewing_repair(
                                 payload = _build_review_payload(
                                     round_snapshot, cfg, group.subjects, group.radius
                                 )
-                                review_index = len(review_futures)
-                                review_window_s = _request_window_seconds(review_profile)
-                                review_refresher = (
-                                    WaitRefresher(
-                                        _emit,
-                                        lambda: {
-                                            "window": max(1, review_window),
-                                            "inflight": review_inflight["active"],
-                                            "queued": max(
-                                                0,
-                                                summary.review_planned_requests
-                                                - summary.review_requests,
-                                            ),
-                                        },
-                                        round_index=summary.rounds,
-                                        role="review",
-                                        request_window_s=review_window_s,
-                                        percent_provider=lambda: min(90, 55 + summary.rounds * 4),
-                                    ).start()
-                                    if on_event is not None
-                                    else None
+                                review_refresher = _start_refresher(
+                                    _emit,
+                                    on_event,
+                                    lambda: {
+                                        "window": max(1, review_window),
+                                        "inflight": review_inflight["active"],
+                                        "queued": max(
+                                            0,
+                                            summary.review_planned_requests
+                                            - summary.review_requests,
+                                        ),
+                                    },
+                                    round_index=lambda: summary.rounds,
+                                    role="review",
+                                    request_window_s=_request_window_seconds(review_profile),
                                 )
                                 try:
                                     response = runtime.complete(
@@ -1902,18 +1924,9 @@ def execute_viewing_repair(
                         break
 
         except InterruptedError:
-            # 取消终态事件（票 07）：停止被接受时恰发一次（进度不复活）；
-            # 已进行口径用当前累计值——取消后不再有轮次 / 归并推进。
-            _emit(
-                terminal_event(
-                    status="cancelled",
-                    counts={
-                        "rounds": summary.rounds,
-                        "requests": summary.requests,
-                        "resolved": len(accepted),
-                    },
-                )
-            )
+            # 取消终态事件由调用方（runner）统一发射（票 07 审查修复）：
+            # 修复层与任务层各发一次会重复「修复已停止」终态——spec
+            # 「无重复完成」；这里只上抛，runner 的 except 恰发一次。
             raise
     summary.resolved_problem_count = len(accepted)
     repaired = state.as_data()

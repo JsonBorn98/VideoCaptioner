@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext as _nullcontext
 from dataclasses import replace
@@ -293,6 +294,8 @@ def run_postprocess_task(
     """
 
     task.status = "running"
+    # 任务墙钟（票 07 spec「运行耗时」）：从任务入口起算，终态事件携带。
+    task_started = time.perf_counter()
 
     def report_progress(value: int, message: str) -> None:
         if progress is not None:
@@ -322,7 +325,7 @@ def run_postprocess_task(
     except ValueError as exc:
         warnings.append(f"初版字幕无效，已阻断下游: {exc}")
         report = QualityReport(segment_count=len(original.segments))
-        _emit_event(terminal_event(status="failed", counts={"reason": 1}))
+        _emit_event(terminal_event(status="failed", counts={"初版无效": 1}))
         return _blocked_result(
             task,
             original,
@@ -335,6 +338,8 @@ def run_postprocess_task(
         )
     report = QualityReport(segment_count=len(input_data.segments))
     if cancelled is not None and cancelled():
+        # 早期取消（修复尚未开始）同样有终态事件（spec「停止均有终态」）。
+        _emit_event(terminal_event(status="cancelled", counts={"rounds": 0, "requests": 0}))
         return _blocked_result(
             task, original, report, layout, confidence, warnings, status="cancelled"
         )
@@ -367,7 +372,8 @@ def run_postprocess_task(
             task, original, report, layout, confidence, warnings, status="cancelled"
         )
     except Exception as exc:  # noqa: BLE001
-        _emit_event(terminal_event(status="failed", counts={"error": 1}))
+        # 模块级失败终态（票 07 审查修复）：可读原因，不渲染 error 1。
+        _emit_event(terminal_event(status="failed", counts={"资产发现": 1}))
         return _module_failure_result(task, original, report, layout, confidence, warnings, exc)
     warnings.extend(item for item in task.warnings if item not in warnings)
     # 翻译执行快照（票 06，D15）：完整 workflow 由调用方在任务开始时冻结注入；
@@ -491,6 +497,13 @@ def run_postprocess_task(
             if needs_repair
             else _nullcontext(gateway)
         ) as runtime:
+            if cancelled is not None and cancelled():
+                raise InterruptedError("LLM request cancelled")
+            # 阶段事件先于阶段调用发射（票 07 审查修复）：事件是「进入
+            # 阶段」的宣告，不是阶段完成的事后记录；简单百分比通道与
+            # 事件通道并行保留（既有 progress 消费者不降级）。
+            _emit_event(stage_event(stage="post_stage", message="正在优化阅读速度", percent=45))
+            report_progress(45, "正在优化阅读速度")
             working, report = run_post_stage(
                 working,
                 config,
@@ -499,9 +512,6 @@ def run_postprocess_task(
                 timing_windows=evidence,
                 gateway=runtime,
             )
-            if cancelled is not None and cancelled():
-                raise InterruptedError("LLM request cancelled")
-            _emit_event(stage_event(stage="post_stage", message="正在优化阅读速度", percent=45))
             if config.any_viewing_single_line():
                 report_progress(55, "正在修复观看问题")
                 working, report = execute_viewing_repair(
@@ -541,7 +551,22 @@ def run_postprocess_task(
         _emit_event(stage_event(stage="save", message="正在保存后处理字幕", percent=95))
         output = save_canonical_srt(working, output, layout=layout)
     except InterruptedError:
-        _emit_event(terminal_event(status="cancelled", counts={}))
+        # 取消终态统一在此发射（票 07 审查修复）：修复层只上抛不再发
+        # （否则 CLI verbose 渲染两条「修复已停止」）；这是任务层对
+        # cancelled 的唯一终态事件（spec「无重复完成」）。
+        _emit_event(
+            terminal_event(
+                status="cancelled",
+                counts={
+                    "rounds": (
+                        report.viewing_repair.rounds if report.viewing_repair is not None else 0
+                    ),
+                    "requests": (
+                        report.viewing_repair.requests if report.viewing_repair is not None else 0
+                    ),
+                },
+            )
+        )
         return _blocked_result(
             task,
             original,
@@ -554,6 +579,9 @@ def run_postprocess_task(
             precise_timing_grades=precise_timing_grades,
         )
     except Exception as exc:  # noqa: BLE001
+        # 模块级失败终态（票 07 审查修复）：修复 / 规范化 / 保存期间的
+        # 非取消异常也有明确终态（spec「停止和失败均有终态」）。
+        _emit_event(terminal_event(status="failed", counts={"段": report.segment_count}))
         return _module_failure_result(
             task,
             original,
@@ -590,7 +618,13 @@ def run_postprocess_task(
     _emit_event(
         terminal_event(
             status="completed",
-            counts={"segments": len(working.segments)},
+            counts={
+                "segments": len(working.segments),
+                # 带警告完成口径（ticket L21「带警告」终态）：成功交付但
+                # 存在任务警告时明确标出，不与干净成功混同。
+                "warnings": len(warnings),
+            },
+            wall_seconds=time.perf_counter() - task_started,
         )
     )
     return PostprocessResult(
