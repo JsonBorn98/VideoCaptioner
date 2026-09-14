@@ -161,9 +161,7 @@ def _context_spans(
     return BoundaryContext(spans=tuple(spans))
 
 
-def merge_subjects(
-    problems: Sequence[PlanProblem], *, segment_count: int
-) -> List[RepairSubject]:
+def merge_subjects(problems: Sequence[PlanProblem], *, segment_count: int) -> List[RepairSubject]:
     """按主体重叠或相邻合并问题区域，保留原问题 ID 与原因（D22）。
 
     主体按段区间排序后扫描：两个问题的主体区间重叠或直接相邻
@@ -300,9 +298,7 @@ def plan_repair_batches(
     batch_input_estimator: Optional[
         Callable[[Sequence[RepairSubject], BoundaryContext], int]
     ] = None,
-    output_reserve_estimator: Optional[
-        Callable[[Sequence[RepairSubject]], int]
-    ] = None,
+    output_reserve_estimator: Optional[Callable[[Sequence[RepairSubject]], int]] = None,
 ) -> RepairPlan:
     """把问题规划为批量修复请求（D16/D22/D26，票 03 接通容量）。
 

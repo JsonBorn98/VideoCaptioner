@@ -107,11 +107,7 @@ def remove_placeholders(
         trans_ph = has_trans and is_placeholder(seg.translated_text, extra)
 
         # 删除整段的三种情形
-        if (
-            (text_ph and trans_ph)
-            or (text_ph and not has_trans)
-            or (trans_ph and not has_text)
-        ):
+        if (text_ph and trans_ph) or (text_ph and not has_trans) or (trans_ph and not has_text):
             stage.add(sample=(seg.text or seg.translated_text).strip()[:40])
             continue
 

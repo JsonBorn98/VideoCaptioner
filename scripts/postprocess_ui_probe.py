@@ -17,13 +17,13 @@ event loop only — NOT widget refresh.  No page is constructed (minimum
 integration); the worker's real progress signal plus a QTimer is the measured
 presentation surface.
 
-Current-behaviour gaps this probe deliberately exposes (never masked, never
-faked by shortening the controlled delay): stop cannot preempt the in-flight
-request — the terminal state waits for the request to return naturally
-(``stop_during_inflight`` / ``terminal_after_inflight_end``), and no progress
-signal is emitted while a model request is in flight
-(``silent_during_inflight_request``).  Ticket 06 changes the behaviour and
-updates these baselines; this module only measures.
+Current-behaviour gaps this probe classifies (never masked, never faked by
+shortening the controlled delay): ticket 06 made stop preempt the in-flight
+request (stop-to-terminal <= 0.30s frozen gate).  Ticket 07 adds structured
+progress events: waiting events refresh while a model request is in flight,
+so ``silent_during_inflight_request`` now measures the frozen refresh gate
+(visible state interval <= 0.50s) instead of reporting total silence.  This
+module only measures; the frozen acceptance matrix owns the thresholds.
 
 No real provider is contacted: the offline socket guard rejects every
 non-loopback connect, the adapter answers synthetically (protocol aligned with
@@ -352,6 +352,7 @@ def run_ui_probe(directory: Path | None = None) -> dict:
 
         def __init__(self):
             self.progress: list[dict] = []
+            self.progress_events: list[dict] = []
             self.heartbeats: list[float] = []
             self._last_tick: float | None = None
             self.stop_at: float | None = None
@@ -392,6 +393,18 @@ def run_ui_probe(directory: Path | None = None) -> dict:
                 }
             )
 
+        def on_progress_event(self, payload) -> None:
+            # Ticket 07 structured events: waiting events refresh during the
+            # in-flight window; the recorder measures their cadence.
+            import json as _json
+
+            try:
+                event = _json.loads(payload)
+            except ValueError:
+                return
+            event["at_s_from_task_start"] = round(time.perf_counter() - started, 6)
+            self.progress_events.append(event)
+
         def on_barrier(self) -> None:
             # Event barrier: the first controlled main request just started.
             self.barrier_recv_at = time.perf_counter()
@@ -423,6 +436,7 @@ def run_ui_probe(directory: Path | None = None) -> dict:
     started = time.perf_counter()
     recorder = _Recorder()
     thread.progress.connect(recorder.on_progress)
+    thread.progress_event.connect(recorder.on_progress_event)
     thread.warning.connect(recorder.on_warning)
     thread.error.connect(recorder.on_error)
     thread.finished.connect(recorder.on_finished)
@@ -477,8 +491,45 @@ def run_ui_probe(directory: Path | None = None) -> dict:
         if stop_at is not None
         else None
     )
+    # Ticket 07: waiting events refresh during the in-flight window.  A
+    # refresh event is visible state; silence now means neither the legacy
+    # progress signal nor a structured waiting event arrived after stop.
+    waiting_events = [entry for entry in recorder.progress_events if entry.get("kind") == "waiting"]
+    waiting_after_stop = (
+        sum(1 for entry in waiting_events if entry["at_s_from_task_start"] + started > stop_at)
+        if stop_at is not None
+        else None
+    )
+    # 立即停止场景（barrier → stop 毫秒级）：等待刷新窗口尚未打开就被
+    # 取消关闭，没有等待事件是取消正确性，不是刷新缺口。缺口分类只对
+    # 「停止晚于请求开始超过刷新间隔（窗口确实开过）」的情况生效。
+    inflight_open_s = (
+        stop_at - first["start"] if first is not None and stop_at is not None else None
+    )
+    refresh_window_opened = bool(inflight_open_s is not None and inflight_open_s > 0.2)
     silent_during_inflight = (
-        receptions_after_stop == 0 if receptions_after_stop is not None else None
+        (
+            receptions_after_stop == 0
+            and waiting_after_stop == 0
+            and (waiting_events or refresh_window_opened)
+        )
+        if receptions_after_stop is not None
+        else None
+    )
+    waiting_refresh_max_gap_s = (
+        max(
+            (
+                later - earlier
+                for earlier, later in zip(
+                    [started]
+                    + [entry["at_s_from_task_start"] + started for entry in waiting_events],
+                    [entry["at_s_from_task_start"] + started for entry in waiting_events],
+                )
+            ),
+            default=None,
+        )
+        if waiting_events
+        else None
     )
     progress_ats = [entry["at_s_from_task_start"] + started for entry in recorder.progress]
     last_emission_to_terminal_s = (
@@ -515,9 +566,7 @@ def run_ui_probe(directory: Path | None = None) -> dict:
     # 窗口（取消解除后 attempt 的 finally 才收尾，窗口尾部含取消路径）。
     # 终态晚于停止且超出及时门槛 = 未及时抢占；0.30s 是冻结验收门槛。
     stop_not_preempted = bool(
-        stop_at is not None
-        and terminal_at is not None
-        and terminal_at - stop_at > 0.30
+        stop_at is not None and terminal_at is not None and terminal_at - stop_at > 0.30
     )
     if stop_not_preempted:
         baseline_gaps.append(
@@ -526,8 +575,14 @@ def run_ui_probe(directory: Path | None = None) -> dict:
         )
     if silent_during_inflight:
         baseline_gaps.append(
-            "no progress signal is emitted while a model request is in flight"
-            " (the last progress stays on the repair-round message)"
+            "no progress signal or waiting event is emitted while a model"
+            " request is in flight (ticket 07 gate: visible state interval"
+            " <= 0.50s)"
+        )
+    elif waiting_refresh_max_gap_s is not None and waiting_refresh_max_gap_s > 0.50:
+        baseline_gaps.append(
+            "waiting-event refresh interval exceeded the frozen 0.50s gate:"
+            f" {waiting_refresh_max_gap_s:.3f}s"
         )
     if terminal_signal != "cancelled":
         baseline_gaps.append(f"terminal signal was {terminal_signal!r}, expected cancelled")
@@ -606,6 +661,12 @@ def run_ui_probe(directory: Path | None = None) -> dict:
         },
         "gui": {
             "progress_emission_count": len(recorder.progress),
+            "waiting_event_count": len(waiting_events),
+            "waiting_refresh_max_gap_s": (
+                round(waiting_refresh_max_gap_s, 6)
+                if waiting_refresh_max_gap_s is not None
+                else None
+            ),
             "delivery_pairing_complete": all(
                 entry.get("value") is not None and entry.get("message") is not None
                 for entry in recorder.progress

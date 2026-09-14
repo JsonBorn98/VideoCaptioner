@@ -146,6 +146,13 @@ def _base_entry(profile: LLMModelProfile, request: LLMRequest) -> dict[str, Any]
             "model": profile.model,
         },
     }
+    # Correlation fields (ticket 07, spec「Progress and Diagnostics」): requests are
+    # correlated by task / round / batch even when content logging is off — these fields are
+    # pure positional metadata, containing no prompt/response bodies or credentials.
+    for key in ("task_id", "round", "batch"):
+        value = request.metadata.get(key)
+        if value:
+            entry[key] = str(value)
     # Only emitted when set, so existing entries keep their shape (e.g. the CLI
     # marks CI-injected credentials with key_source="env_override"). Explicit
     # request metadata wins; otherwise the process-wide env-override marker
@@ -164,8 +171,14 @@ def begin_gateway_request(
     request: LLMRequest,
     *,
     attempt: int,
+    emit_started: bool = False,
 ) -> LLMRequestLogHandle:
-    """Create correlation data without retaining captions unless opted in."""
+    """Create correlation data without retaining captions unless opted in.
+
+    ``emit_started`` (ticket 07) additionally writes a ``status="started"``
+    row at attempt start: an abrupt process exit then leaves identifiable
+    open requests (start without terminal state), never faked successes.
+    """
 
     include_content = is_llm_content_logging_enabled()
     entry = _base_entry(profile, request)
@@ -175,16 +188,18 @@ def begin_gateway_request(
     if include_content:
         entry["request"] = {
             "messages": [
-                {"role": message.role, "content": message.content}
-                for message in request.messages
+                {"role": message.role, "content": message.content} for message in request.messages
             ]
         }
-    return LLMRequestLogHandle(
+    handle = LLMRequestLogHandle(
         request_id=str(entry["request_id"]),
         started_at=time.perf_counter(),
         entry=entry,
         include_content=include_content,
     )
+    if emit_started:
+        _write_log({**entry, "status": "started"})
+    return handle
 
 
 def finish_gateway_request(

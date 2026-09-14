@@ -34,6 +34,7 @@ def char_count(text: str, cjk: bool) -> int:
         return len(_WS_RE.sub("", text))
     return len(text.strip())
 
+
 Side = Literal["original", "translated"]
 
 # CJK / 全角：按 1 计。表意空格 U+3000 属空白，先于本表按 0 处理。
@@ -85,9 +86,7 @@ def weighted_length(text: str) -> float:
     return sum(_char_weight(char) for char in text)
 
 
-def effective_length_limit(
-    text: str, *, cjk_limit: float, latin_limit: float
-) -> float:
+def effective_length_limit(text: str, *, cjk_limit: float, latin_limit: float) -> float:
     """混合语言有效阈值：按 CJK 权重占比在中文与英文上限之间线性插值（D25）。
 
     全 CJK 文本得到 ``cjk_limit``，全拉丁文本得到 ``latin_limit``；

@@ -317,8 +317,13 @@ class PostprocessProfileStore:
         profile = PostprocessProfile.from_dict(profile.to_dict())
         previous = self._profiles.get(profile.profile_id)
         for item in self._profiles.values():
-            if item.profile_id != profile.profile_id and item.name.casefold() == profile.name.casefold():
-                raise PostprocessProfileConflictError(f"Profile name already exists: {profile.name}")
+            if (
+                item.profile_id != profile.profile_id
+                and item.name.casefold() == profile.name.casefold()
+            ):
+                raise PostprocessProfileConflictError(
+                    f"Profile name already exists: {profile.name}"
+                )
         self._profiles[profile.profile_id] = profile
         try:
             self._save()
@@ -355,7 +360,9 @@ class PostprocessProfileStore:
         """Copy the template's current working values, retaining its factory origin."""
 
         if template_id not in TEMPLATE_IDS:
-            raise FactoryTemplateError(f"Custom profiles must originate from a template: {template_id}")
+            raise FactoryTemplateError(
+                f"Custom profiles must originate from a template: {template_id}"
+            )
         selected_id = profile_id or f"custom-{uuid.uuid4().hex}"
         _validate_id(selected_id, allow_template=False)
         if selected_id in self._profiles:

@@ -69,9 +69,7 @@ def _derived_deadline_seconds(max_attempts: int, attempt_window: float) -> float
 _GATE_QUEUE_RESERVE_SECONDS = 30.0
 
 
-def _deadline_exceeded(
-    profile: LLMModelProfile, attempt: int, budget: float
-) -> LLMCallError:
+def _deadline_exceeded(profile: LLMModelProfile, attempt: int, budget: float) -> LLMCallError:
     return LLMCallError(
         f"LLM request for profile {profile.name} exceeded its total wait "
         f"budget of {budget:.1f}s (after {attempt} attempt(s)); giving up "
@@ -158,9 +156,7 @@ class LLMGateway:
         self._sleep = sleep
         self._random = random_source
         self._max_concurrency = max_concurrency
-        self._response_cache = (
-            _shared_response_cache if response_cache is None else response_cache
-        )
+        self._response_cache = _shared_response_cache if response_cache is None else response_cache
         self._adapters: dict[str, LLMAdapter] = {}
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
         self._lock = threading.Lock()
@@ -175,9 +171,7 @@ class LLMGateway:
             return GeminiAdapter(profile)
         raise ValueError(f"Unsupported LLM transport: {profile.transport}")
 
-    def _resources(
-        self, profile: LLMModelProfile
-    ) -> tuple[LLMAdapter, threading.BoundedSemaphore]:
+    def _resources(self, profile: LLMModelProfile) -> tuple[LLMAdapter, threading.BoundedSemaphore]:
         with self._lock:
             adapter = self._adapters.get(profile.profile_id)
             if adapter is None or adapter.profile != profile:
@@ -247,9 +241,7 @@ class LLMGateway:
                 raise _deadline_exceeded(profile, attempt, deadline_seconds)
             try:
                 queue_started = time.perf_counter()
-                with _cancellable_acquire(
-                    semaphore, cancelled, _remaining()
-                ) as acquired:
+                with _cancellable_acquire(semaphore, cancelled, _remaining()) as acquired:
                     # 排队分项耗时（票 06 验收 2「记录分项耗时」）：
                     # 排队 / 传输 / 退避三段里，传输在请求日志 duration_ms，
                     # 退避在下方 warning 行，排队在这里——都不进内容日志。
@@ -274,7 +266,11 @@ class LLMGateway:
                     )
                     if request.timeout is None or request.timeout > attempt_window:
                         request = replace(request, timeout=attempt_window)
-                    log_handle = begin_gateway_request(profile, request, attempt=attempt)
+                    # started line lands on disk first (ticket 07): an abrupt exit
+                    # leaves identifiable open requests, never faked successes.
+                    log_handle = begin_gateway_request(
+                        profile, request, attempt=attempt, emit_started=True
+                    )
                     try:
                         if cancelled is None:
                             result = adapter.complete(request)
@@ -306,9 +302,7 @@ class LLMGateway:
                     attempt_limit = max_attempts
                 if not exc.retryable or attempt >= attempt_limit:
                     raise
-                backoff = min(30.0, 2 ** (attempt - 1)) * (
-                    0.75 + self._random() * 0.5
-                )
+                backoff = min(30.0, 2 ** (attempt - 1)) * (0.75 + self._random() * 0.5)
                 requested = max(backoff, exc.retry_after_seconds or 0.0)
                 remaining = _remaining()
                 if requested > remaining:

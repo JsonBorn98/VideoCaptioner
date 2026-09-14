@@ -62,6 +62,10 @@ class PostprocessThread(QThread):
 
     finished = pyqtSignal(str, str)
     progress = pyqtSignal(int, str)
+    # 结构化进度事件（票 07）：轮次 / 批次验收 / 在途等待 / 重试 / 终态。
+    # ``pyqtSignal(dict)`` 不支持 dict 载荷：事件经 JSON 字符串 queued
+    # 送达 GUI 线程，worker 不触碰控件。
+    progress_event = pyqtSignal(str)
     warning = pyqtSignal(str)
     error = pyqtSignal(str)
     cancelled = pyqtSignal()
@@ -107,6 +111,9 @@ class PostprocessThread(QThread):
                     None
                     if self.isInterruptionRequested()
                     else self.progress.emit(value, self.tr(message))
+                ),
+                on_event=lambda event: self.progress_event.emit(
+                    __import__("json").dumps(event, ensure_ascii=False, default=str)
                 ),
             )
             if self._finish_if_cancelled():

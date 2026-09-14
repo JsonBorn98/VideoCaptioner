@@ -130,7 +130,7 @@ Qt 信号最大送达延迟 **1.340ms**，事件循环最大心跳间隔 **43.53
 
 ## 验证范围声明
 
-本票传输探针不覆盖缓慢分段响应/5xx，后续传输取消票仍需补充；没有修改实际页面控件，本票不代表已完成 GUI 呈现验收。**（2026-09-14 票 06 更新：缓慢分段响应与 5xx 已由 `tests/test_postprocess/test_bounded_waits_cancellation.py` 补齐——慢分段中途取消与 500 网关退避接管均有真实 loopback 传输测试；Anthropic Messages / Gemini 传输（requests.Session）的在途取消为尽力语义＝请求超时窗口上界，任务级请求中断通道已在 OpenAI-compatible 传输（openai SDK）落地，requests 传输靠排队/退避取消与超时兜底。）CLI 独立 postprocess 的停止边界是进程级 KeyboardInterrupt（退出码 130），核心 `cancelled` 通道由 GUI 线程（Qt interruption）与编程调用方接线。
+本票传输探针不覆盖缓慢分段响应/5xx，后续传输取消票仍需补充；没有修改实际页面控件，本票不代表已完成 GUI 呈现验收。**（2026-09-14 票 06 更新：缓慢分段响应与 5xx 已由 `tests/test_postprocess/test_bounded_waits_cancellation.py` 补齐——慢分段中途取消与 500 网关退避接管均有真实 loopback 传输测试；Anthropic Messages / Gemini 传输（requests.Session）的在途取消为尽力语义＝请求超时窗口上界，任务级请求中断通道已在 OpenAI-compatible 传输（openai SDK）落地，requests 传输靠排队/退避取消与超时兜底。）CLI 独立 postprocess 的停止边界是进程级 KeyboardInterrupt（退出码 130），核心 `cancelled` 通道由 GUI 线程（Qt interruption）与编程调用方接线。**（2026-09-14 票 07 更新：进度与诊断事件已落地——`core/postprocess/diagnostics.py` 的结构化事件通道（round/batch/waiting/retry/terminal/stage）经 `on_event` 回调穿透 `run_postprocess_task`/`execute_viewing_repair`；等待事件以 0.2s 节流持续刷新（01 冻结 0.50s 门槛的 2.5 倍余量），请求日志新增 `status="started"` 行与 task/round/batch 关联字段（内容日志关闭时仍可关联，传输探针的 adapter 计数已排除 started 行）。立即停止场景（barrier → stop 毫秒级）等待刷新窗口未开即关，无等待事件是取消正确性；「窗口内持续刷新 ≤0.50s」门槛由 `test_progress_diagnostics.py` 的 0.8s 受控延迟探针验证。）**
 
 **未执行真实模型质量或性能验证。** 真实小样本需另行确认样本范围与费用上限；不默认重跑整片。本基准未读取或发布 DHH 正文。DHH 仅是本地可选输入，本公共基准不依赖其存在。
 

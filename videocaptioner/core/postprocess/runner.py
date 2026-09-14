@@ -16,6 +16,7 @@ from ..subtitle.io import clone_subtitle_data, import_subtitle, save_canonical_s
 from ..utils.logger import setup_logger
 from . import run_post_stage, run_pre_stage
 from .config import PostprocessConfig, config_payload
+from .diagnostics import stage_event, terminal_event
 from .models import (
     PostprocessAssetAdapter,
     PostprocessDeliveryContext,
@@ -39,6 +40,7 @@ TimingResolver = Callable[
     [PostprocessTask, ASRData, SubtitleLayoutEnum], Iterable["TimingEvidenceWindow"]
 ]
 ProgressCallback = Callable[[int, str], None]
+EventCallback = Callable[[dict], None]
 
 
 def _load_and_classify(
@@ -226,17 +228,13 @@ def _module_outputs(
     outputs: dict[str, bytes] = {}
     if config.qa_report:
         report.source_path = task.source_subtitle_path
-        report.output_path = (
-            task.postprocessed_subtitle_path or delivery.active_subtitle_path or ""
-        )
+        report.output_path = task.postprocessed_subtitle_path or delivery.active_subtitle_path or ""
         outputs["qa_report"] = build_qa_report(report).encode("utf-8")
     if report.speed is not None:
         from ..speed.models import canonical_json_bytes
         from ..speed.report import result_to_dict
 
-        outputs["speed_changes"] = (
-            canonical_json_bytes(result_to_dict(report.speed)) + b"\n"
-        )
+        outputs["speed_changes"] = canonical_json_bytes(result_to_dict(report.speed)) + b"\n"
     outputs["postprocess_state"] = (
         json.dumps(
             build_postprocess_state_payload(
@@ -284,6 +282,7 @@ def run_postprocess_task(
     assets: PostprocessAssetAdapter | None = None,
     cancelled: Callable[[], bool] | None = None,
     progress: ProgressCallback | None = None,
+    on_event: EventCallback | None = None,
 ) -> PostprocessResult:
     """Run one isolated stage and fall back to its immutable initial subtitle.
 
@@ -299,6 +298,13 @@ def run_postprocess_task(
         if progress is not None:
             progress(value, message)
 
+    def _emit_event(event: dict) -> None:
+        if on_event is not None:
+            try:
+                on_event(event)
+            except Exception:  # noqa: BLE001 —— 观测回调失败不阻断任务
+                logger.debug("postprocess event callback failed", exc_info=True)
+
     input_data, layout, confidence, warnings = _load_and_classify(task)
     logger.info(
         "后处理任务开始：%d 段（layout=%s，置信度=%.2f）",
@@ -307,6 +313,7 @@ def run_postprocess_task(
         confidence,
     )
     report_progress(10, "已读取初版字幕")
+    _emit_event(stage_event(stage="read", message="已读取初版字幕", percent=10))
     original = clone_subtitle_data(input_data)
     # An invalid initial hand-off is not a module-level processing failure and
     # cannot be a valid fallback.  Publish a distinct status and block downstream.
@@ -315,6 +322,7 @@ def run_postprocess_task(
     except ValueError as exc:
         warnings.append(f"初版字幕无效，已阻断下游: {exc}")
         report = QualityReport(segment_count=len(original.segments))
+        _emit_event(terminal_event(status="failed", counts={"reason": 1}))
         return _blocked_result(
             task,
             original,
@@ -353,14 +361,14 @@ def run_postprocess_task(
     try:
         adapter.discover(task)
         report_progress(18, "正在发现过程资产")
+        _emit_event(stage_event(stage="discover_assets", message="正在发现过程资产", percent=18))
     except InterruptedError:
         return _blocked_result(
             task, original, report, layout, confidence, warnings, status="cancelled"
         )
     except Exception as exc:  # noqa: BLE001
-        return _module_failure_result(
-            task, original, report, layout, confidence, warnings, exc
-        )
+        _emit_event(terminal_event(status="failed", counts={"error": 1}))
+        return _module_failure_result(task, original, report, layout, confidence, warnings, exc)
     warnings.extend(item for item in task.warnings if item not in warnings)
     # 翻译执行快照（票 06，D15）：完整 workflow 由调用方在任务开始时冻结注入；
     # 独立任务从验证过的过程资产重建身份快照。缺失时的明确提示由修复循环
@@ -468,12 +476,11 @@ def run_postprocess_task(
     try:
         working, report = run_pre_stage(clone_subtitle_data(original), config, report)
         report_progress(25, "正在规范化字幕")
+        _emit_event(stage_event(stage="normalize", message="正在规范化字幕", percent=25))
         # 批量观看问题修复（票 05）：确定性阶段结束后执行；局部回退只影响
         # 对应区域（D13/D14），模块级异常仍走整体回退。分析模式已在上方提前返回。
         # apply 路径只借一次工具网关：compress 与修复循环共用同一实例。
-        needs_repair = (
-            config.utility_llm_profile is not None and config.any_viewing_single_line()
-        )
+        needs_repair = config.utility_llm_profile is not None and config.any_viewing_single_line()
         # 修复方式按任务冻结快照选择（票 06，D15）：快照角色连接缺失时按
         # 角色身份从方案库显式解析（可验证的资产身份才复用）。
         repair_resolver = store_profile_resolver()
@@ -494,7 +501,7 @@ def run_postprocess_task(
             )
             if cancelled is not None and cancelled():
                 raise InterruptedError("LLM request cancelled")
-            report_progress(45, "正在优化阅读速度")
+            _emit_event(stage_event(stage="post_stage", message="正在优化阅读速度", percent=45))
             if config.any_viewing_single_line():
                 report_progress(55, "正在修复观看问题")
                 working, report = execute_viewing_repair(
@@ -509,14 +516,14 @@ def run_postprocess_task(
                     thread_num=task.thread_num,
                     progress=progress,
                     cancelled=cancelled,
+                    on_event=_emit_event,
+                    task_id=task.task_id,
                 )
                 # 修复循环的警告（回退 / 传输失败 / 容量不足）并入任务警告（D10）。
                 repair_summary = report.viewing_repair
                 if repair_summary is not None:
                     warnings.extend(
-                        item
-                        for item in repair_summary.warnings
-                        if item not in warnings
+                        item for item in repair_summary.warnings if item not in warnings
                     )
         _validate_output(working)
         # 交付前复查取消（票 06，spec 第 6 条）：停止先于交付提交被接受时，
@@ -531,8 +538,10 @@ def run_postprocess_task(
         source = Path(task.source_subtitle_path).resolve()
         if output.resolve() == source:
             raise ValueError("postprocess output must not overwrite its input subtitle")
+        _emit_event(stage_event(stage="save", message="正在保存后处理字幕", percent=95))
         output = save_canonical_srt(working, output, layout=layout)
     except InterruptedError:
+        _emit_event(terminal_event(status="cancelled", counts={}))
         return _blocked_result(
             task,
             original,
@@ -578,6 +587,12 @@ def run_postprocess_task(
         ),
     )
     logger.info("后处理完成：%d 段 -> %s", len(working.segments), output.name)
+    _emit_event(
+        terminal_event(
+            status="completed",
+            counts={"segments": len(working.segments)},
+        )
+    )
     return PostprocessResult(
         task,
         original,

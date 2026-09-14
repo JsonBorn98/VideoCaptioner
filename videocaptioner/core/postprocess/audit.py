@@ -47,10 +47,7 @@ def _collect_context(segments: List["ASRDataSeg"], center: int, radius: int) -> 
         return []
     lo = max(0, center - radius)
     hi = min(len(segments), center + radius + 1)
-    return [
-        _context_entry(segments[i], i + 1, current=(i == center))
-        for i in range(lo, hi)
-    ]
+    return [_context_entry(segments[i], i + 1, current=(i == center)) for i in range(lo, hi)]
 
 
 def audit(
@@ -134,9 +131,7 @@ def audit(
             duration_ms > cfg.short_text_max_duration_ms
             and 0 < main_chars <= cfg.short_text_max_chars
         ):
-            reasons.append(
-                f"短文本({main_chars}字)>{cfg.short_text_max_duration_ms / 1000:g}s"
-            )
+            reasons.append(f"短文本({main_chars}字)>{cfg.short_text_max_duration_ms / 1000:g}s")
         if reasons:
             result.long_duration.append(
                 DurationAnomaly(

@@ -66,7 +66,9 @@ def _build_candidates(asr_data: "ASRData", cfg: PostprocessConfig) -> list:
         for j in (i - 1, i + 1):
             if 0 <= j < len(segments):
                 nb = segments[j]
-                context.append(nb.translated_text if _cjk_field(nb) == "translated_text" else nb.text)
+                context.append(
+                    nb.translated_text if _cjk_field(nb) == "translated_text" else nb.text
+                )
         candidates.append(
             {
                 "seg_index": i,
@@ -80,15 +82,16 @@ def _build_candidates(asr_data: "ASRData", cfg: PostprocessConfig) -> list:
     return candidates
 
 
-def _validate(
-    candidates: list, result: dict, cfg: PostprocessConfig
-) -> Tuple[bool, str]:
+def _validate(candidates: list, result: dict, cfg: PostprocessConfig) -> Tuple[bool, str]:
     expected = {str(i + 1) for i in range(len(candidates))}
     actual = set(result.keys())
     if expected != actual:
         missing = expected - actual
         extra = actual - expected
-        return False, f"Missing keys: {sorted(missing)}; Extra keys: {sorted(extra)}. Required: {sorted(expected)}"
+        return (
+            False,
+            f"Missing keys: {sorted(missing)}; Extra keys: {sorted(extra)}. Required: {sorted(expected)}",
+        )
 
     problems = []
     for idx, cand in enumerate(candidates, 1):
@@ -98,9 +101,7 @@ def _validate(
             continue
         limit = cand["target_max_chars"]
         if _cjk_len(compressed) > limit:
-            problems.append(
-                f"Key '{idx}': {_cjk_len(compressed)} chars > target {limit}"
-            )
+            problems.append(f"Key '{idx}': {_cjk_len(compressed)} chars > target {limit}")
             continue
         ratio = difflib.SequenceMatcher(None, cand["text"], compressed).ratio()
         if ratio < _MIN_SIMILARITY:

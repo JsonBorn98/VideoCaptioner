@@ -175,7 +175,9 @@ def build_qa_report(report: QualityReport) -> str:
         label = _STAGE_LABELS.get(key, key)
         stage_lines.append(f"- {label}: {sr.changed} 处\n")
     if report.compress_failures:
-        stage_lines.append(f"- 快速字幕压缩失败（已保留原文）: {len(report.compress_failures)} 条\n")
+        stage_lines.append(
+            f"- 快速字幕压缩失败（已保留原文）: {len(report.compress_failures)} 条\n"
+        )
     if report.placeholder_review:
         stage_lines.append(
             f"- 占位符复查（原文疑似占位符但译文有实义）: {len(report.placeholder_review)} 条\n"
@@ -209,9 +211,7 @@ def build_qa_report(report: QualityReport) -> str:
     if repair is not None:
         # 修复方式选择与角色身份（票 06，D15）：进入报告便于核对实际行为。
         method_label = repair.translation_method or "未知"
-        lines.append(
-            f"- 修复方式: {method_label} -> {flow_mode_label(repair.flow_mode)}\n"
-        )
+        lines.append(f"- 修复方式: {method_label} -> {flow_mode_label(repair.flow_mode)}\n")
         if repair.main_role:
             lines.append(f"- 主翻译角色: {repair.main_role}\n")
         if repair.review_role:
@@ -230,16 +230,12 @@ def build_qa_report(report: QualityReport) -> str:
                 )
             )
         if len(repair.rollbacks) > _MAX_TABLE_ROWS:
-            lines.append(
-                f"\n_省略 {len(repair.rollbacks) - _MAX_TABLE_ROWS} 个回退区域。_\n"
-            )
+            lines.append(f"\n_省略 {len(repair.rollbacks) - _MAX_TABLE_ROWS} 个回退区域。_\n")
 
     # 4. 译者复查队列
     if audit is not None:
         lines.append("\n## 译者复查队列\n\n")
-        lines.append(
-            "以下条目不一定有错，只是自动修复方向不明确、最值得人工检查的位置。\n\n"
-        )
+        lines.append("以下条目不一定有错，只是自动修复方向不明确、最值得人工检查的位置。\n\n")
 
         lines.append("### 长时长 / 短文本长显示\n\n")
         if audit.long_duration:
@@ -247,15 +243,17 @@ def build_qa_report(report: QualityReport) -> str:
             lines.append("| --- | --- | ---: | ---: | --- | --- | --- |\n")
             for item in audit.long_duration[:_MAX_TABLE_ROWS]:
                 lines.append(
-                    _md_row([
-                        item.index,
-                        f"{item.start}->{item.end}",
-                        item.duration_s,
-                        item.chars,
-                        item.reason,
-                        item.text,
-                        item.translated,
-                    ])
+                    _md_row(
+                        [
+                            item.index,
+                            f"{item.start}->{item.end}",
+                            item.duration_s,
+                            item.chars,
+                            item.reason,
+                            item.text,
+                            item.translated,
+                        ]
+                    )
                 )
             if len(audit.long_duration) > _MAX_TABLE_ROWS:
                 lines.append(
@@ -291,14 +289,16 @@ def _write_speed_table(lines: List[str], warnings: List[SpeedWarning]) -> None:
     for w in warnings[:_MAX_TABLE_ROWS]:
         shown = _speed_warning_display_text(w)
         lines.append(
-            _md_row([
-                w.index,
-                f"{w.start}->{w.end}",
-                w.cps,
-                w.limit,
-                w.duration_s,
-                shown,
-            ])
+            _md_row(
+                [
+                    w.index,
+                    f"{w.start}->{w.end}",
+                    w.cps,
+                    w.limit,
+                    w.duration_s,
+                    shown,
+                ]
+            )
         )
     if len(warnings) > _MAX_TABLE_ROWS:
         lines.append(f"\n_省略 {len(warnings) - _MAX_TABLE_ROWS} 条。_\n")

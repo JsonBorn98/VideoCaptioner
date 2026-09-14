@@ -56,6 +56,15 @@ class _OutOfOrderAdapter(LLMAdapter):
         )
 
 
+def _log_lines(path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+
+
+def _terminal_lines(path) -> list[dict]:
+    """Ticket 07 additionally writes a status="started" row per attempt;
+    terminal rows (success/error/cache_hit) stay the per-attempt record."""
+    return [entry for entry in _log_lines(path) if entry.get("status") != "started"]
+
 def test_gateway_logs_concurrent_attempts_without_cross_pairing(tmp_path, monkeypatch):
     log_path = tmp_path / "llm.jsonl"
     monkeypatch.setattr(request_logger, "LLM_LOG_FILE", log_path)
@@ -78,9 +87,15 @@ def test_gateway_logs_concurrent_attempts_without_cross_pairing(tmp_path, monkey
             "fast",
         }
 
-    entries = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
+    entries = _terminal_lines(log_path)
     assert len(entries) == 2
     assert len({entry["request_id"] for entry in entries}) == 2
+    # Ticket 07：每次尝试 started 行先落盘，request_id 与终态行一一配对。
+    started = [entry for entry in _log_lines(log_path) if entry.get("status") == "started"]
+    assert len(started) == 2
+    assert {entry["request_id"] for entry in started} == {
+        entry["request_id"] for entry in entries
+    }
     by_stage = {entry["stage"]: entry for entry in entries}
     for value in ("slow", "fast"):
         entry = by_stage[f"stage-{value}"]
@@ -114,8 +129,9 @@ def test_env_api_key_override_marks_entries_with_key_source(tmp_path, monkeypatc
     finally:
         request_logger.set_env_api_key_override(False)
 
-    entry = json.loads(log_path.read_text("utf-8"))
-    assert entry["key_source"] == "env_override"
+    entries = _log_lines(log_path)
+    assert [entry["status"] for entry in entries] == ["started", "success"]
+    assert all(entry["key_source"] == "env_override" for entry in entries)
 
 
 def test_entries_without_the_env_override_marker_keep_their_shape(tmp_path, monkeypatch):
@@ -132,8 +148,9 @@ def test_entries_without_the_env_override_marker_keep_their_shape(tmp_path, monk
         ),
     )
 
-    entry = json.loads(log_path.read_text("utf-8"))
-    assert "key_source" not in entry
+    entries = _log_lines(log_path)
+    assert [entry["status"] for entry in entries] == ["started", "success"]
+    assert all("key_source" not in entry for entry in entries)
 
 
 def test_request_metadata_key_source_wins_over_the_process_marker(tmp_path, monkeypatch):
@@ -154,8 +171,9 @@ def test_request_metadata_key_source_wins_over_the_process_marker(tmp_path, monk
     finally:
         request_logger.set_env_api_key_override(False)
 
-    entry = json.loads(log_path.read_text("utf-8"))
-    assert entry["key_source"] == "store"
+    entries = _log_lines(log_path)
+    assert [entry["status"] for entry in entries] == ["started", "success"]
+    assert all(entry["key_source"] == "store" for entry in entries)
 
 
 def test_gateway_logs_each_retry_with_its_own_attempt_number(tmp_path, monkeypatch):
@@ -194,7 +212,7 @@ def test_gateway_logs_each_retry_with_its_own_attempt_number(tmp_path, monkeypat
     )
 
     assert result.text == "ok"
-    entries = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
+    entries = _terminal_lines(log_path)
     assert [entry["attempt"] for entry in entries] == [1, 2]
     assert all(entry["max_output_tokens"] == 65_536 for entry in entries)
     assert all(entry["adaptive_reasoning"] is True for entry in entries)
@@ -233,7 +251,7 @@ def test_error_log_keeps_safe_finish_reason_and_usage_without_raw_content(
             adapter_factory=lambda _profile: DiagnosticFailureAdapter(profile)
         ).complete(profile, LLMRequest(messages=(LLMMessage("user", "secret"),)))
 
-    entry = json.loads(log_path.read_text("utf-8"))
+    entry = _terminal_lines(log_path)[0]
     assert entry["error"]["diagnostics"] == {
         "finish_reason": "length",
         "response_status": "completed",
@@ -268,7 +286,7 @@ def test_gateway_logs_only_safe_responses_incomplete_diagnostics(tmp_path, monke
             LLMRequest(messages=(LLMMessage("user", "private subtitle"),)),
         )
 
-    entry = json.loads(log_path.read_text("utf-8"))
+    entry = _terminal_lines(log_path)[0]
     assert entry["error"]["diagnostics"] == {
         "finish_reason": "max_output_tokens",
         "response_status": "incomplete",
@@ -297,7 +315,9 @@ def test_content_logging_only_adds_prompts_and_normalized_final_text(
     )
 
     assert result.text == "subtitle"
-    entry = json.loads(log_path.read_text("utf-8"))
+    entries = _log_lines(log_path)
+    assert [entry["status"] for entry in entries] == ["started", "success"]
+    entry = entries[1]
     assert entry["request"] == {
         "messages": [
             {"role": "system", "content": "rules"},

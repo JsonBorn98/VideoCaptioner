@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Optional
@@ -47,6 +48,7 @@ from videocaptioner.core.entities import (
     SubtitleLayoutEnum,
     SubtitleRenderModeEnum,
 )
+from videocaptioner.core.postprocess import diagnostics
 from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
 from videocaptioner.core.postprocess.profiles import PostprocessProfileStore
 from videocaptioner.core.subtitle import get_subtitle_style
@@ -147,9 +149,13 @@ class PostprocessInterface(QWidget):
 
         self.command_bar = CommandBar(self)
         self.command_bar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)  # type: ignore[arg-type]
-        self.open_action = Action(FIF.FOLDER_ADD, self.tr("选择字幕"), triggered=self.select_subtitle)
+        self.open_action = Action(
+            FIF.FOLDER_ADD, self.tr("选择字幕"), triggered=self.select_subtitle
+        )
         self.media_action = Action(FIF.VIDEO, self.tr("关联媒体"), triggered=self.select_media)
-        self.settings_action = Action(FIF.SETTING, self.tr("功能设置"), triggered=self.open_settings)
+        self.settings_action = Action(
+            FIF.SETTING, self.tr("功能设置"), triggered=self.open_settings
+        )
         self.command_bar.addAction(self.open_action)
         self.command_bar.addAction(self.media_action)
         self.command_bar.addSeparator()
@@ -267,6 +273,24 @@ class PostprocessInterface(QWidget):
         footer.addWidget(self.start_button)
         self.main_layout.addLayout(footer)
 
+        # 进度摘要 + 展开/收起详情（票 07）：摘要常驻一行（阶段 / 轮次 /
+        # 批次验收 / 等待时长），详情按需展开（窗口 / 在途 / 排队 / 等待
+        # 期限 / 重试原因）。事件来自 worker 的 progress_event 信号
+        # （queued 送达，worker 不触碰控件）。
+        self.detail_toggle = PushButton(self.tr("展开详情"), self)
+        self.detail_toggle.clicked.connect(self._toggle_detail)
+        self.detail_text = QLabel(self)
+        self.detail_text.setObjectName("postprocessDetail")
+        self.detail_text.setWordWrap(True)
+        self.detail_text.setStyleSheet("padding: 4px 10px;")
+        self.detail_text.hide()
+        self._detail_expanded = False
+        self._latest_event_fields: dict = {}
+        detail_row = QHBoxLayout()
+        detail_row.addWidget(self.detail_toggle)
+        self.main_layout.addLayout(detail_row)
+        self.main_layout.addWidget(self.detail_text)
+
     def refresh_profiles(self, selected_id: str | None = None) -> None:
         profiles = self._profile_store.list()
         current = selected_id or getattr(cfg, "postprocess_profile", cfg.speed_profile).value
@@ -276,7 +300,9 @@ class PostprocessInterface(QWidget):
         for profile in profiles:
             action = Action(text=profile.name)
             action.triggered.connect(
-                lambda _checked=False, profile_id=profile.profile_id: self.select_profile(profile_id)
+                lambda _checked=False, profile_id=profile.profile_id: self.select_profile(
+                    profile_id
+                )
             )
             self.profile_menu.addAction(action)
         profile = self._profile_store.get(current)
@@ -545,8 +571,12 @@ class PostprocessInterface(QWidget):
     def start(self) -> None:
         if self._thread is not None and self._thread.isRunning():
             return
-        has_memory_input = isinstance(self.task, PostprocessTask) and self.task.input_data is not None
-        if (not self.subtitle_path or not Path(self.subtitle_path).is_file()) and not has_memory_input:
+        has_memory_input = (
+            isinstance(self.task, PostprocessTask) and self.task.input_data is not None
+        )
+        if (
+            not self.subtitle_path or not Path(self.subtitle_path).is_file()
+        ) and not has_memory_input:
             InfoBar.warning(
                 self.tr("请选择字幕"),
                 self.tr("字幕后处理只接受已经成型的字幕文件"),
@@ -580,8 +610,10 @@ class PostprocessInterface(QWidget):
             )
             return
         self._cancelling = False
+        self._latest_event_fields = {}
         self._thread = PostprocessThread(self.task)
         self._thread.progress.connect(self._on_progress)
+        self._thread.progress_event.connect(self._on_progress_event)
         self._thread.finished.connect(self._on_finished)
         self._thread.warning.connect(self._on_warning)
         self._thread.error.connect(self._on_error)
@@ -629,6 +661,73 @@ class PostprocessInterface(QWidget):
         if not self._cancelling:
             self.status_label.setText(status)
 
+    def _on_progress_event(self, event: str | dict) -> None:
+        """消费结构化事件：摘要常驻，详情按需展开（票 07）。
+
+        事件经 ``progress_event`` 信号以 JSON 字符串送达（queued
+        connection）；dict 直传供测试 / 编程调用方使用。取消后迟到
+        事件不回写进度（进度不复活）：``_cancelling`` 置位后只更新
+        终态。waiting 事件持续更新等待时长（worker 侧节流，不依赖
+        token streaming）。
+        """
+        if isinstance(event, str):
+            try:
+                event = json.loads(event)
+            except ValueError:
+                return
+        assert isinstance(event, dict)
+        kind = event.get("kind")
+        if kind == "terminal":
+            status = event.get("status")
+            if status == "cancelled":
+                return  # 取消后进度不复活：终态由 cancelled 信号负责
+            if status == "completed":
+                self.status_label.setText(self.tr("处理完成"))
+            elif status == "failed":
+                self.status_label.setText(self.tr("处理失败"))
+            elif status == "report_only":
+                self.status_label.setText(self.tr("仅报告：未发起模型请求"))
+        if self._cancelling and kind in ("waiting", "round", "batch"):
+            return  # 停止请求后的迟到事件不再推进进度文案
+        fields = dict(self._latest_event_fields)
+        counts = event.get("counts") or {}
+        fields["message"] = event.get("message")
+        if kind == "waiting":
+            fields["role"] = event.get("role")
+            fields["window"] = counts.get("window")
+            fields["inflight"] = counts.get("inflight")
+            fields["queued"] = counts.get("queued")
+            fields["wait_elapsed_ms"] = counts.get("wait_elapsed_ms")
+            fields["request_window_s"] = event.get("request_window_s")
+        elif kind == "round":
+            fields["open_problems"] = counts.get("open_problems")
+            fields["window"] = counts.get("window")
+        elif kind == "batch":
+            fields["accepted_total"] = counts.get("accepted_total")
+            if event.get("round") is not None:
+                fields["open_problems"] = self._latest_event_fields.get("open_problems")
+        elif kind == "retry":
+            fields["retry_reason"] = event.get("message")
+        self._latest_event_fields = fields
+        self._render_detail(fields)
+
+    def _render_detail(self, fields: dict) -> None:
+        if not self._detail_expanded:
+            return
+        text = diagnostics.render_detail(fields)
+        if text:
+            self.detail_text.setText(text)
+
+    def _toggle_detail(self) -> None:
+        self._detail_expanded = not self._detail_expanded
+        if self._detail_expanded:
+            self.detail_toggle.setText(self.tr("收起详情"))
+            self.detail_text.show()
+            self._render_detail(self._latest_event_fields)
+        else:
+            self.detail_toggle.setText(self.tr("展开详情"))
+            self.detail_text.hide()
+
     def _on_warning(self, message: str) -> None:
         InfoBar.warning(
             self.tr("字幕后处理警告"),
@@ -658,7 +757,10 @@ class PostprocessInterface(QWidget):
             self.model.update_all(result_data.to_json())
             non_writing_result = (
                 bool(result is not None and result.used_fallback)
-                or bool(isinstance(self.task, PostprocessTask) and self.task.status in {"fallback", "skipped"})
+                or bool(
+                    isinstance(self.task, PostprocessTask)
+                    and self.task.status in {"fallback", "skipped"}
+                )
                 or bool(
                     isinstance(self.task, PostprocessTask)
                     and self.task.config_snapshot is not None
@@ -749,8 +851,10 @@ class PostprocessInterface(QWidget):
         if not self.primary_srt_path:
             if show_feedback:
                 InfoBar.warning(
-                    self.tr("尚无后处理结果"), self.tr("请先完成一次后处理。"),
-                    duration=INFOBAR_DURATION_WARNING, parent=self,
+                    self.tr("尚无后处理结果"),
+                    self.tr("请先完成一次后处理。"),
+                    duration=INFOBAR_DURATION_WARNING,
+                    parent=self,
                 )
             return False
         try:
@@ -762,15 +866,19 @@ class PostprocessInterface(QWidget):
             self._set_dirty(False)
             if show_feedback:
                 InfoBar.success(
-                    self.tr("保存成功"), self.primary_srt_path,
-                    duration=INFOBAR_DURATION_SUCCESS, parent=self,
+                    self.tr("保存成功"),
+                    self.primary_srt_path,
+                    duration=INFOBAR_DURATION_SUCCESS,
+                    parent=self,
                 )
             return True
         except Exception as exc:
             if show_feedback:
                 InfoBar.error(
-                    self.tr("保存失败"), str(exc),
-                    duration=INFOBAR_DURATION_ERROR, parent=self,
+                    self.tr("保存失败"),
+                    str(exc),
+                    duration=INFOBAR_DURATION_ERROR,
+                    parent=self,
                 )
             return False
 
@@ -781,7 +889,9 @@ class PostprocessInterface(QWidget):
             f".{output_format}"
         )
         path, _ = QFileDialog.getSaveFileName(
-            self, self.tr("导出字幕"), str(default),
+            self,
+            self.tr("导出字幕"),
+            str(default),
             f"{self.tr('字幕文件')} (*.{output_format})",
         )
         if not path:
@@ -800,13 +910,17 @@ class PostprocessInterface(QWidget):
                 reference_resolution=reference,
             )
             InfoBar.success(
-                self.tr("导出成功"), path,
-                duration=INFOBAR_DURATION_SUCCESS, parent=self,
+                self.tr("导出成功"),
+                path,
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
             )
         except Exception as exc:
             InfoBar.error(
-                self.tr("导出失败"), str(exc),
-                duration=INFOBAR_DURATION_ERROR, parent=self,
+                self.tr("导出失败"),
+                str(exc),
+                duration=INFOBAR_DURATION_ERROR,
+                parent=self,
             )
 
     def _mark_dirty(self) -> None:

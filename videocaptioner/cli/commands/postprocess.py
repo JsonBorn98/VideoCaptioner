@@ -174,9 +174,7 @@ def run(args: Namespace, config: dict) -> int:
         from videocaptioner.cli.config import resolve_cli_utility_profile
 
         try:
-            resolved = replace(
-                resolved, utility_llm_profile=resolve_cli_utility_profile(config)
-            )
+            resolved = replace(resolved, utility_llm_profile=resolve_cli_utility_profile(config))
         except ValueError as exc:
             output.error(str(exc))
             return EXIT.USAGE_ERROR
@@ -224,9 +222,7 @@ def run(args: Namespace, config: dict) -> int:
     # 独立调用可显式补充资产，其余由资产发现按 manifest 验证。
     explicit_assets = getattr(args, "explicit_assets", None)
     if isinstance(explicit_assets, dict):
-        task.explicit_assets = {
-            str(kind): str(path) for kind, path in explicit_assets.items()
-        }
+        task.explicit_assets = {str(kind): str(path) for kind, path in explicit_assets.items()}
 
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
@@ -235,12 +231,39 @@ def run(args: Namespace, config: dict) -> int:
             f"Postprocess stages persist canonical SRT; output changed to {canonical_output}"
         )
     progress = None if quiet else output.ProgressLine("Postprocessing subtitles").start()
+
+    def on_event(event: dict) -> None:
+        """CLI 事件消费（票 07）：普通 / 详细 / 安静模式来自同一事实。
+
+        quiet 完全静默；verbose 逐行渲染事件（round / batch / retry /
+        terminal）；普通模式只用 waiting 事件刷新进度行（阶段摘要 +
+        等待时长），不逐行刷屏。``progress.update`` / ``output.info`` 各自
+        串行（ProgressLine 锁 + stderr 单写），事件回调可从修复窗口线程
+        并发到达。
+        """
+        if quiet or progress is None:
+            return
+        kind = event.get("kind")
+        if verbose:
+            from videocaptioner.core.postprocess.diagnostics import render_event_line
+
+            output.info(render_event_line(event))
+            return
+        if kind == "waiting":
+            progress.update(
+                int(event.get("percent") or 0),
+                str(event.get("message") or ""),
+            )
+        elif kind == "terminal" and event.get("status") == "report_only":
+            progress.update(0, str(event.get("message") or ""))
+
     try:
         result = run_postprocess_task(
             task,
             profile_store=store,
             timing_resolver=_timing_resolver,
             gateway=getattr(args, "gateway", None),
+            on_event=on_event,
         )
     except Exception as exc:  # invalid initial subtitles cannot safely fall back
         if progress:

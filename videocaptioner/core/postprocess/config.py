@@ -101,9 +101,7 @@ class PostprocessConfig:
     compress_fast_subtitles: bool = False
     """对超硬限的中文行做局部压缩重译（需 LLM）。"""
     # 运行期注入项（不落盘）：压缩与语义修复共用的工具角色模型配置方案。
-    utility_llm_profile: Optional[LLMModelProfile] = field(
-        default=None, repr=False, compare=False
-    )
+    utility_llm_profile: Optional[LLMModelProfile] = field(default=None, repr=False, compare=False)
     """压缩重译与语义修复使用的模型配置方案（由调用方从各自配置注入，不参与持久化）。"""
 
     # ---- 统一字幕速度优化 ----
@@ -241,8 +239,7 @@ class PostprocessConfig:
                 raise ValueError(f"single_line limits for {side_name} must be positive")
             if target > absolute:
                 raise ValueError(
-                    f"single_line_target_{side_name} cannot exceed "
-                    f"single_line_absolute_{side_name}"
+                    f"single_line_target_{side_name} cannot exceed single_line_absolute_{side_name}"
                 )
 
     def display_mode_for(self, side: str) -> str:
@@ -256,8 +253,7 @@ class PostprocessConfig:
     def any_viewing_single_line(self) -> bool:
         """任一显示侧仍为单行限长（决定是否执行显示长度扫描）。"""
         return (
-            self.original_display_mode == SINGLE_LINE
-            or self.translated_display_mode == SINGLE_LINE
+            self.original_display_mode == SINGLE_LINE or self.translated_display_mode == SINGLE_LINE
         )
 
     def audit_enabled(self) -> bool:
@@ -270,9 +266,7 @@ class PostprocessConfig:
         语义修复只在 apply 模式运行（analyze 是整段只读 dry run，不发请求）。
         """
         return self.compress_fast_subtitles or (
-            self.speed_optimize
-            and self.speed_mode == "apply"
-            and self.speed_semantic_repair
+            self.speed_optimize and self.speed_mode == "apply" and self.speed_semantic_repair
         )
 
     def any_enabled(self) -> bool:

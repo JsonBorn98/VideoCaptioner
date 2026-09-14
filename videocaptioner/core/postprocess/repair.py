@@ -61,6 +61,13 @@ from ..subtitle.io import clone_subtitle_data
 from ..utils.logger import setup_logger
 from ..utils.text_utils import is_mainly_cjk
 from .config import SINGLE_LINE, PostprocessConfig
+from .diagnostics import (
+    WaitRefresher,
+    batch_event,
+    retry_event,
+    round_event,
+    terminal_event,
+)
 from .planning import (
     DEFAULT_BOUNDARY_CONTEXT_RADIUS,
     BoundaryContext,
@@ -110,6 +117,21 @@ ProblemIdentity = Tuple[int, str, str]
 # 受控并发取消轮询窗口（秒）：wait(FIRST_COMPLETED) 的超时粒度；
 # 不依赖该间隔判断正确性，取消正确性由请求内/请求前检查保证。
 CONCURRENT_CANCEL_POLL_SECONDS = 0.05
+
+
+def _request_window_seconds(profile: "LLMModelProfile") -> float:
+    """本次修复请求的单次尝试网络窗口（等待期限展示口径，票 07）。
+
+    与网关 ``LLMGateway._request_deadline_hint`` 同一缩放口径
+    （``request_timeout_seconds``：baseline + 输出 token 缩放），
+    供等待事件展示「等待期限」；这是展示估计值，不是承诺的完成时限。
+    """
+    from ..llm.adapters import request_timeout_seconds
+
+    return request_timeout_seconds(
+        profile.max_output_tokens,
+        baseline=120.0,
+    )
 
 
 def select_repair_flow(
@@ -323,9 +345,7 @@ def _allocate_times(
     if total <= 0:
         loads = [1.0] * count
         total = float(count)
-    spans = [
-        max(bound, int(math.floor(duration * load / total))) for load in loads
-    ]
+    spans = [max(bound, int(math.floor(duration * load / total))) for load in loads]
     diff = duration - sum(spans)
     if diff > 0:
         spans[spans.index(max(spans))] += diff
@@ -354,9 +374,7 @@ def _active_single_line_sides(
 ) -> Tuple[str, ...]:
     """布局内仍是单行限长的显示侧（自动换行侧跳过长度与行数约束，D19）。"""
     return tuple(
-        side
-        for side in sides_for_layout(layout)
-        if cfg.display_mode_for(side) == SINGLE_LINE
+        side for side in sides_for_layout(layout) if cfg.display_mode_for(side) == SINGLE_LINE
     )
 
 
@@ -480,9 +498,7 @@ def _estimate_output_reserve(
         context=BoundaryContext(),
     )
     payload = _build_payload(round_snapshot, cfg, batch, segment_problems, [])
-    subject_input = estimate_tokens(
-        json.dumps(payload["repair_subjects"], ensure_ascii=False)
-    )
+    subject_input = estimate_tokens(json.dumps(payload["repair_subjects"], ensure_ascii=False))
     reserve = int(subject_input * REPAIR_OUTPUT_INPUT_RATIO) + (
         REPAIR_OUTPUT_PROTOCOL_OVERHEAD_TOKENS * max(1, len(subjects))
     )
@@ -667,9 +683,7 @@ def _review_subject_entry(
         candidate_view[region_start + offset] = {
             "id": region_start + offset,
             "text": " ".join(fragment.text for fragment in fragments),
-            "translated": " ".join(
-                fragment.translated_text for fragment in fragments
-            ),
+            "translated": " ".join(fragment.translated_text for fragment in fragments),
         }
 
     return _ReviewSubjectEntry(
@@ -693,6 +707,7 @@ def _review_context_window(
     [start+span, start+span+radius)；主体区间取 ``candidate_view``
     （叠加候选），主体外取轮次快照（ADR-0021 完成顺序无关）。
     """
+
     def _context_view(index: int) -> Dict[str, Any]:
         view = entry.candidate_view.get(index)
         if view is not None:
@@ -798,9 +813,7 @@ def _apply_review_corrections(
                 ref.translated_text = translated
                 corrections_applied += 1
     if missing:
-        warnings.append(
-            f"高级校对复校响应缺少 {missing} 个提案的校订（保留主翻译候选）"
-        )
+        warnings.append(f"高级校对复校响应缺少 {missing} 个提案的校订（保留主翻译候选）")
     return corrections_applied, missing, warnings
 
 
@@ -846,9 +859,7 @@ def _review_group_output_reserve(
     from ..translate.enhanced.token_planner import estimate_tokens
 
     subject_input = estimate_tokens(
-        json.dumps(
-            [{"segments": entry.segments} for entry in entries], ensure_ascii=False
-        )
+        json.dumps([{"segments": entry.segments} for entry in entries], ensure_ascii=False)
     )
     reserve = int(subject_input * REVIEW_OUTPUT_INPUT_RATIO) + (
         REVIEW_OUTPUT_PROTOCOL_OVERHEAD_TOKENS * max(1, len(entries))
@@ -913,12 +924,8 @@ def _plan_review_groups(
     if not entries:
         return plan
 
-    def _fits(
-        group: List["_ReviewSubjectEntry"], group_radius: int
-    ) -> Optional["_ReviewGroup"]:
-        estimated = _review_group_input_tokens(
-            round_snapshot, cfg, group, group_radius, guidance
-        )
+    def _fits(group: List["_ReviewSubjectEntry"], group_radius: int) -> Optional["_ReviewGroup"]:
+        estimated = _review_group_input_tokens(round_snapshot, cfg, group, group_radius, guidance)
         reserve = _review_group_output_reserve(
             group,
             work_context_tokens=work_context_tokens,
@@ -1124,13 +1131,11 @@ def _validate_segment_candidate(
 
     active_sides = _active_single_line_sides(cfg, layout)
     input_cjk = is_mainly_cjk(seg.text) if seg.text else False
-    input_translated_cjk = (
-        is_mainly_cjk(seg.translated_text) if seg.translated_text else False
-    )
+    input_translated_cjk = is_mainly_cjk(seg.translated_text) if seg.translated_text else False
     # 阅读速度验收（D27）：不得重新引入输入段未违反的硬速度约束。
-    input_speed_over = _over_hard_cps(
-        seg.text, input_cjk, duration_ms, cfg
-    ) or _over_hard_cps(seg.translated_text, input_translated_cjk, duration_ms, cfg)
+    input_speed_over = _over_hard_cps(seg.text, input_cjk, duration_ms, cfg) or _over_hard_cps(
+        seg.translated_text, input_translated_cjk, duration_ms, cfg
+    )
 
     loads: List[float] = []
     for entry in entries:
@@ -1172,19 +1177,12 @@ def _validate_segment_candidate(
         translated_cjk = is_mainly_cjk(entry["translated"]) if entry["translated"] else False
         if (
             _over_hard_cps(entry["original"], original_cjk, frag_end - frag_start, cfg)
-            or _over_hard_cps(
-                entry["translated"], translated_cjk, frag_end - frag_start, cfg
-            )
+            or _over_hard_cps(entry["translated"], translated_cjk, frag_end - frag_start, cfg)
         ) and not input_speed_over:
             return "片段阅读速度超出硬限（输入段未违反）", [], ""
-        fragments.append(
-            ASRDataSeg(entry["original"], frag_start, frag_end, entry["translated"])
-        )
+        fragments.append(ASRDataSeg(entry["original"], frag_start, frag_end, entry["translated"]))
     fingerprint = _fingerprint(
-        [
-            [entry["output_index"], entry["original"], entry["translated"]]
-            for entry in entries
-        ]
+        [[entry["output_index"], entry["original"], entry["translated"]] for entry in entries]
     )
     return None, fragments, fingerprint
 
@@ -1203,6 +1201,8 @@ def execute_viewing_repair(
     thread_num: Optional[int] = None,
     progress: Optional[Callable[[int, str], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
+    on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+    task_id: str = "",
 ) -> Tuple[ASRData, QualityReport]:
     """执行批量观看问题修复循环（票 05/06 核心入口，供任务入口调用）。
 
@@ -1219,6 +1219,11 @@ def execute_viewing_repair(
     ``thread_num`` 是任务冻结的并发请求数（票 04，ADR-0018）：缺省用
     权威默认 10；每 profile 显式保护上限经 ``clamped_concurrency`` 钳制，
     同 profile 主修复 / 校对共享网关 per-profile 信号量（嵌套调度不相乘）。
+    ``on_event``（票 07，spec「进度与诊断」）是可选结构化事件回调：
+    轮次分母 / 归并验收通过 / 在途等待刷新 / 重试原因 / 终态事件，
+    与 ``progress`` 简单百分比消费者并列（既有回调保持可用）；回调在
+    多线程发射，必须线程安全。``task_id`` 进入请求 ``metadata``，
+    内容日志关闭时请求记录仍可按任务 / 轮次 / 批次关联。
     """
     flow = select_repair_flow(snapshot, profile, profile_resolver)
     summary = RepairSummary()
@@ -1226,6 +1231,14 @@ def execute_viewing_repair(
     summary.flow_mode = flow.mode
     summary.main_role = role_label(flow.main_profile, None)
     summary.review_role = role_label(flow.review_profile, None)
+
+    def _emit(event: Dict[str, Any]) -> None:
+        if on_event is not None:
+            try:
+                on_event(event)
+            except Exception:  # noqa: BLE001 —— 观测回调失败不阻断修复
+                logger.debug("postprocess progress event callback failed", exc_info=True)
+
     summary.boundary_context_radius = (
         boundary_context_radius
         if boundary_context_radius is not None
@@ -1241,6 +1254,7 @@ def execute_viewing_repair(
         # 非 LLM / 缺失快照：不静默发起 LLM 请求（D15），仅确定性处理与报告。
         summary.warnings.append(f"观看问题模型修复未执行（{flow.reason}）")
         logger.info("观看问题模型修复按仅报告处理：%s", flow.reason)
+        _emit(terminal_event(status="report_only", counts={"rounds": 0}))
         return working, report
 
     repair_profile = flow.main_profile
@@ -1273,13 +1287,9 @@ def execute_viewing_repair(
         """区域回退（D13）：恢复快照、封闭区域、撤销该区域的已接受计数。"""
         if state.rollback(indices):
             summary.rollbacks.append(RegionRollback(initial_indices=indices, reason=reason))
-            summary.warnings.append(
-                f"观看问题修复回退区域（初版段 {list(indices)}）：{reason}"
-            )
+            summary.warnings.append(f"观看问题修复回退区域（初版段 {list(indices)}）：{reason}")
         else:
-            summary.warnings.append(
-                f"观看问题修复回退失败（初版段 {list(indices)}）：{reason}"
-            )
+            summary.warnings.append(f"观看问题修复回退失败（初版段 {list(indices)}）：{reason}")
         closed_regions.update(indices)
         for identity in [i for i in accepted if i[0] in set(indices)]:
             accepted.discard(identity)
@@ -1289,501 +1299,622 @@ def execute_viewing_repair(
             raise InterruptedError("LLM request cancelled")
 
     with borrow_utility_gateway(gateway) as runtime:
-        while summary.rounds < MAX_ROUNDS:
-            _raise_if_cancelled()
-            summary.rounds += 1
-            data = state.as_data()
-            # 扫描结果统一适配为 PlanProblem（票 04 的身份契约），
-            # 循环内不再混用 ViewingProblem 形状。
-            scanned = problems_from_viewing(scan_viewing_lengths(data, cfg, layout))
-            open_problems = [
-                problem
-                for problem in scanned
-                if state.origin[problem.segment_index] not in closed_regions
-            ]
-            if not open_problems:
-                break
-            # 容量规划（票 03）：每批按真实请求口径估算输入与输出预留，
-            # 预算取修复角色真实工作上下文（快照 / 角色方案的
-            # ``work_context_tokens``），受用户请求输出上限钳制；
-            # 超预算先减少主体数量，再缩减边界上下文，零上下文单主体
-            # 仍不足时进入 ``unplannable`` 明确报告（不截断原文）。
-            segment_problems: Dict[int, List[PlanProblem]] = {}
-            for problem in open_problems:
-                segment_problems.setdefault(problem.segment_index, []).append(problem)
-            feedback = [
-                f"{problem.problem_id}: {last_error[_identity(problem)]}"
-                for problem in open_problems
-                if _identity(problem) in last_error
-            ]
-            plan = plan_repair_batches(
-                data,
-                open_problems,
-                boundary_context_radius=radius,
-                token_budget=repair_profile.work_context_tokens,
-                batch_input_estimator=lambda subjects_in_batch, context: _estimate_request_input(
-                    data,
-                    cfg,
-                    subjects_in_batch,
-                    context,
-                    segment_problems,
-                    feedback,
-                    main_guidance,
-                ),
-                output_reserve_estimator=lambda subjects_in_batch: _estimate_output_reserve(
-                    data,
-                    cfg,
-                    subjects_in_batch,
-                    segment_problems,
-                    work_context_tokens=repair_profile.work_context_tokens,
-                    max_output_tokens=repair_profile.max_output_tokens,
-                ),
-            )
-            for subject in plan.unplannable:
-                # 容量不足（D26）：明确报告、封闭区域、不截断内容。
-                indices = state.initial_indices(subject.start_index, subject.end_index)
-                if closed_regions.isdisjoint(indices):
-                    summary.unplannable_subjects += 1
-                    summary.warnings.append(
-                        "观看问题修复容量不足（零上下文单主体仍超出 token 预算）："
-                        f"问题 {subject.problem_ids}"
-                    )
-                closed_regions.update(indices)
-            # 容量收缩观测（票 03，spec 第 7 条）：收缩原因由规划器在
-            # 批次上标记（``subjects_shrunk`` / ``context_shrunk``），
-            # 执行侧只按批次聚合——主体计数用批次主体数（不用问题段数
-            # 代替主体数），问题计数按显式绑定分列。
-            for batch in plan.batches:
-                summary.planned_requests += 1
-                summary.planned_input_tokens += batch.estimated_tokens
-                summary.planned_output_reserve_tokens += batch.output_reserve_tokens
-                summary.planned_subjects += len(batch.subjects)
-                summary.planned_problems += sum(
-                    len(subject.problem_ids) for subject in batch.subjects
-                )
-                if batch.subjects_shrunk:
-                    summary.shrunk_subject_batches += 1
-                if batch.context_shrunk:
-                    summary.shrunk_context_batches += 1
-            if not plan.batches:
-                break
-
-            # 业务重试耗尽检查（D09/D13）：超过 1+4 次请求的问题按区域回退。
-            exhausted_regions: Dict[Tuple[int, ...], List[ProblemIdentity]] = {}
-            for problem in open_problems:
-                identity = _identity(problem)
-                if (
-                    state.origin[problem.segment_index] not in closed_regions
-                    and attempts.get(identity, 0) >= 1 + DEFAULT_BUSINESS_RETRIES
-                ):
-                    region = last_subject.get(identity, (identity[0],))
-                    exhausted_regions.setdefault(region, []).append(identity)
-            if exhausted_regions:
-                for region, identities in exhausted_regions.items():
-                    logger.info(
-                        "观看问题修复重试耗尽（%d 个问题），回退区域 %s",
-                        len(identities),
-                        list(region),
-                    )
-                    _rollback(region, "业务修复重试耗尽")
-                continue
-
-            round_accepted = False
-            round_transport_failed = False
-            # 批量校对调度（票 05）：主修复响应到达即归并该批，归并完成
-            # 立即按容量规划派生该校对请求（与仍在途的其他主修复请求
-            # 重叠执行，不等整轮主修复完成——spec「不等待整轮主修复
-            # 全部完成才启动任何校对」）。校对窗口 = 校对角色钳制值与
-            # 主修复闸的较小值（同 profile 共享闸，ADR-0018 不相乘）；
-            # 应用段写 state 片段对象引用，互不重叠主体无锁竞争，
-            # summary 聚合由轮末按提交序执行（可交换，完成顺序无关）。
-            review_window = min(
-                (
-                    flow.review_profile.clamped_concurrency(thread_num)
-                    if flow.mode == "main_review" and flow.review_profile is not None
-                    else concurrency_gate
-                ),
-                concurrency_gate,
-            )
-            review_executor = (
-                ThreadPoolExecutor(max_workers=max(1, review_window))
-                if flow.mode == "main_review" and flow.review_profile is not None
-                else None
-            )
-            # 复校观测锁（票 05，对齐票 04 inflight_lock 先例）：review
-            # 窗口多线程并发自增计数必须加锁——``+=`` 非原子可丢计数。
-            review_lock = threading.Lock()
-            review_futures: "List[Future[Tuple[int, List[str]]]]" = []
-            # 校对发送前的取消检查闸（票 06）：停止被接受后窗口线程不再
-            # 发新校对请求（请求发送前的最后一次取消检查，spec 第 6 条）。
-            review_stop_gate = threading.Event()
-            # 修复轮次快照（ADR-0021）：本轮全部请求的主体与边界上下文
-            # 共享 ``round_snapshot``（轮初 state 的冻结副本）；同轮邻批
-            # 已归并的拆分 / 校对结果不进入本批载荷。下一轮才读取归并后
-            # 的字幕状态（轮首重建快照）。
-            round_snapshot = state.as_data()
-            if progress is not None:
-                progress(
-                    min(90, 55 + summary.rounds * 4),
-                    f"正在修复观看问题（第 {summary.rounds} 轮，{len(open_problems)} 个未解决）",
-                )
-            # 阶段 1（受控并发发出，票 04）+ 阶段 2（定序归并）：worker 只
-            # 发请求并带回响应 / 传输错误与观测，不触碰共享字幕与重试簿记
-            # （ADR-0021「worker 只产生候选」）；归并按 ``reversed(plan.batches)``
-            # 固定序在协调线程执行，任意完成顺序产生相同字幕、验收与报告。
-            # 窗口 = 并发闸与批数的较小值：少量批次收缩到批数，不因无收益
-            # 的固定首批预热强制串行（spec「有界并发与入口配置」）。
-            ordered_batches = list(reversed(plan.batches))
-            window = min(concurrency_gate, len(ordered_batches))
-            # 有效并发取各轮最大值：尾轮批数收缩不抹掉此前轮次的真实窗口。
-            summary.effective_concurrency = max(summary.effective_concurrency, window)
-            if window > 1:
-                summary.concurrent_rounds += 1
-            inflight_state = {"active": 0, "max": 0}
-            inflight_lock = threading.Lock()
-
-            def _send(order: int) -> "_BatchOutcome":
-                batch = ordered_batches[order]
+        try:
+            while summary.rounds < MAX_ROUNDS:
                 _raise_if_cancelled()
-                with inflight_lock:
-                    # 发出层计数（票 04）：通过发送前取消检查、真正进入
-                    # 网关调用的请求才计数；取消拦下的未发请求不计。
-                    summary.requests += 1
-                payload = _build_payload(round_snapshot, cfg, batch, segment_problems, feedback)
-                with inflight_lock:
-                    inflight_state["active"] += 1
-                    inflight_state["max"] = max(inflight_state["max"], inflight_state["active"])
-                try:
-                    response = runtime.complete(
-                        repair_profile,
-                        LLMRequest(
-                            messages=tuple(_request_messages(payload, main_guidance)),
-                            max_output_tokens=repair_profile.max_output_tokens,
-                            metadata={"stage": "viewing_repair", "role": "utility"},
-                        ),
-                        cancelled=cancelled,
-                    )
-                except InterruptedError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 —— 传输级失败不消耗业务重试
-                    logger.warning("观看问题修复请求失败（传输级）: %s", exc)
-                    return _BatchOutcome(order, None, error=exc)
-                finally:
-                    with inflight_lock:
-                        inflight_state["active"] -= 1
-                return _BatchOutcome(order, response)
-
-            def _merge_batch(order: int, outcome: "_BatchOutcome") -> None:
-                """归并一个主修复批并派生其批量校对（完成回调线程，票 05）。
-
-                由 ``_dispatch_ordered`` 按完成顺序逐批调用：主修复响应
-                一到达即归并（共享 state 写只在本函数串行，无并发写），
-                随后立即按容量规划把该批已拼接主体派生为批量校对请求
-                ——不等整轮主修复完成（spec「不等待整轮主修复全部完成
-                才启动任何校对」）。校对发送在 review 窗口线程执行
-                （网络等待不阻塞归并循环）。
-                """
-                nonlocal round_accepted, round_transport_failed
-                _raise_if_cancelled()
-                batch = ordered_batches[order]
-                # 本批已拼接主体的校对分组（批内固定段序收集）。
-                batch_review_entries: List[_ReviewSubjectEntry] = []
-                batch_problem_map = {
-                    problem.problem_id: problem
+                summary.rounds += 1
+                data = state.as_data()
+                # 扫描结果统一适配为 PlanProblem（票 04 的身份契约），
+                # 循环内不再混用 ViewingProblem 形状。
+                scanned = problems_from_viewing(scan_viewing_lengths(data, cfg, layout))
+                open_problems = [
+                    problem
+                    for problem in scanned
+                    if state.origin[problem.segment_index] not in closed_regions
+                ]
+                if not open_problems:
+                    break
+                # 容量规划（票 03）：每批按真实请求口径估算输入与输出预留，
+                # 预算取修复角色真实工作上下文（快照 / 角色方案的
+                # ``work_context_tokens``），受用户请求输出上限钳制；
+                # 超预算先减少主体数量，再缩减边界上下文，零上下文单主体
+                # 仍不足时进入 ``unplannable`` 明确报告（不截断原文）。
+                segment_problems: Dict[int, List[PlanProblem]] = {}
+                for problem in open_problems:
+                    segment_problems.setdefault(problem.segment_index, []).append(problem)
+                feedback = [
+                    f"{problem.problem_id}: {last_error[_identity(problem)]}"
                     for problem in open_problems
-                    if any(
-                        subject.start_index
-                        <= problem.segment_index
-                        < subject.end_index
-                        for subject in batch.subjects
-                    )
-                }
-                if outcome.error is not None:
-                    # 传输级失败：不消耗业务重试（D09），同轮其他批次照常归并。
-                    round_transport_failed = True
-                    return
-                fatal, grouped = _parse_response(outcome.response.text, batch_problem_map)
-                # 本批请求覆盖的问题身份：请求已发生，计入业务次数并记录区域。
-                for subject in batch.subjects:
-                    region = state.initial_indices(subject.start_index, subject.end_index)
-                    for index in range(subject.start_index, subject.end_index):
-                        for problem in segment_problems.get(index, []):
-                            identity = _identity(problem)
-                            attempts[identity] = attempts.get(identity, 0) + 1
-                            last_subject[identity] = region
-                if fatal is not None:
-                    for problem in batch_problem_map.values():
-                        last_error[_identity(problem)] = fatal
-                    return
-
-                # 阶段 2（批内）：固定段序降序归并本批候选。
-                for subject in reversed(batch.subjects):
-                    region = state.initial_indices(
-                        subject.start_index, subject.end_index
-                    )
-                    replacements: List[List[ASRDataSeg]] = []
-                    # 已接受候选的显式绑定（主体内偏移 → 按 output_index 排序的条目），
-                    # 供增强流程高级校对复校（票 06）。
-                    accepted_entries: Dict[int, List[Dict[str, Any]]] = {}
-                    splice_ok = True
-                    any_accepted = False
-                    for index in range(subject.start_index, subject.end_index):
-                        seg = round_snapshot.segments[index]
-                        entries = grouped.get(index, [])
-                        problems = segment_problems.get(index, [])
-                        identities = [_identity(problem) for problem in problems]
-                        if not entries:
-                            for identity in identities:
-                                last_error[identity] = "响应缺少该段输出片段"
-                            replacements.append([_clone_seg(seg)])
-                            continue
-                        error, fragments, fingerprint = _validate_segment_candidate(
-                            seg, entries, cfg, layout
-                        )
-                        if error is not None:
-                            for identity in identities:
-                                last_error[identity] = error
-                            replacements.append([_clone_seg(seg)])
-                            continue
-                        # 重复候选（D27）：立即停止该问题并回退报告。
-                        initial_index = state.origin[index]
-                        if fingerprint in candidate_fps.get(initial_index, set()):
-                            _rollback(region, "重复修复候选")
-                            splice_ok = False
-                            break
-                        candidate_fps.setdefault(initial_index, set()).add(fingerprint)
-                        replacements.append(fragments)
-                        accepted_entries[index - subject.start_index] = sorted(
-                            entries, key=lambda entry: entry["output_index"]
-                        )
-                        any_accepted = True
-                        accepted.update(identities)
-                        for identity in identities:
-                            last_error.pop(identity, None)
-                    if not splice_ok:
-                        continue
-                    if not any_accepted:
-                        # 整个主体无合格候选：状态不变，不落 splice、不记区域指纹
-                        # （拒绝的候选不算一次改善，留给重试计数与耗尽回退处理）。
-                        continue
-                    spliced = state.splice(
-                        subject.start_index, subject.end_index, replacements
-                    )
-                    if not spliced:
-                        continue
-                    # 区域状态重复检测（D27）：拼回后状态与历史一致即回退。
-                    indices = state.initial_indices(
-                        subject.start_index, subject.start_index + spliced
-                    )
-                    region_fp = _fingerprint(state.region_state(indices))
-                    if any(
-                        region_fp in state_fps.get(index, set()) for index in indices
-                    ):
-                        _rollback(indices, "区域状态重复（无改善）")
-                        continue
-                    for index in indices:
-                        state_fps.setdefault(index, set()).add(region_fp)
-                    summary.spliced_fragments += spliced
-                    # 增强流程（票 05 批量化收集）：拼接成功后把已接受候选
-                    # 收进本主修复批的校对分组（不发请求）；本批主体循环
-                    # 结束后立即按容量规划分组进入批量复校请求（不等整轮
-                    # 主修复完成）。复校上下文以轮次快照为底（ADR-0021）：
-                    # 不读邻批刚完成的归并。
-                    if review_executor is not None:
-                        # 拼接时捕获对象引用：应用段定位不受同轮后续 splice
-                        # 的段序漂移影响（state.splice 在原位替换本区域）。
-                        state_refs = state.segments[
-                            subject.start_index : subject.start_index + spliced
-                        ]
-                        entry = _review_subject_entry(
-                            region_start=subject.start_index,
-                            accepted_entries=accepted_entries,
-                            replacements=replacements,
-                            segment_problems=segment_problems,
-                            state_refs=state_refs,
-                        )
-                        if entry is not None:
-                            batch_review_entries.append(entry)
-                    round_accepted = True
-
-                # 批末调度（票 05）：本主修复批已拼接主体 → 容量规划分组
-                # → review 窗口提交（与仍在途的其他主修复请求重叠执行，
-                # 不等整轮主修复完成）。失败语义：传输/解析失败保留主翻译
-                # 候选并告警（spec：校对失败不回退已合格主修复、不标记
-                # 成功）；同批其他组合法校对项独立验收。
-                if review_executor is not None and batch_review_entries:
-                    # 同批主体共享批级候选视图（ADR-0021「快照叠加对应
-                    # 主候选的明确视图」：批 = 稳定输入分组，本批全部主体
-                    # 的候选对整批可见——与完成顺序无关，组内一致）。
-                    batch_view: Dict[int, Dict[str, Any]] = {}
-                    for item in batch_review_entries:
-                        batch_view.update(item.candidate_view)
-                    for item in batch_review_entries:
-                        merged = dict(batch_view)
-                        merged.update(item.candidate_view)
-                        item.candidate_view = merged
-                    review_plan = _plan_review_groups(
-                        round_snapshot,
+                    if _identity(problem) in last_error
+                ]
+                plan = plan_repair_batches(
+                    data,
+                    open_problems,
+                    boundary_context_radius=radius,
+                    token_budget=repair_profile.work_context_tokens,
+                    batch_input_estimator=lambda subjects_in_batch,
+                    context: _estimate_request_input(
+                        data,
                         cfg,
-                        batch_review_entries,
-                        radius=radius,
-                        guidance=review_guidance,
-                        token_budget=(
-                            flow.review_profile.work_context_tokens
-                            if flow.review_profile is not None
-                            else None
-                        ),
-                        work_context_tokens=(
-                            flow.review_profile.work_context_tokens
-                            if flow.review_profile is not None
-                            else None
-                        ),
-                        max_output_tokens=(
-                            flow.review_profile.max_output_tokens
-                            if flow.review_profile is not None
-                            else None
-                        ),
-                    )
-                    summary.review_planned_requests += len(review_plan.groups)
-                    summary.review_planned_subjects += sum(
-                        len(group.subjects) for group in review_plan.groups
-                    )
-                    summary.review_unplannable_subjects += review_plan.unplannable_subjects
-                    summary.review_shrunk_subject_groups += review_plan.shrunk_subject_groups
-                    summary.review_shrunk_context_groups += (
-                        review_plan.shrunk_context_groups
-                    )
-                    for group in review_plan.groups:
-                        summary.review_planned_input_tokens += group.input_tokens
-                        summary.review_planned_output_reserve_tokens += (
-                            group.output_reserve_tokens
-                        )
-                    if review_plan.unplannable_subjects:
-                        summary.warnings.append(
-                            "观看问题修复高级校对容量不足（零上下文单主体仍超出 "
-                            "token 预算）：保留主修复候选，跳过 "
-                            f"{review_plan.unplannable_subjects} 个主体的复校"
-                        )
-                    # 闭包内类型收窄：批末调度段仅在 review_profile 非 None
-                    # 时到达（review_executor 仅在 main_review 创建）。
-                    review_profile = flow.review_profile
-                    assert review_profile is not None
-                    for group in review_plan.groups:
-
-                        def _run_review(
-                            group: "_ReviewGroup" = group,
-                        ) -> Tuple[int, List[str]]:
-                            # 停止被接受后不再发新校对请求（票 06：请求发送前
-                            # 的最后一次取消检查；竞态中已发出的按在途处理）。
-                            if review_stop_gate.is_set():
-                                return 0, []
-                            _raise_if_cancelled()
-                            # 发出层计数（票 05）：进入网关调用前计数——传输
-                            # 失败的请求已发生，照常计入（缓存命中不减）；
-                            # review 窗口多线程并发，加锁（票 04 同型先例）。
-                            with review_lock:
-                                summary.review_requests += 1
-                            payload = _build_review_payload(
-                                round_snapshot, cfg, group.subjects, group.radius
-                            )
-                            try:
-                                response = runtime.complete(
-                                    review_profile,
-                                    LLMRequest(
-                                        messages=tuple(
-                                            _review_request_messages(
-                                                payload, review_guidance
-                                            )
-                                        ),
-                                        max_output_tokens=review_profile.max_output_tokens,
-                                        metadata={
-                                            "stage": "viewing_repair_review",
-                                            "role": "utility",
-                                        },
-                                    ),
-                                    cancelled=cancelled,
-                                )
-                            except InterruptedError:
-                                raise
-                            except Exception as exc:  # noqa: BLE001 —— 复校传输失败保留主翻译候选
-                                logger.warning(
-                                    "观看问题修复高级校对请求失败（保留主翻译候选）: %s",
-                                    exc,
-                                )
-                                return 0, [
-                                    f"高级校对复校请求失败，保留主翻译候选: {exc}"
-                                ]
-                            bindings: Dict[Tuple[str, int], Dict[str, Any]] = {}
-                            for subject_entry in group.subjects:
-                                bindings.update(subject_entry.bindings)
-                            fatal, corrections = _parse_review_response(
-                                response.text, bindings
-                            )
-                            if fatal is not None:
-                                return 0, [
-                                    f"高级校对复校响应被拒（保留主翻译候选）: {fatal}"
-                                ]
-                            # 应用前重确认取消（spec「停止全路径」：请求返回后、
-                            # 校对应用前重新确认——取消竞态下迟到校订不得写回）。
-                            _raise_if_cancelled()
-                            applied, _missing, warnings = _apply_review_corrections(
-                                state, cfg, layout, group.subjects, corrections
-                            )
-                            return applied, warnings
-
-                        review_futures.append(review_executor.submit(_run_review))
-
-            # 归并搬到完成回调（票 05）：主修复响应一到达即归并该批并
-            # 派生校对请求（重叠执行）；返回值固定批序仍供异常/观测路径。
-            # review executor 在取消 / 异常路径也必须有界关闭（spec：
-            # 残留回调不得继续调度或写回字幕）。取消路径置 stop gate：
-            # 未发送的校对不再发出（gate 检查），在途校对由网关取消通道
-            # 尽快解除；shutdown 等待的就是这些已发出请求的自然结束
-            # （有界：max_workers 个在途 × 网关总预算上界）。
-            try:
-                _dispatch_ordered(
-                    len(ordered_batches),
-                    _send,
-                    window=window,
-                    cancelled=cancelled,
-                    on_merged=_merge_batch,
+                        subjects_in_batch,
+                        context,
+                        segment_problems,
+                        feedback,
+                        main_guidance,
+                    ),
+                    output_reserve_estimator=lambda subjects_in_batch: _estimate_output_reserve(
+                        data,
+                        cfg,
+                        subjects_in_batch,
+                        segment_problems,
+                        work_context_tokens=repair_profile.work_context_tokens,
+                        max_output_tokens=repair_profile.max_output_tokens,
+                    ),
                 )
-                # 在途观测是发出层口径（含瞬时缓存命中）；真实 adapter 在途由
-                # 传输探针口径覆盖（spec：缓存命中不冒充模型吞吐）。
-                summary.max_inflight = max(summary.max_inflight, inflight_state["max"])
-                # 轮末聚合（票 05）：等待本轮全部批量校对请求（提交序聚合，
-                # 应用段可交换——对象引用定位，完成顺序不影响最终字幕）。
-                for future in review_futures:
-                    applied, review_warnings = future.result()
-                    summary.review_corrections += applied
-                    summary.warnings.extend(
-                        warning
-                        for warning in review_warnings
-                        if warning not in summary.warnings
+                for subject in plan.unplannable:
+                    # 容量不足（D26）：明确报告、封闭区域、不截断内容。
+                    indices = state.initial_indices(subject.start_index, subject.end_index)
+                    if closed_regions.isdisjoint(indices):
+                        summary.unplannable_subjects += 1
+                        summary.warnings.append(
+                            "观看问题修复容量不足（零上下文单主体仍超出 token 预算）："
+                            f"问题 {subject.problem_ids}"
+                        )
+                    closed_regions.update(indices)
+                # 容量收缩观测（票 03，spec 第 7 条）：收缩原因由规划器在
+                # 批次上标记（``subjects_shrunk`` / ``context_shrunk``），
+                # 执行侧只按批次聚合——主体计数用批次主体数（不用问题段数
+                # 代替主体数），问题计数按显式绑定分列。
+                for batch in plan.batches:
+                    summary.planned_requests += 1
+                    summary.planned_input_tokens += batch.estimated_tokens
+                    summary.planned_output_reserve_tokens += batch.output_reserve_tokens
+                    summary.planned_subjects += len(batch.subjects)
+                    summary.planned_problems += sum(
+                        len(subject.problem_ids) for subject in batch.subjects
                     )
-                review_futures.clear()
-            except BaseException:
-                # 取消 / 异常路径（票 06）：停止被接受 → 未发校对不再发；
-                # 已提交的 future 逐个聚合（丢弃迟到校订写回的机会——
-                # _run_review 应用前重确认取消，迟到结果无副作用），再关闭。
-                review_stop_gate.set()
-                for future in review_futures:
-                    try:
-                        future.result()
-                    except Exception:  # noqa: BLE001 —— 取消路径的迟到结果不写回（含 InterruptedError）
-                        continue
-                raise
-            finally:
-                if review_executor is not None:
-                    review_executor.shutdown(wait=True)
-            if round_accepted:
-                transport_streak = 0
-            elif round_transport_failed:
-                transport_streak += 1
-                if transport_streak >= MAX_TRANSPORT_FAILURE_ROUNDS:
-                    summary.warnings.append("观看问题修复连续传输失败，已停止修复循环")
+                    if batch.subjects_shrunk:
+                        summary.shrunk_subject_batches += 1
+                    if batch.context_shrunk:
+                        summary.shrunk_context_batches += 1
+                if not plan.batches:
                     break
 
+                # 业务重试耗尽检查（D09/D13）：超过 1+4 次请求的问题按区域回退。
+                exhausted_regions: Dict[Tuple[int, ...], List[ProblemIdentity]] = {}
+                for problem in open_problems:
+                    identity = _identity(problem)
+                    if (
+                        state.origin[problem.segment_index] not in closed_regions
+                        and attempts.get(identity, 0) >= 1 + DEFAULT_BUSINESS_RETRIES
+                    ):
+                        region = last_subject.get(identity, (identity[0],))
+                        exhausted_regions.setdefault(region, []).append(identity)
+                if exhausted_regions:
+                    for region, identities in exhausted_regions.items():
+                        logger.info(
+                            "观看问题修复重试耗尽（%d 个问题），回退区域 %s",
+                            len(identities),
+                            list(region),
+                        )
+                        _rollback(region, "业务修复重试耗尽")
+                    continue
+
+                round_accepted = False
+                round_transport_failed = False
+                # 批量校对调度（票 05）：主修复响应到达即归并该批，归并完成
+                # 立即按容量规划派生该校对请求（与仍在途的其他主修复请求
+                # 重叠执行，不等整轮主修复完成——spec「不等待整轮主修复
+                # 全部完成才启动任何校对」）。校对窗口 = 校对角色钳制值与
+                # 主修复闸的较小值（同 profile 共享闸，ADR-0018 不相乘）；
+                # 应用段写 state 片段对象引用，互不重叠主体无锁竞争，
+                # summary 聚合由轮末按提交序执行（可交换，完成顺序无关）。
+                review_window = min(
+                    (
+                        flow.review_profile.clamped_concurrency(thread_num)
+                        if flow.mode == "main_review" and flow.review_profile is not None
+                        else concurrency_gate
+                    ),
+                    concurrency_gate,
+                )
+                review_executor = (
+                    ThreadPoolExecutor(max_workers=max(1, review_window))
+                    if flow.mode == "main_review" and flow.review_profile is not None
+                    else None
+                )
+                # 复校观测锁（票 05，对齐票 04 inflight_lock 先例）：review
+                # 窗口多线程并发自增计数必须加锁——``+=`` 非原子可丢计数。
+                review_lock = threading.Lock()
+                review_futures: "List[Future[Tuple[int, List[str]]]]" = []
+                # 校对发送前的取消检查闸（票 06）：停止被接受后窗口线程不再
+                # 发新校对请求（请求发送前的最后一次取消检查，spec 第 6 条）。
+                review_stop_gate = threading.Event()
+                # 校对在途观测（票 07）：等待刷新事件的 review 快照口径。
+                review_inflight = {"active": 0}
+                # 修复轮次快照（ADR-0021）：本轮全部请求的主体与边界上下文
+                # 共享 ``round_snapshot``（轮初 state 的冻结副本）；同轮邻批
+                # 已归并的拆分 / 校对结果不进入本批载荷。下一轮才读取归并后
+                # 的字幕状态（轮首重建快照）。
+                round_snapshot = state.as_data()
+                # 轮次事件（票 07）：分母逐轮显式——重规划 / 拆分 / 回退的
+                # 分母变化不藏在伪单调百分比里（spec「批次和问题计数口径」）。
+                _emit(
+                    round_event(
+                        round_index=summary.rounds,
+                        open_problems=len(open_problems),
+                        batches=len(plan.batches),
+                        window=min(concurrency_gate, max(1, len(plan.batches))),
+                        # 与简单百分比消费者同一事实口径（票 07）：事件
+                        # 通道无条件携带，前端不再各自推导。
+                        percent=min(90, 55 + summary.rounds * 4),
+                    )
+                )
+                if progress is not None:
+                    progress(
+                        min(90, 55 + summary.rounds * 4),
+                        f"正在修复观看问题（第 {summary.rounds} 轮，{len(open_problems)} 个未解决）",
+                    )
+                # 阶段 1（受控并发发出，票 04）+ 阶段 2（定序归并）：worker 只
+                # 发请求并带回响应 / 传输错误与观测，不触碰共享字幕与重试簿记
+                # （ADR-0021「worker 只产生候选」）；归并按 ``reversed(plan.batches)``
+                # 固定序在协调线程执行，任意完成顺序产生相同字幕、验收与报告。
+                # 窗口 = 并发闸与批数的较小值：少量批次收缩到批数，不因无收益
+                # 的固定首批预热强制串行（spec「有界并发与入口配置」）。
+                ordered_batches = list(reversed(plan.batches))
+                window = min(concurrency_gate, len(ordered_batches))
+                # 有效并发取各轮最大值：尾轮批数收缩不抹掉此前轮次的真实窗口。
+                summary.effective_concurrency = max(summary.effective_concurrency, window)
+                if window > 1:
+                    summary.concurrent_rounds += 1
+                inflight_state = {"active": 0, "max": 0}
+                inflight_lock = threading.Lock()
+
+                def _send(order: int) -> "_BatchOutcome":
+                    batch = ordered_batches[order]
+                    _raise_if_cancelled()
+                    with inflight_lock:
+                        # 发出层计数（票 04）：通过发送前取消检查、真正进入
+                        # 网关调用的请求才计数；取消拦下的未发请求不计。
+                        summary.requests += 1
+                    payload = _build_payload(round_snapshot, cfg, batch, segment_problems, feedback)
+                    with inflight_lock:
+                        inflight_state["active"] += 1
+                        inflight_state["max"] = max(inflight_state["max"], inflight_state["active"])
+                    # 等待刷新（票 07）：请求在途期间以节流间隔持续更新等待
+                    # 时长 / 在途 / 排队（01 冻结门槛 ≤0.50s 的 2.5 倍余量）；
+                    # 不依赖 token streaming，请求返回即停（下个请求重新起算）。
+                    request_window_s = _request_window_seconds(repair_profile)
+                    refresher = (
+                        WaitRefresher(
+                            _emit,
+                            lambda: {
+                                "window": window,
+                                "inflight": inflight_state["active"],
+                                "queued": max(0, len(ordered_batches) - summary.requests),
+                            },
+                            round_index=summary.rounds,
+                            role="main",
+                            request_window_s=request_window_s,
+                            percent_provider=lambda: min(90, 55 + summary.rounds * 4),
+                        ).start()
+                        if on_event is not None
+                        else None
+                    )
+                    try:
+                        response = runtime.complete(
+                            repair_profile,
+                            LLMRequest(
+                                messages=tuple(_request_messages(payload, main_guidance)),
+                                max_output_tokens=repair_profile.max_output_tokens,
+                                metadata={
+                                    "stage": "viewing_repair",
+                                    "role": "utility",
+                                    "task_id": task_id,
+                                    "round": str(summary.rounds),
+                                    "batch": str(order),
+                                },
+                            ),
+                            cancelled=cancelled,
+                        )
+                    except InterruptedError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 —— 传输级失败不消耗业务重试
+                        logger.warning("观看问题修复请求失败（传输级）: %s", exc)
+                        _emit(
+                            retry_event(
+                                round_index=summary.rounds,
+                                batch_index=order,
+                                category="transport",
+                                reason=str(exc),
+                            )
+                        )
+                        return _BatchOutcome(order, None, error=exc)
+                    finally:
+                        if refresher is not None:
+                            refresher.stop()
+                        with inflight_lock:
+                            inflight_state["active"] -= 1
+                    return _BatchOutcome(order, response)
+
+                def _merge_batch(order: int, outcome: "_BatchOutcome") -> None:
+                    """归并一个主修复批并派生其批量校对（完成回调线程，票 05）。
+
+                    由 ``_dispatch_ordered`` 按完成顺序逐批调用：主修复响应
+                    一到达即归并（共享 state 写只在本函数串行，无并发写），
+                    随后立即按容量规划把该批已拼接主体派生为批量校对请求
+                    ——不等整轮主修复完成（spec「不等待整轮主修复全部完成
+                    才启动任何校对」）。校对发送在 review 窗口线程执行
+                    （网络等待不阻塞归并循环）。
+                    """
+                    nonlocal round_accepted, round_transport_failed
+                    _raise_if_cancelled()
+                    batch = ordered_batches[order]
+                    # 本批已拼接主体的校对分组（批内固定段序收集）。
+                    batch_review_entries: List[_ReviewSubjectEntry] = []
+                    # 本批归并前的累计验收通过数（批事件的本批 / 累计分列）。
+                    accepted_before_batch = len(accepted)
+                    batch_problem_map = {
+                        problem.problem_id: problem
+                        for problem in open_problems
+                        if any(
+                            subject.start_index <= problem.segment_index < subject.end_index
+                            for subject in batch.subjects
+                        )
+                    }
+                    if outcome.error is not None:
+                        # 传输级失败：不消耗业务重试（D09），同轮其他批次照常归并。
+                        round_transport_failed = True
+                        return
+                    fatal, grouped = _parse_response(outcome.response.text, batch_problem_map)
+                    # 本批请求覆盖的问题身份：请求已发生，计入业务次数并记录区域。
+                    for subject in batch.subjects:
+                        region = state.initial_indices(subject.start_index, subject.end_index)
+                        for index in range(subject.start_index, subject.end_index):
+                            for problem in segment_problems.get(index, []):
+                                identity = _identity(problem)
+                                attempts[identity] = attempts.get(identity, 0) + 1
+                                last_subject[identity] = region
+                    if fatal is not None:
+                        for problem in batch_problem_map.values():
+                            last_error[_identity(problem)] = fatal
+                        # 业务级拒绝（票 07）：响应不可用是可观察的重试原因
+                        # （计入反馈进入下一轮，不静默跳过）。
+                        _emit(
+                            retry_event(
+                                round_index=summary.rounds,
+                                batch_index=order,
+                                category="business",
+                                reason=fatal,
+                            )
+                        )
+                        return
+
+                    # 阶段 2（批内）：固定段序降序归并本批候选。
+                    for subject in reversed(batch.subjects):
+                        region = state.initial_indices(subject.start_index, subject.end_index)
+                        replacements: List[List[ASRDataSeg]] = []
+                        # 已接受候选的显式绑定（主体内偏移 → 按 output_index 排序的条目），
+                        # 供增强流程高级校对复校（票 06）。
+                        accepted_entries: Dict[int, List[Dict[str, Any]]] = {}
+                        splice_ok = True
+                        any_accepted = False
+                        for index in range(subject.start_index, subject.end_index):
+                            seg = round_snapshot.segments[index]
+                            entries = grouped.get(index, [])
+                            problems = segment_problems.get(index, [])
+                            identities = [_identity(problem) for problem in problems]
+                            if not entries:
+                                for identity in identities:
+                                    last_error[identity] = "响应缺少该段输出片段"
+                                replacements.append([_clone_seg(seg)])
+                                continue
+                            error, fragments, fingerprint = _validate_segment_candidate(
+                                seg, entries, cfg, layout
+                            )
+                            if error is not None:
+                                for identity in identities:
+                                    last_error[identity] = error
+                                replacements.append([_clone_seg(seg)])
+                                continue
+                            # 重复候选（D27）：立即停止该问题并回退报告。
+                            initial_index = state.origin[index]
+                            if fingerprint in candidate_fps.get(initial_index, set()):
+                                _rollback(region, "重复修复候选")
+                                splice_ok = False
+                                break
+                            candidate_fps.setdefault(initial_index, set()).add(fingerprint)
+                            replacements.append(fragments)
+                            accepted_entries[index - subject.start_index] = sorted(
+                                entries, key=lambda entry: entry["output_index"]
+                            )
+                            any_accepted = True
+                            accepted.update(identities)
+                            for identity in identities:
+                                last_error.pop(identity, None)
+                        if not splice_ok:
+                            continue
+                        if not any_accepted:
+                            # 整个主体无合格候选：状态不变，不落 splice、不记区域指纹
+                            # （拒绝的候选不算一次改善，留给重试计数与耗尽回退处理）。
+                            continue
+                        spliced = state.splice(subject.start_index, subject.end_index, replacements)
+                        if not spliced:
+                            continue
+                        # 区域状态重复检测（D27）：拼回后状态与历史一致即回退。
+                        indices = state.initial_indices(
+                            subject.start_index, subject.start_index + spliced
+                        )
+                        region_fp = _fingerprint(state.region_state(indices))
+                        if any(region_fp in state_fps.get(index, set()) for index in indices):
+                            _rollback(indices, "区域状态重复（无改善）")
+                            continue
+                        for index in indices:
+                            state_fps.setdefault(index, set()).add(region_fp)
+                        summary.spliced_fragments += spliced
+                        # 增强流程（票 05 批量化收集）：拼接成功后把已接受候选
+                        # 收进本主修复批的校对分组（不发请求）；本批主体循环
+                        # 结束后立即按容量规划分组进入批量复校请求（不等整轮
+                        # 主修复完成）。复校上下文以轮次快照为底（ADR-0021）：
+                        # 不读邻批刚完成的归并。
+                        if review_executor is not None:
+                            # 拼接时捕获对象引用：应用段定位不受同轮后续 splice
+                            # 的段序漂移影响（state.splice 在原位替换本区域）。
+                            state_refs = state.segments[
+                                subject.start_index : subject.start_index + spliced
+                            ]
+                            entry = _review_subject_entry(
+                                region_start=subject.start_index,
+                                accepted_entries=accepted_entries,
+                                replacements=replacements,
+                                segment_problems=segment_problems,
+                                state_refs=state_refs,
+                            )
+                            if entry is not None:
+                                batch_review_entries.append(entry)
+                        round_accepted = True
+
+                    # 批归并验收事件（票 07）：模型返回不直接计为问题解决，
+                    # 只有归并验收通过的计数进入「已通过」——本批 / 累计分列，
+                    # 分母由 round 事件显式携带（不藏在伪单调百分比里）。
+                    _emit(
+                        batch_event(
+                            round_index=summary.rounds,
+                            batch_index=order,
+                            accepted_in_batch=len(accepted) - accepted_before_batch,
+                            accepted_total=len(accepted),
+                            subjects=len(batch.subjects),
+                        )
+                    )
+
+                    # 批末调度（票 05）：本主修复批已拼接主体 → 容量规划分组
+                    # → review 窗口提交（与仍在途的其他主修复请求重叠执行，
+                    # 不等整轮主修复完成）。失败语义：传输/解析失败保留主翻译
+                    # 候选并告警（spec：校对失败不回退已合格主修复、不标记
+                    # 成功）；同批其他组合法校对项独立验收。
+                    if review_executor is not None and batch_review_entries:
+                        # 同批主体共享批级候选视图（ADR-0021「快照叠加对应
+                        # 主候选的明确视图」：批 = 稳定输入分组，本批全部主体
+                        # 的候选对整批可见——与完成顺序无关，组内一致）。
+                        batch_view: Dict[int, Dict[str, Any]] = {}
+                        for item in batch_review_entries:
+                            batch_view.update(item.candidate_view)
+                        for item in batch_review_entries:
+                            merged = dict(batch_view)
+                            merged.update(item.candidate_view)
+                            item.candidate_view = merged
+                        review_plan = _plan_review_groups(
+                            round_snapshot,
+                            cfg,
+                            batch_review_entries,
+                            radius=radius,
+                            guidance=review_guidance,
+                            token_budget=(
+                                flow.review_profile.work_context_tokens
+                                if flow.review_profile is not None
+                                else None
+                            ),
+                            work_context_tokens=(
+                                flow.review_profile.work_context_tokens
+                                if flow.review_profile is not None
+                                else None
+                            ),
+                            max_output_tokens=(
+                                flow.review_profile.max_output_tokens
+                                if flow.review_profile is not None
+                                else None
+                            ),
+                        )
+                        summary.review_planned_requests += len(review_plan.groups)
+                        summary.review_planned_subjects += sum(
+                            len(group.subjects) for group in review_plan.groups
+                        )
+                        summary.review_unplannable_subjects += review_plan.unplannable_subjects
+                        summary.review_shrunk_subject_groups += review_plan.shrunk_subject_groups
+                        summary.review_shrunk_context_groups += review_plan.shrunk_context_groups
+                        for group in review_plan.groups:
+                            summary.review_planned_input_tokens += group.input_tokens
+                            summary.review_planned_output_reserve_tokens += (
+                                group.output_reserve_tokens
+                            )
+                        if review_plan.unplannable_subjects:
+                            summary.warnings.append(
+                                "观看问题修复高级校对容量不足（零上下文单主体仍超出 "
+                                "token 预算）：保留主修复候选，跳过 "
+                                f"{review_plan.unplannable_subjects} 个主体的复校"
+                            )
+                        # 闭包内类型收窄：批末调度段仅在 review_profile 非 None
+                        # 时到达（review_executor 仅在 main_review 创建）。
+                        review_profile = flow.review_profile
+                        assert review_profile is not None
+                        for group in review_plan.groups:
+
+                            def _run_review(
+                                group: "_ReviewGroup" = group,
+                            ) -> Tuple[int, List[str]]:
+                                # 停止被接受后不再发新校对请求（票 06：请求发送前
+                                # 的最后一次取消检查；竞态中已发出的按在途处理）。
+                                if review_stop_gate.is_set():
+                                    return 0, []
+                                _raise_if_cancelled()
+                                # 发出层计数（票 05）：进入网关调用前计数——传输
+                                # 失败的请求已发生，照常计入（缓存命中不减）；
+                                # review 窗口多线程并发，加锁（票 04 同型先例）。
+                                with review_lock:
+                                    summary.review_requests += 1
+                                    review_inflight["active"] += 1
+                                payload = _build_review_payload(
+                                    round_snapshot, cfg, group.subjects, group.radius
+                                )
+                                review_index = len(review_futures)
+                                review_window_s = _request_window_seconds(review_profile)
+                                review_refresher = (
+                                    WaitRefresher(
+                                        _emit,
+                                        lambda: {
+                                            "window": max(1, review_window),
+                                            "inflight": review_inflight["active"],
+                                            "queued": max(
+                                                0,
+                                                summary.review_planned_requests
+                                                - summary.review_requests,
+                                            ),
+                                        },
+                                        round_index=summary.rounds,
+                                        role="review",
+                                        request_window_s=review_window_s,
+                                        percent_provider=lambda: min(90, 55 + summary.rounds * 4),
+                                    ).start()
+                                    if on_event is not None
+                                    else None
+                                )
+                                try:
+                                    response = runtime.complete(
+                                        review_profile,
+                                        LLMRequest(
+                                            messages=tuple(
+                                                _review_request_messages(payload, review_guidance)
+                                            ),
+                                            max_output_tokens=review_profile.max_output_tokens,
+                                            metadata={
+                                                "stage": "viewing_repair_review",
+                                                "role": "utility",
+                                                "task_id": task_id,
+                                                "round": str(summary.rounds),
+                                                "batch": str(review_index),
+                                            },
+                                        ),
+                                        cancelled=cancelled,
+                                    )
+                                except InterruptedError:
+                                    raise
+                                except Exception as exc:  # noqa: BLE001 —— 复校传输失败保留主翻译候选
+                                    logger.warning(
+                                        "观看问题修复高级校对请求失败（保留主翻译候选）: %s",
+                                        exc,
+                                    )
+                                    _emit(
+                                        retry_event(
+                                            round_index=summary.rounds,
+                                            batch_index=review_index,
+                                            category="transport",
+                                            reason=str(exc),
+                                        )
+                                    )
+                                    return 0, [f"高级校对复校请求失败，保留主翻译候选: {exc}"]
+                                finally:
+                                    if review_refresher is not None:
+                                        review_refresher.stop()
+                                    with review_lock:
+                                        review_inflight["active"] -= 1
+                                bindings: Dict[Tuple[str, int], Dict[str, Any]] = {}
+                                for subject_entry in group.subjects:
+                                    bindings.update(subject_entry.bindings)
+                                fatal, corrections = _parse_review_response(response.text, bindings)
+                                if fatal is not None:
+                                    _emit(
+                                        retry_event(
+                                            round_index=summary.rounds,
+                                            batch_index=review_index,
+                                            category="business",
+                                            reason=fatal,
+                                        )
+                                    )
+                                    return 0, [f"高级校对复校响应被拒（保留主翻译候选）: {fatal}"]
+                                # 应用前重确认取消（spec「停止全路径」：请求返回后、
+                                # 校对应用前重新确认——取消竞态下迟到校订不得写回）。
+                                _raise_if_cancelled()
+                                applied, _missing, warnings = _apply_review_corrections(
+                                    state, cfg, layout, group.subjects, corrections
+                                )
+                                return applied, warnings
+
+                            review_futures.append(review_executor.submit(_run_review))
+
+                # 归并搬到完成回调（票 05）：主修复响应一到达即归并该批并
+                # 派生校对请求（重叠执行）；返回值固定批序仍供异常/观测路径。
+                # review executor 在取消 / 异常路径也必须有界关闭（spec：
+                # 残留回调不得继续调度或写回字幕）。取消路径置 stop gate：
+                # 未发送的校对不再发出（gate 检查），在途校对由网关取消通道
+                # 尽快解除；shutdown 等待的就是这些已发出请求的自然结束
+                # （有界：max_workers 个在途 × 网关总预算上界）。
+                try:
+                    _dispatch_ordered(
+                        len(ordered_batches),
+                        _send,
+                        window=window,
+                        cancelled=cancelled,
+                        on_merged=_merge_batch,
+                    )
+                    # 在途观测是发出层口径（含瞬时缓存命中）；真实 adapter 在途由
+                    # 传输探针口径覆盖（spec：缓存命中不冒充模型吞吐）。
+                    summary.max_inflight = max(summary.max_inflight, inflight_state["max"])
+                    # 轮末聚合（票 05）：等待本轮全部批量校对请求（提交序聚合，
+                    # 应用段可交换——对象引用定位，完成顺序不影响最终字幕）。
+                    for future in review_futures:
+                        applied, review_warnings = future.result()
+                        summary.review_corrections += applied
+                        summary.warnings.extend(
+                            warning
+                            for warning in review_warnings
+                            if warning not in summary.warnings
+                        )
+                    review_futures.clear()
+                except BaseException:
+                    # 取消 / 异常路径（票 06）：停止被接受 → 未发校对不再发；
+                    # 已提交的 future 逐个聚合（丢弃迟到校订写回的机会——
+                    # _run_review 应用前重确认取消，迟到结果无副作用），再关闭。
+                    review_stop_gate.set()
+                    for future in review_futures:
+                        try:
+                            future.result()
+                        except Exception:  # noqa: BLE001 —— 取消路径的迟到结果不写回（含 InterruptedError）
+                            continue
+                    raise
+                finally:
+                    if review_executor is not None:
+                        review_executor.shutdown(wait=True)
+                if round_accepted:
+                    transport_streak = 0
+                elif round_transport_failed:
+                    transport_streak += 1
+                    if transport_streak >= MAX_TRANSPORT_FAILURE_ROUNDS:
+                        summary.warnings.append("观看问题修复连续传输失败，已停止修复循环")
+                        break
+
+        except InterruptedError:
+            # 取消终态事件（票 07）：停止被接受时恰发一次（进度不复活）；
+            # 已进行口径用当前累计值——取消后不再有轮次 / 归并推进。
+            _emit(
+                terminal_event(
+                    status="cancelled",
+                    counts={
+                        "rounds": summary.rounds,
+                        "requests": summary.requests,
+                        "resolved": len(accepted),
+                    },
+                )
+            )
+            raise
     summary.resolved_problem_count = len(accepted)
     repaired = state.as_data()
     # 终态以交付字幕上的重新扫描为准（D27）：回退区域保持未解决，不记为通过。
@@ -1792,6 +1923,20 @@ def execute_viewing_repair(
     report.segment_count = len(repaired.segments)
     if summary.rounds >= MAX_ROUNDS:
         summary.warnings.append("观看问题修复达到轮数上界，提前停止")
+    # 终态事件（票 07）：成功 / 失败均有明确终态；取消路径在 except
+    # 外层发（本函数不吞取消——InterruptedError 上抛由 runner 收尾）。
+    _emit(
+        terminal_event(
+            status="completed",
+            counts={
+                "rounds": summary.rounds,
+                "requests": summary.requests,
+                "resolved": summary.resolved_problem_count,
+                "unresolved": len(report.unresolved_viewing_problems()),
+                "rollbacks": len(summary.rollbacks),
+            },
+        )
+    )
     logger.info(
         "观看问题修复：%d 轮 / %d 次请求，解决 %d 个问题，回退 %d 区域，容量不足 %d 主体",
         summary.rounds,

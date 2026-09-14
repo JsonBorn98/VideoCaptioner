@@ -193,8 +193,9 @@ def test_cache_hit_logs_entry_without_usage_or_attempt(
     gateway.complete(profile, request)
 
     entries = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
-    assert len(entries) == 2
-    hit = entries[1]
+    # Ticket 07：首行是尝试前的 started 行；终态行 = success + cache_hit。
+    assert [entry["status"] for entry in entries] == ["started", "success", "cache_hit"]
+    hit = entries[2]
     assert hit["status"] == "cache_hit"
     assert hit["stage"] == "translation"
     assert hit["role"] == "main"
@@ -203,7 +204,7 @@ def test_cache_hit_logs_entry_without_usage_or_attempt(
     assert "usage" not in hit
     assert "attempt" not in hit
     assert "response" not in hit
-    assert hit["request_id"] != entries[0]["request_id"]
+    assert hit["request_id"] != entries[1]["request_id"]
     assert "answer-1" not in log_path.read_text("utf-8")
 
 
@@ -221,7 +222,8 @@ def test_cache_hit_log_includes_text_when_content_logging_enabled(
     gateway.complete(profile, REQUEST)
 
     entries = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
-    hit = entries[1]
+    assert [entry["status"] for entry in entries] == ["started", "success", "cache_hit"]
+    hit = entries[2]
     assert hit["status"] == "cache_hit"
     assert hit["response"] == {"text": "answer-1"}
 

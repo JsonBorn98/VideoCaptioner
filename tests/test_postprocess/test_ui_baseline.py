@@ -10,9 +10,9 @@ AppData 由调用方隔离（子进程环境变量）；禁止真实 provider（
 守卫 + 合成 adapter）。子进程包裹限制总运行与清理。
 
 现状缺陷按 ``baseline_gaps`` 分类记录（facts，不设窄时间窗断言阻止优化票；
-取消/静默治理票落地时更新分类与门槛，数值只进验收矩阵）：
-- 停止无法抢占在途请求，终态等待在途请求自然返回（P05 取消缺口）。
-- 在途请求期间没有任何进度信号（「正在修复观看问题（第 1 轮…）」的量化）。
+票 06/07 落地后分类已翻转，数值只进验收矩阵）：
+- 停止及时抢占在途请求（票 06，≤0.30s 冻结门槛）。
+- 在途等待事件持续刷新等待时长（票 07，≤0.50s 冻结门槛）。
 硬断言只保留交付门禁：输入保护、停止不交付部分成果、活动字幕回退初版、
 下游阻断、线程退出、终态信号正确、无 watchdog/错误泄漏。
 """
@@ -137,11 +137,11 @@ def test_stop_during_first_main_repair_measures_gui_silence_and_cancel_wait(tmp_
     assert report["gateway"]["requests_main"] == 1
     assert report["gateway"]["requests_review"] == 0
 
-    # 现状缺陷分类已在票 06 落地后翻转：在途停止及时抢占（≤0.30s 冻结门槛）。
-    # 「请求期间无进度信号」仍是现状缺口（进度静默治理属票 07 范围）。
+    # 缺陷分类已在票 06/07 落地后翻转：停止及时抢占（≤0.30s 冻结门槛），
+    # 在途等待事件持续刷新（≤0.50s 冻结门槛）。
     gaps = report["baseline_gaps"]
     assert not any("preempt" in gap for gap in gaps)  # 票 06：停止及时抢占在途请求
-    assert any("in flight" in gap for gap in gaps)  # 请求期间无进度信号（现状，票 07）
+    assert not any("in flight" in gap for gap in gaps)  # 票 07：等待事件刷新静默缺口关闭
     timeline = report["timeline"]
     assert timeline["stop_during_inflight"] is True
     assert timeline["inflight_role"] == "main"
@@ -168,10 +168,17 @@ def test_stop_during_first_main_repair_measures_gui_silence_and_cancel_wait(tmp_
     assert gui["heartbeat"]["median_s"] is not None
     assert gui["heartbeat"]["median_ms"] < 60
     assert gui["heartbeat"]["max_ms"] < 600
-    assert gui["silent_during_inflight_request"] is True  # 现状缺陷分类来源
+    # 票 07 口径：本探针是立即停止场景（barrier → stop 毫秒级），
+    # 等待刷新窗口尚未打开就被取消关闭——无等待事件是取消正确性。
+    # 「窗口内持续刷新 ≤0.50s」门槛由 test_progress_diagnostics 的
+    # 0.8s 受控延迟探针验证（不缩短延迟伪造达标）。
+    assert gui["waiting_event_count"] >= 0  # 立即停止：允许 0（窗口未开）
+    assert gui["waiting_refresh_max_gap_s"] is None or (
+        gui["waiting_refresh_max_gap_s"] <= 0.50
+    )
     assert gui["last_emission_to_terminal_s"] is not None
     assert gui["delivery_max_latency_ms"] is not None
-    # 静默集中在模型请求窗口，而不是本地阶段（请求窗口 >= 1s 对照刷新目标）。
+    # 刷新窗口覆盖受控请求（请求窗口 >= 1s 对照刷新目标）。
     assert report["controlled_response"]["main_delay"] >= 1.0
     assert gui["progress_max_gap_s"] is not None
     # progress 事件时间相对任务起点，不是 perf_counter 绝对值。

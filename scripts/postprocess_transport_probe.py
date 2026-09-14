@@ -175,10 +175,7 @@ class LoopbackProbeService:
                 # hold: wait for the explicit release, bounded by the cap.
                 with owner._lock:
                     owner._hold_added.notify_all()
-                    while (
-                        not owner._released
-                        and time.perf_counter() - began < HOLD_RELEASE_CAP
-                    ):
+                    while not owner._released and time.perf_counter() - began < HOLD_RELEASE_CAP:
                         owner._hold_added.wait(timeout=0.05)
                     natural = not owner._released
                 body = json.dumps(_completion_body("probe-ok")).encode("utf-8")
@@ -361,8 +358,7 @@ def _read_adapter_attempt_log(stage_nonce: str) -> tuple[list[dict], str | None]
     log_file = APPDATA_PATH / "logs" / "llm_requests.jsonl"
     if not log_file.exists():
         return [], (
-            f"gateway request log missing at {log_file}; refusing to fake zero "
-            "adapter attempts"
+            f"gateway request log missing at {log_file}; refusing to fake zero adapter attempts"
         )
     entries = []
     try:
@@ -375,6 +371,11 @@ def _read_adapter_attempt_log(stage_nonce: str) -> tuple[list[dict], str | None]
         except json.JSONDecodeError:
             continue  # a torn line from a concurrent write, not a missing log
         if entry.get("stage") != stage_nonce:
+            continue
+        # Ticket 07 additionally writes a status="started" row per attempt at
+        # begin time (identifiable open requests after an abrupt exit); one
+        # line per ``adapter.complete`` call stays the terminal-state rows.
+        if entry.get("status") == "started":
             continue
         error = entry.get("error") or {}
         entries.append(
@@ -436,7 +437,9 @@ def _baseline_gaps(report: dict) -> list[str]:
     late = [
         entry
         for entry in requests
-        if entry["outcome"] == "success" and cancel_at is not None and entry["ended_at_s"] > cancel_at
+        if entry["outcome"] == "success"
+        and cancel_at is not None
+        and entry["ended_at_s"] > cancel_at
     ]
     if late:
         gaps.append(
@@ -586,9 +589,7 @@ def run_probe(kind: str) -> dict:
             observed = service.wait_for_attempts(plan["entry_attempts"])
             entry_evidence.update(
                 entry_observed=observed >= (plan["entry_attempts"] or 0),
-                entry_condition=(
-                    f"server saw {plan['entry_attempts']} in-flight HTTP attempts"
-                ),
+                entry_condition=(f"server saw {plan['entry_attempts']} in-flight HTTP attempts"),
                 http_attempts_at_entry=observed,
             )
             if service.first_attempt_started_raw() is not None:

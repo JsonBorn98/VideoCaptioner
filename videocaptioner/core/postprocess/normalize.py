@@ -102,7 +102,7 @@ def normalize_quotes(text: str, state: QuoteState) -> Tuple[str, int]:
 def _trim_weak_trailing_line(text: str) -> Tuple[str, int]:
     """处理单行行尾：先剥闭合符，循环删弱标点（遇强标点停止），再拼回闭合符。"""
     stripped_right = len(text) - len(text.rstrip())
-    suffix = text[len(text) - stripped_right:] if stripped_right else ""
+    suffix = text[len(text) - stripped_right :] if stripped_right else ""
     core = text[: len(text) - stripped_right] if stripped_right else text
     changed = 0
 
@@ -164,11 +164,7 @@ def normalize_segments(
             ("text", text_quote_state),
             ("translated_text", trans_quote_state),
         ]
-        if (
-            primary_side_only
-            and seg.text.strip()
-            and seg.translated_text.strip()
-        ):
+        if primary_side_only and seg.text.strip() and seg.translated_text.strip():
             if cfg.speed_primary == "original":
                 fields_to_process = [("text", text_quote_state)]
             elif cfg.speed_primary == "translate":

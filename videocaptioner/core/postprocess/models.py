@@ -61,9 +61,7 @@ class PostprocessTask:
     thread_num: Optional[int] = None
     # 任务开始时冻结的翻译执行快照（票 06，D15）：完整 workflow 由调用方
     # 冻结注入；独立任务由 runner 从验证过的过程资产重建身份快照。
-    translation_snapshot: Optional["TranslationExecutionSnapshot"] = field(
-        default=None, repr=False
-    )
+    translation_snapshot: Optional["TranslationExecutionSnapshot"] = field(default=None, repr=False)
     subtitle_fingerprint: str = ""
     explicit_assets: dict[str, str] = field(default_factory=dict)
     asset_discovery: Optional["ProcessAssetDiscovery"] = field(default=None, repr=False)
@@ -91,9 +89,7 @@ class PostprocessTask:
         self.initial_subtitle_path = self.initial_subtitle_path or self.source_subtitle_path
         self.active_subtitle_path = self.active_subtitle_path or self.initial_subtitle_path
 
-    def bind_translation_snapshot(
-        self, snapshot: Optional["TranslationExecutionSnapshot"]
-    ) -> None:
+    def bind_translation_snapshot(self, snapshot: Optional["TranslationExecutionSnapshot"]) -> None:
         """绑定任务开始时冻结的翻译执行快照（票 06，D15）。
 
         统一各适配层的赋值口径：快照与其翻译方式一起绑定；空快照

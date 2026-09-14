@@ -97,17 +97,13 @@ def run_normalize_stage(
     try:
         from .normalize import normalize_segments
 
-        asr_data, report = normalize_segments(
-            asr_data, cfg, report, layout, primary_side_only
-        )
+        asr_data, report = normalize_segments(asr_data, cfg, report, layout, primary_side_only)
     except Exception as exc:  # noqa: BLE001
         logger.warning("文本规范化失败，已跳过: %s", exc)
     quote_delta = _stage_changed(report, "normalize_quotes") - before_quotes
     trim_delta = _stage_changed(report, "trim_trailing") - before_trim
     if quote_delta or trim_delta:
-        logger.info(
-            "文本规范化：引号 %d 处 / 弱尾标点 %d 处", quote_delta, trim_delta
-        )
+        logger.info("文本规范化：引号 %d 处 / 弱尾标点 %d 处", quote_delta, trim_delta)
     return asr_data, report
 
 
