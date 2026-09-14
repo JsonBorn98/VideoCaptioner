@@ -130,7 +130,7 @@ Qt 信号最大送达延迟 **1.340ms**，事件循环最大心跳间隔 **43.53
 
 ## 验证范围声明
 
-本票传输探针不覆盖缓慢分段响应/5xx，后续传输取消票仍需补充；没有修改实际页面控件，本票不代表已完成 GUI 呈现验收。
+本票传输探针不覆盖缓慢分段响应/5xx，后续传输取消票仍需补充；没有修改实际页面控件，本票不代表已完成 GUI 呈现验收。**（2026-09-14 票 06 更新：缓慢分段响应与 5xx 已由 `tests/test_postprocess/test_bounded_waits_cancellation.py` 补齐——慢分段中途取消与 500 网关退避接管均有真实 loopback 传输测试；Anthropic Messages / Gemini 传输（requests.Session）的在途取消为尽力语义＝请求超时窗口上界，任务级请求中断通道已在 OpenAI-compatible 传输（openai SDK）落地，requests 传输靠排队/退避取消与超时兜底。）CLI 独立 postprocess 的停止边界是进程级 KeyboardInterrupt（退出码 130），核心 `cancelled` 通道由 GUI 线程（Qt interruption）与编程调用方接线。
 
 **未执行真实模型质量或性能验证。** 真实小样本需另行确认样本范围与费用上限；不默认重跑整片。本基准未读取或发布 DHH 正文。DHH 仅是本地可选输入，本公共基准不依赖其存在。
 

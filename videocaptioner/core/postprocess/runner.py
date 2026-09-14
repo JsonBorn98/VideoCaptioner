@@ -524,7 +524,7 @@ def run_postprocess_task(
         # 一次明确的取消检查点；检查后的写入不再被追溯（终态竞争规则：
         # 交付提交后到达的停止按已完成的取消请求处理，不伪装成取消成功）。
         if cancelled is not None and cancelled():
-            raise InterruptedError("LLM request cancelled")
+            raise InterruptedError("postprocess delivery cancelled")
         output = Path(task.postprocessed_subtitle_path or task.default_output_path()).with_suffix(
             ".srt"
         )

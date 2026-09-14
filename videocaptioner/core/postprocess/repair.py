@@ -1770,7 +1770,7 @@ def execute_viewing_repair(
                 for future in review_futures:
                     try:
                         future.result()
-                    except (InterruptedError, Exception):  # noqa: BLE001 —— 取消路径的迟到结果不写回
+                    except Exception:  # noqa: BLE001 —— 取消路径的迟到结果不写回（含 InterruptedError）
                         continue
                 raise
             finally:

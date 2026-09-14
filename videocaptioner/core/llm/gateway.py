@@ -42,24 +42,30 @@ _shared_response_cache = GatewayResponseCache()
 # 一次逻辑请求排队等待的总预算内，信号量轮询的粒度（秒）。取停止响应
 # 门槛 0.30s 的 1/10：排队取消在门槛内可见（票 06）。
 _GATE_POLL_SECONDS = 0.03
+# 排队分项耗时的记录阈值（秒）：超过才写 INFO 行（分项耗时口径见
+# complete 内注释；频繁短排队不逐条刷日志）。
+_QUEUE_WAIT_LOG_SECONDS = 0.05
 
 
 def _derived_deadline_seconds(max_attempts: int, attempt_window: float) -> float:
     """Derive the total wait budget for one logical request (票 06).
 
-    覆盖排队 + 传输尝试 + 重试退避（spec：网络分阶段 timeout 不替代
-    端到端期限）：每次尝试给满缩放后的网络窗口，每次重试额外给指数
-    退避的结构上界（与 ``complete`` 的 ``min(30, 2**(n-1))`` 同型，
-    含抖动余量）。数值是结构推导的上界，不是承诺的完成时限。
+    覆盖传输尝试 + 重试退避（spec：网络分阶段 timeout 不替代端到端
+    期限）：每次尝试给满缩放后的网络窗口，每次重试给指数退避的结构
+    上界——与 ``complete`` 的 ``min(30, 2**(n-1))`` 同型，抖动因子
+    0.75–1.25 取上界 1.25。数值是结构推导的上界，不是承诺的完成时限。
+    排队窗口不在这里：信号量等待单独由 ``_cancellable_acquire`` 的
+    ``_GATE_QUEUE_RESERVE_SECONDS`` 附加窗口界定。
     """
     total = float(attempt_window) * max_attempts
     backoff = 0.0
     for attempt in range(1, max_attempts + 1):
         backoff += min(30.0, 2 ** (attempt - 1))
-    return total + backoff * 1.0 + _GATE_QUEUE_RESERVE_SECONDS
+    return total + backoff * 1.25
 
 
-# 排队预算的固定预留（秒）：信号量等待不占尝试窗口，但必须有界。
+# 排队预算的固定附加窗口（秒）：信号量等待是总预算之外单独有界的窗口
+# （spec「有限等待」：排队不吃满传输尝试窗口，但仍有自己的上界）。
 _GATE_QUEUE_RESERVE_SECONDS = 30.0
 
 
@@ -240,9 +246,21 @@ class LLMGateway:
             if _remaining() <= 0:
                 raise _deadline_exceeded(profile, attempt, deadline_seconds)
             try:
+                queue_started = time.perf_counter()
                 with _cancellable_acquire(
                     semaphore, cancelled, _remaining()
                 ) as acquired:
+                    # 排队分项耗时（票 06 验收 2「记录分项耗时」）：
+                    # 排队 / 传输 / 退避三段里，传输在请求日志 duration_ms，
+                    # 退避在下方 warning 行，排队在这里——都不进内容日志。
+                    queue_waited = time.perf_counter() - queue_started
+                    if queue_waited > _QUEUE_WAIT_LOG_SECONDS:
+                        logger.info(
+                            "LLM gate queue wait for profile %s (attempt %s): %.3fs",
+                            profile.name,
+                            attempt,
+                            queue_waited,
+                        )
                     if not acquired:
                         _raise_if_cancelled()
                         raise _deadline_exceeded(profile, attempt, deadline_seconds)
@@ -288,8 +306,6 @@ class LLMGateway:
                     attempt_limit = max_attempts
                 if not exc.retryable or attempt >= attempt_limit:
                     raise
-                if attempt + 1 > max_attempts:
-                    raise
                 backoff = min(30.0, 2 ** (attempt - 1)) * (
                     0.75 + self._random() * 0.5
                 )
@@ -316,7 +332,7 @@ class LLMGateway:
                     requested,
                     exc,
                 )
-                self._cancellable_sleep(requested, cancelled, _remaining)
+                self._cancellable_sleep(requested, cancelled)
         assert last_error is not None
         raise last_error
 
@@ -334,7 +350,6 @@ class LLMGateway:
         self,
         seconds: float,
         cancelled: Optional[Callable[[], bool]],
-        remaining: Callable[[], float],
     ) -> None:
         """可取消、有界的退避等待（票 06：不在 sleep 前后检查了事）。
 
@@ -343,9 +358,7 @@ class LLMGateway:
         等待本身放在后台线程，调用线程以 ``_GATE_POLL_SECONDS`` 轮询
         取消——置位即立刻返回，sleeper 线程按原时长在后台自然结束
         （每次退避至多遗留一个 daemon 计时线程，``max_attempts`` 有界）。
-        ``remaining`` 只作预算口径记录；耗尽由下一轮尝试前的显式判定处理。
         """
-        del remaining
         if cancelled is None:
             self._sleep(seconds)
             return

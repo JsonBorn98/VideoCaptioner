@@ -139,7 +139,11 @@ def _problem_pairs(count: int, spacing: int = 2) -> list[tuple[str, str]]:
 
 
 class _HoldService:
-    """Loopback 服务：hold 模式挂起响应直到 release；reject 模式回 429。"""
+    """Loopback 服务：hold / reject(429+Retry-After) / server_error(5xx) / slow_chunks。
+
+    slow_chunks 模式按 ``chunk_delays`` 逐段写出正文（每段间真实停顿），
+    用于验证取消落在分段响应中途时请求级通道能解除在途读。
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -147,6 +151,7 @@ class _HoldService:
         self.attempts: list[dict] = []
         self.mode = "hold"
         self.retry_after: str | None = None
+        self.chunk_delays: list[float] = [0.4, 0.4, 0.4]
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -168,9 +173,12 @@ class _HoldService:
                     )
                     self._write(429, body, headers)
                     return
-                deadline = time.perf_counter() + 8.0
-                while not owner._released.is_set() and time.perf_counter() < deadline:
-                    time.sleep(0.02)
+                if owner.mode == "server_error":
+                    body = json.dumps(
+                        {"error": {"message": "internal provider error"}}
+                    ).encode()
+                    self._write(500, body, {})
+                    return
                 body = json.dumps(
                     {
                         "id": "x",
@@ -186,6 +194,26 @@ class _HoldService:
                         ],
                     }
                 ).encode()
+                if owner.mode == "slow_chunks":
+                    # 分段响应：headers 先行，正文按段间真实延迟逐块写出。
+                    # 取消 mid-body 时客户端关 socket，write 抛 OSError 即可。
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Connection", "close")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    for index, delay in enumerate(owner.chunk_delays):
+                        piece = body[index : index + 1] or body[:1]
+                        time.sleep(delay)
+                        try:
+                            self.wfile.write(piece)
+                            self.wfile.flush()
+                        except OSError:
+                            return  # 客户端已取消并关闭 socket
+                    return
+                deadline = time.perf_counter() + 8.0
+                while not owner._released.is_set() and time.perf_counter() < deadline:
+                    time.sleep(0.02)
                 self._write(200, body, {})
 
             def _write(self, status: int, body: bytes, headers: dict) -> None:
@@ -240,12 +268,13 @@ def _service_profile(service: _HoldService, profile_id: str, **overrides) -> LLM
     )
 
 
-def test_cancellable_semaphare_queue_stops_within_gate(tmp_path):
+def test_cancellable_semaphore_queue_stops_within_gate():
     """排队获取并发槽响应取消：gate=2 / 4 逻辑请求，未发的 2 个及时退出。
 
     真实 ``LLMGateway``（默认 adapter 工厂 → openai SDK → loopback），
-    两个在途请求被 hold；取消置位后排队等待的请求在 0.30s 门槛内
-    以 InterruptedError 结束，不发任何新 HTTP（尝试数不变）。
+    两个在途请求被 hold；取消置位后排队等待的请求及时以 InterruptedError
+    结束，不发任何新 HTTP（尝试数不变）。停止响应上限取 3× 冻结门槛
+    0.30s（并发线程调度余量），探针实测口径仍以 ≤0.30s 为准。
     """
     service = _HoldService()
     try:
@@ -444,6 +473,98 @@ def test_backoff_wait_is_cancellable_and_retry_after_bounds():
     finally:
         service2.close()
         gateway2.close()
+
+
+def test_server_error_surfaces_as_transient_with_no_sdk_retry():
+    """服务端 5xx：SDK 不隐式重试，网关按退避接管并计入可见尝试数。
+
+    ticket 验收 3 的「服务端错误」：500 由 adapter 映射为可重试传输错误
+    （既有映射），``max_retries=0`` 后不再由 SDK 乘出额外 HTTP——
+    1 次 adapter 尝试 = 1 次 HTTP，退避由网关 ``self._sleep`` 通道执行。
+    """
+    service = _HoldService()
+    sleeps: list[float] = []
+
+    def observed_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        time.sleep(seconds)
+
+    gateway = LLMGateway(sleep=observed_sleep, random_source=lambda: 0.5)
+    try:
+        service.mode = "server_error"
+        profile = _service_profile(service, "server-error")
+        with pytest.raises(LLMCallError) as raised:
+            gateway.complete(
+                profile,
+                LLMRequest(
+                    messages=(LLMMessage("user", "server-error"),),
+                    metadata={"stage": "server-error", "role": "utility"},
+                    timeout=10.0,
+                ),
+                max_attempts=2,
+                use_cache=False,
+            )
+        assert raised.value.category.value == "transient"
+        assert raised.value.attempts == 2  # max_attempts 内网关重试可见
+        # SDK 零隐式重试：网关 2 次尝试 = 恰 2 次 HTTP。
+        with service._lock:
+            assert len(service.attempts) == 2
+        # 网关退避真实发生（1 次尝试间退避，注入通道可观测）。
+        assert sleeps == [1.0]
+    finally:
+        service.close()
+        gateway.close()
+
+
+def test_slow_chunked_response_cancel_mid_body_stops_within_gate():
+    """慢分段响应中途取消：请求级通道解除在途读，不等剩余分段。
+
+    ticket 验收 3 的「慢分段响应」：服务端按段间真实延迟逐块写出正文；
+    取消落在分段中途时 adapter 关闭该请求独享 client，在途读即时解除。
+    """
+    service = _HoldService()
+    service.mode = "slow_chunks"
+    service.chunk_delays = [0.4, 0.8, 0.8]
+    gateway = LLMGateway(sleep=time.sleep, random_source=lambda: 0.5)
+    try:
+        profile = _service_profile(service, "slow-chunks")
+        cancel = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def worker() -> None:
+            try:
+                gateway.complete(
+                    profile,
+                    LLMRequest(
+                        messages=(LLMMessage("user", "slow-chunks"),),
+                        metadata={"stage": "slow-chunks", "role": "utility"},
+                        timeout=30.0,
+                    ),
+                    cancelled=cancel.is_set,
+                    use_cache=False,
+                )
+                outcome["result"] = "success"
+            except InterruptedError:
+                outcome["result"] = "interrupted"
+            except LLMCallError as exc:
+                outcome["result"] = f"transport:{exc.category.value}"
+            outcome["ended_at"] = time.perf_counter()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        assert service.wait_attempts(1) == 1
+        # 等第一段写出后（正文已开始流动）再取消：落在分段响应中途。
+        time.sleep(0.55)
+        cancel_at = time.perf_counter()
+        cancel.set()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive(), "slow-chunk worker did not exit"
+        # 取消解除 mid-body 读：不等于等剩余分段（第 2+3 段共 1.6s）。
+        assert time.perf_counter() - cancel_at <= STOP_RESPONSIVENESS_GATE_SECONDS
+        assert outcome["result"] in {"interrupted", "transport:transient"}, outcome
+    finally:
+        service.close()
+        gateway.close()
 
 
 def test_total_budget_bounds_queue_transport_and_backoff():

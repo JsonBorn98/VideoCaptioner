@@ -44,7 +44,8 @@ StructuredChatStrategy = Literal["json_schema", "tool", "json_object"]
 DEFAULT_TIMEOUT_SECONDS = 120.0
 TIMEOUT_SECONDS_PER_OUTPUT_TOKEN = 0.015
 # 取消路径的 worker join 上界（秒）：close() 后在读阻塞上多等的兜底窗口，
-# 超出即按可重试传输错误上抛（有界清理，票 06）。
+# 超出即不等 worker 收尾、按可重试传输错误上抛（有界清理，票 06；
+# worker 是 daemon 线程，随请求超时自然终止，不阻塞调用方）。
 _CANCEL_JOIN_SECONDS = 5.0
 
 
@@ -176,11 +177,9 @@ def _run_with_cancel_watchdog(
     worker.join(_CANCEL_JOIN_SECONDS)
     watchdog.join()
     if not done.is_set():
-        # close() 未能解除本次读阻塞（网络栈异常路径）：按可重试传输错误
-        # 上抛，交回网关重试预算 / 取消边界处理，不无限挂住调用方。
-        worker.join()
-        if outcome["raised"]:
-            raise outcome["error"]
+        # close() 未能解除本次读阻塞（网络栈异常路径）：不等 worker 收尾
+        # （worker 是 daemon 线程，随请求超时自然终止），立即按可重试
+        # 传输错误上抛，交回网关重试预算 / 取消边界——有界清理不挂调用方。
         raise LLMCallError(
             "LLM request did not unblock after the cancellation close",
             category=LLMErrorCategory.TRANSIENT,
