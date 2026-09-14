@@ -204,11 +204,14 @@ def test_same_round_batches_share_one_round_snapshot():
 
 
 def test_review_reads_round_base_not_neighbor_merge():
-    """高级校对边界上下文 = 本轮底稿（轮次快照），不含同轮邻主体的归并结果。
+    """高级校对边界上下文以轮次快照为底，同批主体叠加本次候选（票 05）。
 
-    同轮两主体（段 0 低、段 3 高）按固定段序归并：高段序主体先拼接。
-    低段序主体的高级校对复校在拼接后执行，其下文边界上下文若读活
-    state，会看到高段序主体的拆分碎片；快照语义下必须仍是初版段 3。
+    同轮两主体（段 0 低、段 3 高）合并进同一次批量复校请求（票 05：
+    容量允许时多主体共同校对）：段 3 主体的上文窗口含段 0——段 0 已
+    拼接，同批语义下是其候选叠加（「校后」三片）；段 0 主体之外、
+    未进入本批的段 2 保持轮次快照初版。若窗口读的是跨批邻批的归并
+    结果（完成顺序依赖），不同完成顺序会产生不同上下文——稳定分组
+    下本请求上下文与完成顺序无关（批内主体在请求构造前已全部归并）。
     """
     data = _data(
         ("超长" * 30, "甲短"),  # 主体 A（低段序）
@@ -229,22 +232,25 @@ def test_review_reads_round_base_not_neighbor_merge():
     assert summary is not None
     assert summary.flow_mode == "main_review"
     reviews = gateway.review_payloads()
-    assert len(reviews) == 2  # 同轮两主体各复校一次
-    # 高段序主体（段 3）的复校：上文覆盖段 0-2（底稿初版）。
-    high = next(r for r in reviews if any(seg["id"] == 3 for s in r["review_subjects"] for seg in s["segments"]))
-    high_context = {entry["id"]: entry["translated"] for entry in high["boundary_context"]}
-    assert high_context[0] == "甲短"
-    # 低段序主体（段 0）的复校：下文覆盖段 1-3。段 3 必须是轮次快照的
-    # 初版「乙短」，不是高段序主体已归并的拆分碎片（译文「校后」）。
-    low = next(r for r in reviews if any(seg["id"] == 0 for s in r["review_subjects"] for seg in s["segments"]))
-    low_context = {entry["id"]: entry["translated"] for entry in low["boundary_context"]}
-    assert 3 in low_context
-    assert low_context[3] == "乙短"
+    # 票 05 批量化：单主修复批 → 同轮两主体进同一校对请求（1 < 2）。
+    assert len(reviews) == 1
+    assert len(reviews[0]["review_subjects"]) == 2  # 两主体共同校对
+    # 复校上下文窗口（ADR-0021 轮次快照为底 + 同批主体候选叠加）：
+    # 段 0/段 3 是本批主体区间（候选叠加视图），段 1-2 保持快照初版。
+    context_by_first = {}
+    for entry in reviews[0]["boundary_context"]:
+        context_by_first.setdefault(entry["id"], entry["translated"])
+    assert context_by_first[0] != "甲短"  # 段 0 已拼接：同批候选叠加视图
+    assert context_by_first[1] == "正常一译"  # 未进本批：轮次快照初版
+    assert context_by_first[2] == "正常二译"  # 未进本批：轮次快照初版
+    assert context_by_first[3] != "乙短"  # 段 3 已拼接：同批候选叠加视图
     # 复校校订实际应用：拆分片段译文为「校后」，未修主体保持原译文。
     assert all("超长" in s.text and s.translated_text == "校后" for s in repaired.segments[:3])
     assert [s.translated_text for s in repaired.segments[3:5]] == ["正常一译", "正常二译"]
     assert all("超长" in s.text and s.translated_text == "校后" for s in repaired.segments[5:])
     assert summary.review_corrections == 6
+    assert summary.review_requests == 1
+    assert summary.review_planned_subjects == 2
     assert not report.unresolved_viewing_problems()
 
 

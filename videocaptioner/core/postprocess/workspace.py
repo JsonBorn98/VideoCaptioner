@@ -517,6 +517,13 @@ def build_postprocess_state_payload(
                 "concurrency_gate": repair.concurrency_gate,
                 "effective_concurrency": repair.effective_concurrency,
                 "max_inflight": repair.max_inflight,
+                # 批量校对观测（票 05）：请求数 / 主体覆盖与容量口径进入
+                # 状态载荷（受控组批观察，不声称真实模型吞吐证据）。
+                "review_requests": repair.review_requests,
+                "review_planned_requests": repair.review_planned_requests,
+                "review_planned_subjects": repair.review_planned_subjects,
+                "review_corrections": repair.review_corrections,
+                "review_unplannable_subjects": repair.review_unplannable_subjects,
             }
         ),
         "precise_timing_outcome": precise_timing_outcome,

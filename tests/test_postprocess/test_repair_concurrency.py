@@ -379,8 +379,14 @@ def test_profile_clamp_lowers_window():
     # 3 批两滑动窗（10+10 主体 / 2 主体）：全部请求经屏障成对重叠。
     assert summary.requests == 3
     assert not report.unresolved_viewing_problems()
-    # 复校与主修复同 profile 闸：复校请求数 = 主体数（每主体一次，票 05 前保持）。
-    assert len(gateway.review_requests) == 22
+    # 票 05 批量化：每个主修复批一次批量校对请求（3 批 → 3 请求，
+    # 主体覆盖 22/22——逐主体 22 次已组批）。
+    assert len(gateway.review_requests) == 3
+    assert sum(
+        len(subject["segments"])
+        for request in gateway.review_requests
+        for subject in request["review_subjects"]
+    ) == 22
 
 
 def test_higher_thread_num_does_not_exceed_profile_clamp():
@@ -747,7 +753,8 @@ def test_warm_cache_real_gateway_zero_attempts(tmp_path):
         repaired_cold, report_cold = run_once()
         assert not report_cold.unresolved_viewing_problems()
         assert adapter_attempts["main"] == 2  # 冷：2 批真实 adapter 调用
-        assert adapter_attempts["review"] == 12
+        # 票 05 批量化：12 主体按批组校对（2 批 → 2 请求，非逐主体 12 次）。
+        assert adapter_attempts["review"] == 2
 
         repaired_warm, report_warm = run_once()
         summary = report_warm.viewing_repair
@@ -755,7 +762,7 @@ def test_warm_cache_real_gateway_zero_attempts(tmp_path):
         # 暖：logical 请求照常发生（请求计数进 summary），但零新增 adapter 尝试。
         assert summary.requests >= 2
         assert adapter_attempts["main"] == 2  # 无新增
-        assert adapter_attempts["review"] == 12  # 无新增
+        assert adapter_attempts["review"] == 2  # 无新增（票 05 组批后 2 请求）
         # 缓存命中复跑产生逐段一致的修复结果（确定性归并对缓存命中同样成立）。
         a = [
             (s.text, s.start_time, s.end_time, s.translated_text)

@@ -41,7 +41,7 @@ def test_warm_cache_is_reported_separately_from_real_attempts(tmp_path):
     assert report["requests"]["main"]["logical"] == 4
     assert report["requests"]["main"]["attempts"] == 0
     assert report["requests"]["main"]["cache_hits"] == 4
-    assert report["requests"]["review"]["cache_hits"] == 40
+    assert report["requests"]["review"]["cache_hits"] == 4  # 票 05：组批后 4 请求
     assert report["outcome"]["unresolved"] == 0
     assert report["measurements"]["max_inflight"] == 0
 
@@ -64,7 +64,7 @@ def test_complete_baseline_preserves_source_and_covers_every_review_subject(tmp_
     assert report["outcome"]["source_unchanged"] is True
     assert report["outcome"]["unresolved"] == 0
     assert report["requests"]["main"]["logical"] == 4
-    assert report["requests"]["review"]["logical"] == 40
+    assert report["requests"]["review"]["logical"] == 4  # 票 05：40 主体组批为 4 请求
     assert report["requests"]["main"]["attempts"] == 4
     assert report["coverage"]["main_input_segments"] == 40
     assert report["coverage"]["review_input_segments"] == 40
