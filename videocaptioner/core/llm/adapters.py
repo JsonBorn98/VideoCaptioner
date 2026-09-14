@@ -47,6 +47,9 @@ TIMEOUT_SECONDS_PER_OUTPUT_TOKEN = 0.015
 # 超出即不等 worker 收尾、按可重试传输错误上抛（有界清理，票 06；
 # worker 是 daemon 线程，随请求超时自然终止，不阻塞调用方）。
 _CANCEL_JOIN_SECONDS = 5.0
+# 取消监视轮询间隔（秒）：OpenAI 适配器类常量的模块级单一来源
+# （标准轴修复：同值常量不应在各类里各留一份）。
+CANCEL_POLL_SECONDS = 0.03
 
 
 def request_timeout_seconds(
@@ -137,6 +140,7 @@ def _run_with_cancel_watchdog(
     *,
     close: Callable[[], None],
     poll_seconds: float,
+    join_seconds: float = _CANCEL_JOIN_SECONDS,
 ) -> Any:
     """Run ``call`` while a watchdog turns cancellation into a fast local stop.
 
@@ -146,6 +150,11 @@ def _run_with_cancel_watchdog(
     在途读立即以传输错误解除。``call`` 返回 / 抛出后主线程照常处理
     结果——取消时刻与返回时刻之间的竞态由调用方在应用前重确认
     （spec「停止全路径」），此处只保证等待不挂在网络上。
+    ``join_seconds`` 是 close() 后主线程等 ``call`` 解除的上界：HTTP 客户端
+    （httpx / openai SDK）close 即解除，join 立即过；``requests.Session``
+    的 close 不解除另一线程里阻塞的 read（Windows 实测：join 满 5s），
+    调用方按传输栈配短值——读未解除即按可重试传输错误上抛，阻塞读
+    线程按请求超时自然终止（daemon）。
     """
     done = threading.Event()
     outcome: dict[str, Any] = {"result": None, "error": None, "raised": False}
@@ -171,11 +180,18 @@ def _run_with_cancel_watchdog(
     watchdog = threading.Thread(target=_watch, daemon=True)
     watchdog.start()
     worker.start()
+    closed = False
     while not done.wait(poll_seconds):
-        if cancelled():
+        if cancelled() and not closed:
+            # close 恰一次；此后不等读解除（requests.Session.close
+            # 不解除另一线程里阻塞的 read——Windows 实测 done 永不置位，
+            # 主循环死等）。close 后立即跳出交 join：join 界内解除
+            # （httpx / openai SDK）正常收结果；未解除按传输错误上抛。
             close()
-    worker.join(_CANCEL_JOIN_SECONDS)
-    watchdog.join()
+            closed = True
+            break
+    worker.join(join_seconds)
+    watchdog.join(poll_seconds)
     if not done.is_set():
         # close() 未能解除本次读阻塞（网络栈异常路径）：不等 worker 收尾
         # （worker 是 daemon 线程，随请求超时自然终止），立即按可重试
@@ -188,6 +204,51 @@ def _run_with_cancel_watchdog(
     if outcome["raised"]:
         raise outcome["error"]
     return outcome["result"]
+
+
+def _post_with_cancellation(
+    session: "requests.Session",
+    cancelled: Optional[Callable[[], bool]],
+    url: str,
+    *,
+    json: dict[str, Any],
+    timeout: float,
+    headers: Optional[dict[str, str]] = None,
+    params: Optional[dict[str, Any]] = None,
+    injected: bool = False,
+) -> "requests.Response":
+    """一次 ``session.post``，尽力把在途读绑定到 ``cancelled``（票 06）。
+
+    ``requests.Session.post`` 阻塞在 socket 读上时无法从外部抢占；
+    与 OpenAI 路径同一模式（spec 决策 6：本地任务终止不依赖普通
+    网络 timeout）。``cancelled`` 缺省、或 ``injected``（调用方注入
+    会话=显式连接生命周期，测试桩 / 共享会话）时直用传入会话——
+    取消尽力语义由网关排队 / 退避取消与请求 timeout 兜底；否则为
+    本次请求开独享 ``requests.Session``，watchdog 置位即 ``close()``
+    它——在途读立即以 ``requests.ConnectionError`` / ``Timeout``
+    解除，调用方照常映射为可重试传输错误。独享会话在 ``finally``
+    关闭，不影响共享会话上的其他任务（spec：取消隔离在当前任务）。
+    """
+    if cancelled is None or injected:
+        return session.post(
+            url, json=json, timeout=timeout, headers=headers, params=params
+        )
+    per_request = requests.Session()
+    try:
+        return _run_with_cancel_watchdog(
+            lambda: per_request.post(
+                url, json=json, timeout=timeout, headers=headers, params=params
+            ),
+            cancelled,
+            close=lambda: _close_quietly(per_request),
+            poll_seconds=CANCEL_POLL_SECONDS,
+            # requests.Session.close 不解除另一线程里阻塞的 read（Windows
+            # 实测 join 满 5s）：join 上界收到轮询级，close 未解除即按
+            # 可重试传输错误上抛，阻塞读线程随请求超时自然终止（daemon）。
+            join_seconds=CANCEL_POLL_SECONDS * 3,
+        )
+    finally:
+        _close_quietly(per_request)
 
 
 def _openai_chat_usage(response: Any) -> LLMUsage:
@@ -565,8 +626,9 @@ class OpenAICompatibleAdapter(LLMAdapter):
     # 1 次 adapter 尝试 = 3 次 HTTP）。关闭之，重试完全由网关侧
     # ``max_attempts``/总预算负责（可见、可数、可取消）。
     SDK_MAX_RETRIES = 0
-    # 取消监视轮询间隔（秒）：停止响应门槛 0.30s 的 1/10，留足余量。
-    CANCEL_POLL_SECONDS = 0.03
+    # 取消监视轮询间隔（秒）：模块级 ``CANCEL_POLL_SECONDS`` 的类内别名
+    # （单一来源，Anthropic / Gemini 的取消路径共用同一值）。
+    CANCEL_POLL_SECONDS = CANCEL_POLL_SECONDS
 
     def __init__(
         self,
@@ -953,15 +1015,19 @@ class AnthropicMessagesAdapter(LLMAdapter):
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__(profile)
+        # 注入 session = 显式连接生命周期（测试桩 / 共享会话）：
+        # 不为它开请求级独享取消通道（``_post_with_cancellation``
+        # 的 ``injected`` 边界，票 06）。
+        self._injected_session = session is not None
         self.session = session or requests.Session()
         self.timeout = timeout
 
     def complete(
         self, request: LLMRequest, *, cancelled: Optional[Callable[[], bool]] = None
     ) -> LLMResult:
-        # requests.Session 无请求级抢占通道；在途等待由网关排队/退避取消
-        # 与请求超时兜底（票 06：此传输的取消尽力语义=超时窗口）。
-        del cancelled
+        # 注入 session（测试桩 / 显式生命周期）时取消尽力语义=超时窗口
+        # （``_post_with_cancellation`` 的同一边界）；共享默认会话获得
+        # 请求级在途取消通道（票 06：不依赖普通网络 timeout 兜底）。
         if request.response_schema is not None:
             self._validate_structured_output_compatibility(request)
         system_text = "\n\n".join(
@@ -1007,7 +1073,9 @@ class AnthropicMessagesAdapter(LLMAdapter):
             }
         payload = self._merge_request_options(application_body, request)
         try:
-            response = self.session.post(
+            response = _post_with_cancellation(
+                self.session,
+                cancelled,
                 _endpoint(self.profile.base_url, "/v1/messages"),
                 headers={
                     "x-api-key": self.profile.api_key,
@@ -1016,6 +1084,7 @@ class AnthropicMessagesAdapter(LLMAdapter):
                 },
                 json=payload,
                 timeout=self._effective_timeout(request),
+                injected=self._injected_session,
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise LLMCallError(
@@ -1100,6 +1169,8 @@ class GeminiAdapter(LLMAdapter):
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__(profile)
+        # 注入 session 同 Anthropic：显式生命周期不另开取消通道。
+        self._injected_session = session is not None
         self.session = session or requests.Session()
         self.timeout = timeout
         self._cache_lock = threading.Lock()
@@ -1171,9 +1242,8 @@ class GeminiAdapter(LLMAdapter):
     def complete(
         self, request: LLMRequest, *, cancelled: Optional[Callable[[], bool]] = None
     ) -> LLMResult:
-        # requests.Session 无请求级抢占通道；在途等待由网关排队/退避取消
-        # 与请求超时兜底（票 06：此传输的取消尽力语义=超时窗口）。
-        del cancelled
+        # 注入 session 时取消尽力语义=超时窗口（``_post_with_cancellation``
+        # 的同一边界）；共享默认会话获得请求级在途取消（票 06）。
         system_text = "\n\n".join(
             item.content for item in request.messages if item.role == "system"
         )
@@ -1215,11 +1285,14 @@ class GeminiAdapter(LLMAdapter):
         base = self.profile.base_url.rstrip("/")
         url = f"{base}/models/{quote(self.profile.model, safe='')}:generateContent"
         try:
-            response = self.session.post(
+            response = _post_with_cancellation(
+                self.session,
+                cancelled,
                 url,
                 params={"key": self.profile.api_key},
                 json=payload,
                 timeout=self._effective_timeout(request),
+                injected=self._injected_session,
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise LLMCallError(
@@ -1237,11 +1310,14 @@ class GeminiAdapter(LLMAdapter):
             payload.pop("cachedContent", None)
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
             try:
-                response = self.session.post(
+                response = _post_with_cancellation(
+                    self.session,
+                    cancelled,
                     url,
                     params={"key": self.profile.api_key},
                     json=payload,
                     timeout=self._effective_timeout(request),
+                    injected=self._injected_session,
                 )
             except (requests.Timeout, requests.ConnectionError) as exc:
                 raise LLMCallError(

@@ -481,6 +481,119 @@ def test_event_rendering_supports_summary_and_detail_consumers():
     assert "128" in detail  # 单次尝试窗口（等待期限）
 
 
+# ---- 交付票修复：重试次数 / 本轮实际并发 / consume_event 共享消费 ----
+
+
+def test_retry_event_carries_attempt_count():
+    """P2 修复（用户故事 28「重试次数」）：retry 事件带业务请求计数口径。
+
+    业务级拒绝可观察的不再只有原因文本：``attempt_count`` 是该批 / 该组
+    绑定问题的业务请求累计（初始提交计入，传输失败不计）。传输级仍不带
+    （传输重试归网关日志，与业务重试分开统计）。
+    """
+    business = diagnostics.retry_event(
+        round_index=2,
+        batch_index=1,
+        category="business",
+        reason="响应缺少该段输出片段",
+        attempt_count=3,
+    )
+    assert "已请求 3 次" in business["message"]
+    assert business["attempt_count"] == 3
+    transport = diagnostics.retry_event(
+        round_index=2,
+        batch_index=1,
+        category="transport",
+        reason="connection reset",
+    )
+    assert transport["attempt_count"] is None
+    assert "已请求" not in transport["message"]
+
+
+def test_round_event_carries_concurrency_gate():
+    """P5 修复（spec 决策 4「显示实际生效值」）：轮次事件带本轮实际并发。
+
+    冻结值经角色钳制后的本轮闸进轮次事件与渲染详情——前端不再只从
+    状态载荷 / 日志读实际生效值。
+    """
+    event = diagnostics.round_event(
+        round_index=2,
+        open_problems=8,
+        batches=3,
+        window=2,
+        concurrency_gate=2,
+    )
+    assert "本轮并发 2" in event["message"]
+    assert event["counts"]["concurrency_gate"] == 2
+    detail = diagnostics.render_detail(
+        {"open_problems": 8, "accepted_total": 2, "concurrency_gate": 2}
+    )
+    assert "本轮实际并发 2" in detail, detail
+
+
+def test_consume_event_is_the_shared_frontend_accumulation():
+    """标准轴 #2 修复：GUI / CLI 的 ``kind`` 分支逻辑收敛到 ``consume_event``。
+
+    两个前端原各留一份 round 丢双槽 / batch 丢 main 槽 / retry 记原因
+    的分支实现；收敛后前端只留呈现策略（CLI 单行 vs GUI 多行）。
+    驱动一轮真实顺序（round → waiting → retry → batch），断言
+    两个前端语义：分槽并入、槽位清理、计数口径。
+    """
+    fields: dict = {}
+    fields = diagnostics.consume_event(
+        fields,
+        diagnostics.round_event(
+            round_index=1, open_problems=9, batches=4, window=2, concurrency_gate=2
+        ),
+    )
+    assert fields["open_problems"] == 9
+    assert fields["concurrency_gate"] == 2
+    fields = diagnostics.consume_event(
+        fields,
+        diagnostics.waiting_event(
+            round_index=1, wait_elapsed_ms=1_500, inflight=2, queued=0,
+            window=2, request_window_s=128.0, role="main",
+        ),
+    )
+    fields = diagnostics.consume_event(
+        fields,
+        diagnostics.waiting_event(
+            round_index=1, wait_elapsed_ms=800, inflight=1, queued=1,
+            window=1, request_window_s=64.0, role="review",
+        ),
+    )
+    assert set(fields["waiting_slots"]) == {"main", "review"}
+    # 业务重试：原因 + 次数口径同时进入（P2）。
+    fields = diagnostics.consume_event(
+        fields,
+        diagnostics.retry_event(
+            round_index=1, batch_index=0, category="business",
+            reason="响应缺少该段输出片段", attempt_count=2,
+        ),
+    )
+    assert "响应缺少该段输出片段" in fields["retry_reason"]
+    assert fields["retry_attempt_count"] == 2
+    # 批归并验收：main 槽清（请求已返回），review 槽保留。
+    fields = diagnostics.consume_event(
+        fields,
+        diagnostics.batch_event(
+            round_index=1, batch_index=0, accepted_in_batch=3, accepted_total=3,
+            subjects=2,
+        ),
+    )
+    assert set(fields["waiting_slots"]) == {"review"}
+    assert fields["accepted_total"] == 3
+    # 传输级重试不带次数（传输重试与业务重试分开统计）。
+    fields = diagnostics.consume_event(
+        fields,
+        diagnostics.retry_event(
+            round_index=1, batch_index=1, category="transport", reason="reset"
+        ),
+    )
+    assert fields["retry_attempt_count"] == 2  # 传输级不清业务计数口径
+    assert "传输失败" in fields["retry_reason"]
+
+
 # ---- 验收 6：并发等待分槽呈现 —— 主修复与高级校对并列，不互相覆盖 ----
 
 

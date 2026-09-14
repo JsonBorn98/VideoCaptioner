@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -131,6 +132,9 @@ class PostprocessInterface(QWidget):
         self.media_path: str | None = None
         self._thread: Any | None = None
         self._cancelling = False
+        # P3 修复（spec 决策 7「运行耗时」）：任务起点（time.perf_counter 口径），
+        # 运行中详情行「任务已运行 Xs」由 ``_render_detail`` 渲染；无线程时无意义。
+        self._task_started_at: float | None = None
         self._workflow_mode = False
         self.primary_srt_path: str | None = None
         self._dirty = False
@@ -611,6 +615,9 @@ class PostprocessInterface(QWidget):
             return
         self._cancelling = False
         self._latest_event_fields = {}
+        # P3 修复（spec 决策 7「运行耗时」）：任务起点随线程启动记录，
+        # 运行中详情行渲染「任务已运行 Xs」（终态行已带耗时，运行中无）。
+        self._task_started_at = time.perf_counter()
         self._thread = PostprocessThread(self.task)
         self._thread.progress.connect(self._on_progress)
         self._thread.progress_event.connect(self._on_progress_event)
@@ -640,7 +647,11 @@ class PostprocessInterface(QWidget):
             else:
                 self._thread.requestInterruption()
             self._cancelling = True
-            self.status_label.setText(self.tr("正在取消，等待当前步骤安全结束…"))
+            # P4 修复（spec 决策 6 末条「明示本地停止不保证服务端撤销/停止计费」）：
+            # 停止文案明示经济边界（用户故事 40），不只「等待安全结束」。
+            self.status_label.setText(
+                self.tr("正在取消，等待当前步骤安全结束（本地停止不保证服务端停止计费）…")
+            )
             return
         self._set_processing(False)
 
@@ -685,33 +696,19 @@ class PostprocessInterface(QWidget):
                 return  # 取消后进度不复活：终态由 cancelled 信号负责
             if status == "completed":
                 self.status_label.setText(self.tr("处理完成"))
+                self._task_started_at = None  # P3：终态后运行中耗时行停（终态自带耗时）
             elif status == "failed":
                 self.status_label.setText(self.tr("处理失败"))
+                self._task_started_at = None  # P3：同上
             elif status == "report_only":
                 self.status_label.setText(self.tr("仅报告：未发起模型请求"))
+                self._task_started_at = None  # P3：同上
         if self._cancelling and kind in ("waiting", "round", "batch", "retry"):
             return  # 停止请求后的迟到事件不再推进进度文案
-        fields = dict(self._latest_event_fields)
-        counts = event.get("counts") or {}
-        fields["message"] = event.get("message")
-        if kind == "waiting":
-            fields = diagnostics.merge_waiting_event(fields, event)
-        elif kind == "round":
-            # 新一轮开始：上一轮的全部等待已结束，槽位清理
-            # （陈旧等待不清会一直挂在详情里闪烁）。
-            fields = diagnostics.drop_waiting_role(fields, "main")
-            fields = diagnostics.drop_waiting_role(fields, "review")
-            fields["open_problems"] = counts.get("open_problems")
-            fields["window"] = counts.get("window")
-        elif kind == "batch":
-            # 一批归并验收完成：对应主修复请求已返回，其等待槽
-            # 清理；校对窗口的等待继续（主修复与校对独立分槽）。
-            fields = diagnostics.drop_waiting_role(fields, "main")
-            fields["accepted_total"] = counts.get("accepted_total")
-            if event.get("round") is not None:
-                fields["open_problems"] = self._latest_event_fields.get("open_problems")
-        elif kind == "retry":
-            fields["retry_reason"] = event.get("message")
+        # consume_event（标准轴 #2 修复）：round 丢双槽 / batch 丢 main 槽 /
+        # retry 记原因与次数 / waiting 分槽并入——与 CLI 同一实现（GUI 只留
+        # 呈现策略）。轮次事件带本轮实际并发（P5）与重试次数（P2）。
+        fields = diagnostics.consume_event(dict(self._latest_event_fields), event)
         self._latest_event_fields = fields
         self._render_detail(fields)
 
@@ -719,6 +716,14 @@ class PostprocessInterface(QWidget):
         if not self._detail_expanded:
             return
         text = diagnostics.render_detail(fields)
+        # P3 修复（spec 决策 7「运行耗时」）：运行中任务耗时行——长调用
+        # 期间可判断任务仍在推进（终态事件自带耗时，运行中无任务级口径）。
+        if self._task_started_at is not None:
+            text = (
+                f"任务已运行 {time.perf_counter() - self._task_started_at:.1f}s\n{text}"
+                if text
+                else f"任务已运行 {time.perf_counter() - self._task_started_at:.1f}s"
+            )
         if text:
             self.detail_text.setText(text)
 
@@ -742,12 +747,14 @@ class PostprocessInterface(QWidget):
 
     def _on_cancelled(self) -> None:
         self._cancelling = False
+        self._task_started_at = None  # 终态后任务耗时行无意义（终态事件自带耗时）
         self._set_processing(False)
         self.progress_bar.pause()
         self.status_label.setText(self.tr("已取消"))
 
     def _on_finished(self, video_path: str, output_path: str) -> None:
         self._cancelling = False
+        self._task_started_at = None  # 终态后不再显示运行中耗时行
         self._set_processing(False)
         self.progress_bar.setValue(100)
         try:
@@ -838,6 +845,7 @@ class PostprocessInterface(QWidget):
         self.timing_status_label.show()
 
     def _on_error(self, error: str) -> None:
+        self._task_started_at = None  # 终态后不再显示运行中耗时行
         self._set_processing(False)
         self.progress_bar.error()
         self.status_label.setText(self.tr("处理失败"))

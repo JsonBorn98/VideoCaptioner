@@ -238,7 +238,7 @@ class LLMGateway:
         adapter, semaphore = self._resources(profile)
         if deadline_seconds is None:
             deadline_seconds = _derived_deadline_seconds(
-                max_attempts, self._request_deadline_hint(request)
+                max_attempts, request_deadline_hint(request)
             )
         started = time.perf_counter()
 
@@ -277,7 +277,7 @@ class LLMGateway:
                     # 剩余预算小于请求窗口时收窄本次尝试的 deadline；
                     # ``LLMRequest`` 冻结，用 ``replace`` 派生钳制副本。
                     attempt_window = min(
-                        self._request_deadline_hint(request), max(_remaining(), 0.0)
+                        request_deadline_hint(request), max(_remaining(), 0.0)
                     )
                     if request.timeout is None or request.timeout > attempt_window:
                         request = replace(request, timeout=attempt_window)
@@ -350,11 +350,6 @@ class LLMGateway:
                 self._cancellable_sleep(requested, cancelled)
         assert last_error is not None
         raise last_error
-
-    @staticmethod
-    def _request_deadline_hint(request: LLMRequest) -> float:
-        """One attempt's network window for this request (output-scaled)."""
-        return request_deadline_hint(request)
 
     def _cancellable_sleep(
         self,

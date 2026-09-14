@@ -254,7 +254,9 @@ def run(args: Namespace, config: dict) -> int:
         等待时长），不逐行刷屏。``progress.update`` / ``output.info`` 各自
         串行（ProgressLine 锁 + stderr 单写），事件回调可从修复窗口线程
         并发到达。并发等待分槽（票 08 点验修复）：主修复与高级校对的
-        等待并列，不互相覆盖。
+        等待并列，不互相覆盖。轮次事件携带本轮实际并发（P5 修复：spec
+        决策 4「显示实际生效值」）与重试次数（P2：用户故事 28），
+        由 ``consume_event`` 单一实现并入（GUI / CLI 共享，标准轴 #2）。
         """
         if quiet or progress is None:
             return
@@ -265,23 +267,14 @@ def run(args: Namespace, config: dict) -> int:
             output.info(render_event_line(event))
             return
         nonlocal _waiting_fields
-        if kind == "waiting":
-            from videocaptioner.core.postprocess.diagnostics import merge_waiting_event
+        from videocaptioner.core.postprocess.diagnostics import consume_event
 
-            _waiting_fields = merge_waiting_event(_waiting_fields, event)
+        _waiting_fields = consume_event(_waiting_fields, event)
+        if kind == "waiting":
             progress.update(
                 int(event.get("percent") or 0),
                 _waiting_line(_waiting_fields) or str(event.get("message") or ""),
             )
-        elif kind == "round":
-            from videocaptioner.core.postprocess.diagnostics import drop_waiting_role
-
-            _waiting_fields = drop_waiting_role(_waiting_fields, "main")
-            _waiting_fields = drop_waiting_role(_waiting_fields, "review")
-        elif kind == "batch":
-            from videocaptioner.core.postprocess.diagnostics import drop_waiting_role
-
-            _waiting_fields = drop_waiting_role(_waiting_fields, "main")
         elif kind == "terminal" and event.get("status") == "report_only":
             progress.update(0, str(event.get("message") or ""))
 

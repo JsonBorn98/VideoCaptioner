@@ -567,6 +567,75 @@ def test_slow_chunked_response_cancel_mid_body_stops_within_gate():
         gateway.close()
 
 
+@pytest.mark.parametrize(
+    "transport, dialect",
+    [
+        (LLMTransport.ANTHROPIC_MESSAGES, ProviderDialect.ANTHROPIC),
+        (LLMTransport.GEMINI, ProviderDialect.GEMINI),
+    ],
+)
+def test_native_transport_cancel_is_prompt_not_timeout_bounded(
+    transport: LLMTransport, dialect: ProviderDialect
+):
+    """Anthropic / Gemini 共享会话的在途取消及时（P1 修复回归）。
+
+    spec 决策 6「本地任务终止不依赖普通网络 timeout」：``del cancelled``
+    时代这两条传输的在途停止只等请求 timeout 兜底（30s 从不触发）。
+    修复后共享默认会话获得与 OpenAI 同型的请求级通道（每请求独享
+    ``requests.Session`` + watchdog close）。注入会话（显式生命周期）
+    保持原边界（``_post_with_cancellation`` 的 ``injected``）。
+    """
+    service = _HoldService()
+    gateway = LLMGateway(sleep=time.sleep, random_source=lambda: 0.5)
+    try:
+        # base_url 覆盖到 loopback：adapter 直按 profile.base_url 请求。
+        profile = _profile(
+            f"native-{transport.value}",
+            transport=transport,
+            dialect=dialect,
+            base_url=service.base_url,
+            api_key="offline-placeholder",
+        )
+        cancel = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def worker() -> None:
+            try:
+                gateway.complete(
+                    profile,
+                    LLMRequest(
+                        messages=(LLMMessage("user", "native-cancel"),),
+                        metadata={"stage": "native-cancel", "role": "utility"},
+                        timeout=30.0,
+                    ),
+                    cancelled=cancel.is_set,
+                    use_cache=False,
+                )
+                outcome["result"] = "success"
+            except InterruptedError:
+                outcome["result"] = "interrupted"
+            except LLMCallError as exc:
+                outcome["result"] = f"transport:{exc.category.value}"
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        # 在途请求已发出并挂起（读超时 30s 不触发；服务 hold 不释放）。
+        assert service.wait_attempts(1) == 1
+        cancel_at = time.perf_counter()
+        cancel.set()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive(), f"{transport} worker did not exit"
+        # 取消解除在途读：不等 30s 请求超时、不等服务释放
+        # （``_HoldService`` 的释放只在 finally：取消先于释放完成）。
+        elapsed = time.perf_counter() - cancel_at
+        assert elapsed <= STOP_RESPONSIVENESS_GATE_SECONDS, elapsed
+        assert outcome["result"] in {"interrupted", "transport:transient"}, outcome
+    finally:
+        service.release()
+        service.close()
+        gateway.close()
+
+
 def test_total_budget_bounds_queue_transport_and_backoff():
     """逻辑请求总预算覆盖排队+传输+退避：deadline_seconds 显式钳制。"""
     service = _HoldService()

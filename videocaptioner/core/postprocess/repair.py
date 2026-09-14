@@ -56,7 +56,7 @@ import json_repair
 from ..asr.asr_data import ASRData, ASRDataSeg
 from ..llm import LLMGateway, LLMMessage, LLMRequest
 from ..llm.gateway import request_deadline_hint
-from ..llm.utility import borrow_utility_gateway
+from ..llm.utility import DEFAULT_GATEWAY_CONCURRENCY, borrow_utility_gateway
 from ..prompts import get_prompt
 from ..subtitle.io import clone_subtitle_data
 from ..utils.logger import setup_logger
@@ -109,7 +109,8 @@ MAX_TRANSPORT_FAILURE_ROUNDS = 2
 MAX_ROUNDS = 16
 # 并发请求数权威默认（ADR-0018）：与 GUI/CLI ``thread_num`` 默认一致；
 # 任务入口从冻结配置传入实际值，缺省不悄悄回退网关隐藏默认。
-DEFAULT_THREAD_NUM = 10
+# 单一来源（标准轴修复）：与自建网关闸默认同值，改名处 import 不再各留一份。
+DEFAULT_THREAD_NUM = DEFAULT_GATEWAY_CONCURRENCY
 
 # 问题稳定身份：working 段序会因拆分漂移，跨轮计数一律用
 # (初版段序, 显示侧, 问题类别)；problem_id 只在一次请求内对模型显式绑定。
@@ -120,12 +121,13 @@ ProblemIdentity = Tuple[int, str, str]
 CONCURRENT_CANCEL_POLL_SECONDS = 0.05
 
 
-def _request_window_seconds(profile: "LLMModelProfile") -> float:
+def request_window_seconds(profile: "LLMModelProfile") -> float:
     """本次修复请求的单次尝试网络窗口（等待期限展示口径，票 07）。
 
     复用网关 ``request_deadline_hint`` 的同一缩放口径（票 07 审查
     修复：不再各自硬编码 baseline，协议变化不静默漂移）；这是展示
-    估计值，不是承诺的完成时限。
+    估计值，不是承诺的完成时限。公开命名对齐 ``request_deadline_hint``
+    （标准轴：同一「单次网络窗口」概念不再三个名字）。
     """
     from ..llm.models import LLMRequest
 
@@ -1471,6 +1473,10 @@ def execute_viewing_repair(
                         open_problems=len(open_problems),
                         batches=len(plan.batches),
                         window=min(concurrency_gate, max(1, len(plan.batches))),
+                        # P5 修复（spec 决策 4「显示实际生效值」）：冻结并发
+                        # 经角色钳制后的本轮实际闸进轮次事件，前端不再只从
+                        # 状态载荷 / 日志读（用户故事 28 等待期限同理已带）。
+                        concurrency_gate=concurrency_gate,
                         # 与简单百分比消费者同一事实口径（票 07）：事件
                         # 通道无条件携带，前端不再各自推导。
                         percent=min(90, 55 + summary.rounds * 4),
@@ -1520,7 +1526,7 @@ def execute_viewing_repair(
                         },
                         round_index=lambda: summary.rounds,
                         role="main",
-                        request_window_s=_request_window_seconds(repair_profile),
+                        request_window_s=request_window_seconds(repair_profile),
                     )
                     try:
                         response = runtime.complete(
@@ -1600,13 +1606,21 @@ def execute_viewing_repair(
                         for problem in batch_problem_map.values():
                             last_error[_identity(problem)] = fatal
                         # 业务级拒绝（票 07）：响应不可用是可观察的重试原因
-                        # （计入反馈进入下一轮，不静默跳过）。
+                        # （计入反馈进入下一轮，不静默跳过）。P2 修复：带上
+                        # 本批问题的业务请求累计口径（用户故事 28 重试次数可见）。
                         _emit(
                             retry_event(
                                 round_index=summary.rounds,
                                 batch_index=order,
                                 category="business",
                                 reason=fatal,
+                                attempt_count=max(
+                                    (
+                                        attempts.get(_identity(problem), 0)
+                                        for problem in batch_problem_map.values()
+                                    ),
+                                    default=0,
+                                ),
                             )
                         )
                         return
@@ -1807,7 +1821,7 @@ def execute_viewing_repair(
                                     },
                                     round_index=lambda: summary.rounds,
                                     role="review",
-                                    request_window_s=_request_window_seconds(review_profile),
+                                    request_window_s=request_window_seconds(review_profile),
                                 )
                                 try:
                                     response = runtime.complete(
@@ -1853,12 +1867,34 @@ def execute_viewing_repair(
                                     bindings.update(subject_entry.bindings)
                                 fatal, corrections = _parse_review_response(response.text, bindings)
                                 if fatal is not None:
+                                    # P2 修复（用户故事 28）：业务拒绝带本组绑定问题的
+                                    # 业务请求累计——``region_start`` 是主体 working 段序
+                                    # （``segment_problems`` 同一坐标系），``_identity``
+                                    # 再映射回初版段序（``attempts`` 键）；校对失败
+                                    # 不消耗业务重试（保留主候选），计数是主修复口径。
+                                    group_identities = [
+                                        _identity(problem)
+                                        for subject_entry in group.subjects
+                                        for index in range(
+                                            subject_entry.region_start,
+                                            subject_entry.region_start
+                                            + subject_entry.region_span,
+                                        )
+                                        for problem in segment_problems.get(index, [])
+                                    ]
                                     _emit(
                                         retry_event(
                                             round_index=summary.rounds,
                                             batch_index=review_index,
                                             category="business",
                                             reason=fatal,
+                                            attempt_count=max(
+                                                (
+                                                    attempts.get(identity, 0)
+                                                    for identity in group_identities
+                                                ),
+                                                default=0,
+                                            ),
                                         )
                                     )
                                     return 0, [f"高级校对复校响应被拒（保留主翻译候选）: {fatal}"]

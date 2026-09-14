@@ -265,8 +265,12 @@ import tempfile, pathlib
 widget = PostprocessInterface(
     profile_store=PostprocessProfileStore(pathlib.Path(tempfile.mkdtemp()) / "profiles.json")
 )
+# P3 修复（spec 决策 7「运行耗时」）：任务起点未记（未 start）时无耗时行；
+# 记起点后运行中详情行「任务已运行 Xs」由 _render_detail 渲染。
+assert widget._task_started_at is None
+widget._task_started_at = __import__("time").perf_counter() - 2.5
 widget._on_progress_event(diagnostics.round_event(
-    round_index=1, open_problems=12, batches=2, window=2, percent=59))
+    round_index=1, open_problems=12, batches=2, window=2, concurrency_gate=2, percent=59))
 widget._on_progress_event(diagnostics.waiting_event(
     round_index=1, wait_elapsed_ms=2400, inflight=2, queued=1,
     window=2, request_window_s=128.0, role="main"))
@@ -283,6 +287,10 @@ assert widget.detail_text.isHidden()
 widget._toggle_detail()
 assert not widget.detail_text.isHidden()
 text = widget.detail_text.text()
+# P3 修复（spec 决策 7「运行耗时」）：运行中任务耗时行常驻详情首行。
+assert "任务已运行" in text, text
+# P5 修复（spec 决策 4「显示实际生效值」）：本轮实际并发进详情。
+assert "本轮实际并发 2" in text, text
 # 并发等待并列：主修复（已等待 2.5s / 在途 1）与校对（0.9s / 在途 3）
 # 同屏，单槽口径的互相覆盖闪烁消除。
 assert "主修复" in text and "高级校对" in text, text
@@ -302,7 +310,23 @@ assert "未解决 12" in text, text
 assert "主修复等待中" not in text, text  # 主修复槽已清理
 assert "高级校对等待中" in text, text  # 校对槽保留
 widget._toggle_detail()
-assert widget.detail_text.isHidden()
+# P3：终态（completed/failed/cancelled/error）后运行中耗时行无意义——
+# 终态事件自带耗时（wall_seconds），_task_started_at 由终态回调清零。
+widget._on_progress_event(diagnostics.terminal_event(
+    status="completed", counts={"segments": 12}, wall_seconds=8.4))
+assert widget._task_started_at is None
+
+# P4 修复（spec 决策 6 末条「明示本地停止不保证服务端撤销/停止计费」）：
+# 停止文案明示经济边界（用户故事 40），不只「等待安全结束」。
+class _RunningThread:
+    def isRunning(self):
+        return True
+    def stop(self):
+        pass
+widget._thread = _RunningThread()
+widget.cancel()
+assert "不保证服务端停止计费" in widget.status_label.text(), widget.status_label.text()
+widget._thread = None
 print(json.dumps({"detail": text}))
 """
     )

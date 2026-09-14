@@ -95,15 +95,29 @@ def round_event(
     open_problems: int,
     batches: int,
     window: int,
+    concurrency_gate: Optional[int] = None,
     percent: Optional[int] = None,
     at_s: float = time.perf_counter(),
 ) -> Dict[str, Any]:
-    """构造修复轮次事件：分母逐轮显式（进入下一轮 / 重规划时更新口径）。"""
+    """构造修复轮次事件：分母逐轮显式（进入下一轮 / 重规划时更新口径）。
+
+    ``concurrency_gate`` 是本轮实际生效并发（P5 修复：spec 决策 4
+    「显示实际生效值」——冻结值与钳制闸进轮次事件，前端默认摘要
+    可渲染，不再只进状态载荷 / 日志）。
+    """
+    message = f"正在修复观看问题（第 {round_index} 轮，{open_problems} 个未解决）"
+    if concurrency_gate is not None:
+        message += f"（本轮并发 {concurrency_gate}）"
     return {
         "kind": "round",
         "round": round_index,
-        "message": f"正在修复观看问题（第 {round_index} 轮，{open_problems} 个未解决）",
-        "counts": {"open_problems": open_problems, "batches": batches, "window": window},
+        "message": message,
+        "counts": {
+            "open_problems": open_problems,
+            "batches": batches,
+            "window": window,
+            "concurrency_gate": concurrency_gate,
+        },
         "percent": percent,
         "at_s": at_s,
     }
@@ -141,16 +155,26 @@ def retry_event(
     batch_index: Optional[int],
     category: str,
     reason: str,
+    attempt_count: Optional[int] = None,
     at_s: float = time.perf_counter(),
 ) -> Dict[str, Any]:
-    """构造重试 / 失败原因事件（传输级不消耗业务重试，业务级进入反馈）。"""
+    """构造重试 / 失败原因事件（传输级不消耗业务重试，业务级进入反馈）。
+
+    ``attempt_count`` 是覆盖问题的已发生业务请求次数（P2 修复：用户
+    故事 28——重试次数可见，不只最近一次原因）；传输级传 ``None``
+    （传输重试归网关日志，与业务重试分开统计）。
+    """
     label = "传输失败（不消耗业务重试）" if category == "transport" else "业务失败"
+    message = f"{label}：{reason[:200]}"
+    if attempt_count is not None:
+        message += f"（该批问题已请求 {attempt_count} 次）"
     return {
         "kind": "retry",
         "round": round_index,
         "batch": batch_index,
-        "message": f"{label}：{reason[:200]}",
+        "message": message,
         "category": category,
+        "attempt_count": attempt_count,
         "at_s": at_s,
     }
 
@@ -250,6 +274,44 @@ def drop_waiting_role(fields: Dict[str, Any], role: str) -> Dict[str, Any]:
     return merged
 
 
+def consume_event(fields: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    """把一个事件并入跨事件累积口径（GUI / CLI 共享，标准轴 #2 修复）。
+
+    CLI ``on_event`` 与 GUI ``_on_progress_event`` 原各留一份 ``kind``
+    分支（round 丢 main+review 槽、batch 丢 main 槽、retry 记原因）；
+    这里是单一实现，前端只保留各自的呈现策略（CLI 单行 vs GUI 多行）：
+    - ``waiting``：按角色分槽并入（``merge_waiting_event``）。
+    - ``round``：新一轮清全部等待槽，更新分母 / 窗口 / 本轮并发。
+    - ``batch``：本批主修复已返回，清 main 槽，更新验收累计。
+    - ``retry``：记录最近重试原因与重试次数口径（``attempt_count``）。
+    返回新 dict，``fields`` 不被就地修改；``message`` 按最新事件更新。
+    """
+    kind = event.get("kind")
+    merged = dict(fields)
+    merged["message"] = event.get("message")
+    counts = event.get("counts") or {}
+    if kind == "waiting":
+        return merge_waiting_event(merged, event)
+    if kind == "round":
+        merged = drop_waiting_role(merged, "main")
+        merged = drop_waiting_role(merged, "review")
+        merged["open_problems"] = counts.get("open_problems")
+        merged["window"] = counts.get("window")
+        if counts.get("concurrency_gate") is not None:
+            merged["concurrency_gate"] = counts.get("concurrency_gate")
+    elif kind == "batch":
+        merged = drop_waiting_role(merged, "main")
+        merged["accepted_total"] = counts.get("accepted_total")
+        # 轮次事实与角色无关：批事件不带分母时不回退已有口径。
+        if counts.get("open_problems") is not None:
+            merged["open_problems"] = counts.get("open_problems")
+    elif kind == "retry":
+        merged["retry_reason"] = event.get("message")
+        if event.get("attempt_count") is not None:
+            merged["retry_attempt_count"] = event.get("attempt_count")
+    return merged
+
+
 def _render_waiting_slot(role: str, slot: Dict[str, Any]) -> list[str]:
     wait_ms = slot.get("wait_elapsed_ms")
     wait_s = f"{wait_ms / 1000.0:.1f}s" if wait_ms is not None else "?"
@@ -314,7 +376,14 @@ def render_detail(fields: Dict[str, Any]) -> str:
         )
     retry_reason = fields.get("retry_reason")
     if retry_reason:
-        lines.append(f"最近重试原因：{retry_reason}")
+        retry_line = f"最近重试原因：{retry_reason}"
+        retry_count = fields.get("retry_attempt_count")
+        if retry_count is not None:
+            retry_line += f"（已请求 {retry_count} 次）"
+        lines.append(retry_line)
+    gate = fields.get("concurrency_gate")
+    if gate is not None:
+        lines.append(f"本轮实际并发 {gate}")
     return "\n".join(lines)
 
 
@@ -386,6 +455,7 @@ __all__ = [
     "WAITING_REFRESH_INTERVAL_S",
     "WaitRefresher",
     "batch_event",
+    "consume_event",
     "drop_waiting_role",
     "merge_waiting_event",
     "render_detail",
