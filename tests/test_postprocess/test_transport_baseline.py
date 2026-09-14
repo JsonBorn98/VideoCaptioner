@@ -85,7 +85,7 @@ def test_probe_report_schema_and_bounded_cleanup(kind):
 # ---- queue：并发闸排队 + 两个真实在途挂起（大 timeout + 计划释放）----
 
 
-def test_queue_probe_gate_caps_inflight_and_cancel_is_not_prompt():
+def test_queue_probe_gate_caps_inflight_and_cancel_is_prompt():
     report = run_probe("queue")
 
     # 真实并发闸生效：4 个逻辑请求、闸 2 → 服务端只观察到 2 个在途 HTTP。
@@ -102,51 +102,46 @@ def test_queue_probe_gate_caps_inflight_and_cancel_is_not_prompt():
     # 大 timeout（30s）从未触发：等待只被计划释放刺激结束。
     assert evidence["read_timeout_seconds"] == 30.0
     entries = _by_request(report)
+    # 票 06 落地：取消把在途等待也解除（请求级尽力通道）——4 个 worker
+    # 全部 interrupted，在途请求不再等 2s 释放后拿到迟到成功响应。
     assert sorted(entry["outcome"] for entry in entries.values()) == [
         "interrupted",
         "interrupted",
-        "success",
-        "success",
+        "interrupted",
+        "interrupted",
     ]
-    # 基线（现状）：取消不能及时结束排队 / 在途等待。
-    assert report["stop"]["prompt"] is False
-    assert report["stop"]["max_stop_responsiveness_seconds"] > 0.3
+    # 票 06 落地：排队与在途等待取消均及时（≤0.30s 冻结门槛，
+    # 早于计划释放）——不再有「取消后仍等 2s 服务释放」的现状。
+    assert report["stop"]["prompt"] is True
+    assert report["stop"]["max_stop_responsiveness_seconds"] <= 0.3
     cancel_at = report["stop"]["cancel_at_s"]
     release_at = report["controlled_release"]["at_s"]
     assert release_at is not None and release_at > cancel_at
-    # 在途请求在取消后才拿到成功响应：迟到响应照常交付（传输层现状）。
+    # 在途请求的迟到响应不得交付：取消后无任何成功交付。
     assert report["responses"]["before_cancel"] == []
-    after = report["responses"]["after_cancel"]
-    assert len(after) == 2
-    for request_id in after:
-        entry = entries[request_id]
-        assert entry["outcome"] == "success"
-        assert entry["result_text"] == "probe-ok"
-        assert entry["ended_at_s"] > cancel_at
-        assert entry["ended_at_s"] >= release_at
-    # queue 的应答由计划释放刺激产生：停止本身没有先完成任何等待。
-    assert report["responses"]["service_released_writes"] == 2
-    assert report["stop"]["completed_without_release"] is False
-    # 未来门槛：停止应在取消后、释放前生效（现状 False，票 06 应翻正）。
-    assert report["stop"]["stopped_between_cancel_and_release"] is False
+    assert report["responses"]["after_cancel"] == []
+    # 停止在取消后、释放前生效：4 个 worker 全部先于释放到达终态
+    # （interrupted），未发送的排队请求被闸口取消路径拦下。
+    assert report["stop"]["completed_without_release"] is True
+    assert report["stop"]["stopped_between_cancel_and_release"] is True
     # 30s timeout 未自然结束：无任何请求靠 timeout 完成。
     assert all(
         hit["ended_s"] is not None and hit["ended_s"] < 10.0
         for hit in report["http_attempt_log"]
     )
-    assert report["baseline_gaps"]
 
 
 # ---- network：SDK 超时 + 隐式重试乘积 + 网关退避边界 ----
 
 
-def test_network_probe_measures_sdk_retry_multiplication_and_stop_latency():
+def test_network_probe_sdk_retries_are_visible_and_stop_is_prompt():
     report = run_probe("network")
 
     assert report["logical_requests"] == 1
-    # SDK 隐式重试乘积（实测基线）：1 次 adapter 尝试 = 3 次 HTTP。
+    # 票 06 落地：SDK max_retries=0，1 次 adapter 尝试 = 1 次 HTTP——
+    # 隐式重试乘积不再逃出网关预算（基线是 1 次 adapter = 3 次 HTTP）。
     assert report["adapter_attempts"] == 1
-    assert report["http_attempts"] == 3
+    assert report["http_attempts"] == 1
     attempt = report["adapter_attempt_log"][0]
     assert attempt["status"] == "error"
     assert attempt["category"] == "transient"
@@ -155,62 +150,56 @@ def test_network_probe_measures_sdk_retry_multiplication_and_stop_latency():
     # 服务未向调用方返回任何结果：取消前后都没有成功交付。
     assert report["responses"]["before_cancel"] == []
     assert report["responses"]["after_cancel"] == []
-    # 服务未自然结束时本地取消仍完成（经传输超时 + 退避边界），但不及时。
-    assert report["stop"]["completed_without_release"] is True
-    assert report["stop"]["prompt"] is False
     # 取消锚定在首个在途 HTTP 上，先于网关退避开始。
     assert report["wait_entry_evidence"]["first_http_at_s"] is not None
     assert (
         report["wait_entry_evidence"]["first_http_at_s"]
         < report["stop"]["cancel_at_s"]
     )
-    latency = report["stop"]["max_stop_responsiveness_seconds"]
-    # 覆盖 read timeout(1s)×3 次 HTTP + 网关退避 1s，远超及时阈值。
-    assert latency > 1.0
-    assert latency < 15.0  # 有界（挂起守卫，非性能门槛）
-    # 网关退避 1.0s（超时无 Retry-After：min(30, 2^0) × 1.0 抖动固定）。
-    assert report["sleeps"] and report["sleeps"][0]["requested_seconds"] == 1.0
-    sleep = report["sleeps"][0]
-    # 取消先于退避开始（已置位），网关仍进入新的退避等待——直接证据。
-    assert report["stop"]["cancel_at_s"] < sleep["started_at_s"]
-    # worker 在退避结束后才停止。
-    assert entry["ended_at_s"] >= sleep["ended_at_s"]
-    assert report["baseline_gaps"]
+    # 票 06：取消在退避内及时生效（≤0.30s），不再经历 SDK 重试 + 整段退避。
+    assert report["stop"]["prompt"] is True
+    assert report["stop"]["max_stop_responsiveness_seconds"] <= 0.3
+    assert report["stop"]["completed_without_release"] is True
+    assert not report["baseline_gaps"] or not any(
+        "ignores an already-observed stop" in gap for gap in report["baseline_gaps"]
+    )
 
 
 # ---- backoff：429 + Retry-After 退避 ----
 
 
-def test_backoff_probe_retry_after_honored_and_sleep_uncancellable():
+def test_backoff_probe_retry_after_honored_and_sleep_cancellable():
     report = run_probe("backoff")
 
     assert report["logical_requests"] == 1
+    # 票 06 落地：SDK max_retries=0 —— 429 由网关退避重试，不再由 SDK
+    # 按 Retry-After 头隐式重发（基线是 1 次 adapter = 3 次 429 HTTP）。
     assert report["adapter_attempts"] == 1
-    assert report["http_attempts"] == 3
+    assert report["http_attempts"] == 1
     assert all(hit["status"] == 429 for hit in report["http_attempt_log"])
-    # Retry-After 1.2s 未被缩短：SDK 按头间隔重发（间隔 >= 1.0s）。
-    gaps = [hit["gap_since_previous_s"] for hit in report["http_attempt_log"][1:]]
-    assert len(gaps) == 2
-    assert all(gap >= 1.0 for gap in gaps)
-    # 网关退避 = max(2^0 × 1.0, Retry-After 1.2) = 1.2s，真实 sleep。
+    # Retry-After 1.2s 仍被尊重：网关退避 = max(2^0 × 1.0, 1.2) = 1.2s。
     sleep = report["sleeps"][0]
     assert sleep["requested_seconds"] == 1.2
-    assert sleep["actual_seconds"] >= 1.1
-    # 取消锚定在网关退避开始之后：取消落在退避 sleep 中间，
-    # worker 仍等满整段退避才停止。
+    # 取消锚定在网关退避开始之后：取消落在退避等待中，
+    # 票 06：退避等待可唤醒——worker 终态早于退避请求时长；取消路径
+    # 提前返回后 sleeper 线程在后台自然结束（ended_at_s 可为 null，
+    # 不把「后台线程收尾晚于取消」误判成等待未唤醒）。
     cancel_at = report["stop"]["cancel_at_s"]
     assert report["wait_entry_evidence"]["entered_gateway_backoff"] is True
     assert report["wait_entry_evidence"]["backoff_started_at_s"] == sleep["started_at_s"]
-    assert sleep["started_at_s"] < cancel_at < sleep["ended_at_s"]
+    assert sleep["started_at_s"] < cancel_at
     entry = _by_request(report)[1]
     assert entry["outcome"] == "interrupted"
-    assert entry["ended_at_s"] >= sleep["ended_at_s"]
-    assert report["stop"]["prompt"] is False
+    # 终态早于退避自然结束：取消唤醒了等待。
+    if sleep["ended_at_s"] is not None:
+        assert entry["ended_at_s"] < sleep["ended_at_s"]
+    else:
+        assert entry["ended_at_s"] - sleep["started_at_s"] < sleep["requested_seconds"]
+    assert report["stop"]["prompt"] is True
     assert report["stop"]["completed_without_release"] is True
-    assert 0.5 < report["stop"]["max_stop_responsiveness_seconds"] < 5.0
+    assert report["stop"]["max_stop_responsiveness_seconds"] <= 0.3
     assert report["responses"]["before_cancel"] == []
     assert report["responses"]["after_cancel"] == []
-    assert report["baseline_gaps"]
 
 
 # ---- CLI：供主基准子进程调用 ----

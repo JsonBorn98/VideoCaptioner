@@ -395,7 +395,13 @@ def _read_adapter_attempt_log(stage_nonce: str) -> tuple[list[dict], str | None]
 
 
 def _baseline_gaps(report: dict) -> list[str]:
-    """Describe the observed current-behaviour gaps (facts, never failures)."""
+    """Describe the observed current-behaviour gaps (facts, never failures).
+
+    票 06 落地后按新口径推导：及时取消（stop.prompt）不再被记为缺口；
+    只报告真实残留的缺口——隐式重试乘积（SDK max_retries>0）、不可唤醒
+    退避（取消后仍等满）、迟到交付（取消后成功返回）。数值是实测事实，
+    不因门槛达成而隐藏，也不因未达成而伪装。
+    """
 
     gaps: list[str] = []
     probe = report["probe"]
@@ -405,13 +411,7 @@ def _baseline_gaps(report: dict) -> list[str]:
     sleeps = report["sleeps"]
     cancel_at = report["stop"]["cancel_at_s"]
     evidence = report["wait_entry_evidence"]
-    interrupted = [entry for entry in requests if entry["outcome"] == "interrupted"]
-    if interrupted:
-        gaps.append(
-            "cancellation surfaces as InterruptedError only at gateway attempt "
-            "boundaries: queued and in-flight waits keep blocking until they end "
-            f"({len(interrupted)} request(s) interrupted, none promptly)"
-        )
+    stop = report["stop"]
     if service_attempts and len(service_attempts) > adapter_count:
         gaps.append(
             "implicit retries inside one adapter attempt multiply transport "
@@ -419,37 +419,37 @@ def _baseline_gaps(report: dict) -> list[str]:
             f"{len(service_attempts)} real HTTP requests"
         )
     if sleeps and cancel_at is not None:
-        first = sleeps[0]
-        if cancel_at < first["started_at_s"]:
-            gaps.append(
-                "gateway backoff ignores an already-observed stop: cancellation "
-                f"was observed at {round(cancel_at, 3)}s, yet the gateway still "
-                f"entered a fresh {first['requested_seconds']}s backoff sleep at "
-                f"{first['started_at_s']}s and the worker waited it out in full"
-            )
-        else:
-            gaps.append(
-                "gateway backoff sleeps are not interruptible: a "
-                f"{first['requested_seconds']}s backoff sleep was running when "
-                f"stop arrived at {round(cancel_at, 3)}s and ran to completion "
-                f"({first['ended_at_s']}s) instead of being cut short"
-            )
-    if probe == "backoff":
-        honoured = [
-            entry["gap_since_previous_s"]
-            for entry in service_attempts[1:]
-            if entry["gap_since_previous_s"] is not None
-        ]
-        if honoured and all(gap >= 1.0 for gap in honoured):
-            gaps.append("Retry-After is honoured in full; the wait is not shortened by stop")
-    if probe == "queue":
+        for record in sleeps:
+            if (
+                record["ended_at_s"] is not None
+                and cancel_at < record["started_at_s"]
+                and record["actual_seconds"] is not None
+                and record["actual_seconds"] + 1e-6 >= record["requested_seconds"]
+            ):
+                gaps.append(
+                    "gateway backoff ignores an already-observed stop: cancellation "
+                    f"was observed at {round(cancel_at, 3)}s, yet the gateway still "
+                    f"entered a fresh {record['requested_seconds']}s backoff sleep at "
+                    f"{record['started_at_s']}s and waited it out in full"
+                )
+                break
+    late = [
+        entry
+        for entry in requests
+        if entry["outcome"] == "success" and cancel_at is not None and entry["ended_at_s"] > cancel_at
+    ]
+    if late:
+        gaps.append(
+            f"{len(late)} request(s) delivered a late response after stop "
+            "(cancellation did not prevent the late write-back)"
+        )
+    if probe == "queue" and stop.get("prompt") is False:
         queued = evidence.get("queued_waiting_for_gate")
         gaps.append(
             "semaphore queue and in-flight HTTP waits do not respond to stop: "
             f"{queued} queued worker(s) entered their gateway calls but sent no "
-            "HTTP (blocked on the gate), stayed blocked until the in-flight "
-            "requests finished, and in-flight requests delivered their late "
-            "responses normally"
+            "HTTP (blocked on the gate) and stayed blocked until the in-flight "
+            "requests finished"
         )
     return gaps
 

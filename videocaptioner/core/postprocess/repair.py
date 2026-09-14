@@ -1414,6 +1414,9 @@ def execute_viewing_repair(
             # 窗口多线程并发自增计数必须加锁——``+=`` 非原子可丢计数。
             review_lock = threading.Lock()
             review_futures: "List[Future[Tuple[int, List[str]]]]" = []
+            # 校对发送前的取消检查闸（票 06）：停止被接受后窗口线程不再
+            # 发新校对请求（请求发送前的最后一次取消检查，spec 第 6 条）。
+            review_stop_gate = threading.Event()
             # 修复轮次快照（ADR-0021）：本轮全部请求的主体与边界上下文
             # 共享 ``round_snapshot``（轮初 state 的冻结副本）；同轮邻批
             # 已归并的拆分 / 校对结果不进入本批载荷。下一轮才读取归并后
@@ -1670,6 +1673,10 @@ def execute_viewing_repair(
                         def _run_review(
                             group: "_ReviewGroup" = group,
                         ) -> Tuple[int, List[str]]:
+                            # 停止被接受后不再发新校对请求（票 06：请求发送前
+                            # 的最后一次取消检查；竞态中已发出的按在途处理）。
+                            if review_stop_gate.is_set():
+                                return 0, []
                             _raise_if_cancelled()
                             # 发出层计数（票 05）：进入网关调用前计数——传输
                             # 失败的请求已发生，照常计入（缓存命中不减）；
@@ -1729,7 +1736,10 @@ def execute_viewing_repair(
             # 归并搬到完成回调（票 05）：主修复响应一到达即归并该批并
             # 派生校对请求（重叠执行）；返回值固定批序仍供异常/观测路径。
             # review executor 在取消 / 异常路径也必须有界关闭（spec：
-            # 残留回调不得继续调度或写回字幕）。
+            # 残留回调不得继续调度或写回字幕）。取消路径置 stop gate：
+            # 未发送的校对不再发出（gate 检查），在途校对由网关取消通道
+            # 尽快解除；shutdown 等待的就是这些已发出请求的自然结束
+            # （有界：max_workers 个在途 × 网关总预算上界）。
             try:
                 _dispatch_ordered(
                     len(ordered_batches),
@@ -1752,6 +1762,17 @@ def execute_viewing_repair(
                         if warning not in summary.warnings
                     )
                 review_futures.clear()
+            except BaseException:
+                # 取消 / 异常路径（票 06）：停止被接受 → 未发校对不再发；
+                # 已提交的 future 逐个聚合（丢弃迟到校订写回的机会——
+                # _run_review 应用前重确认取消，迟到结果无副作用），再关闭。
+                review_stop_gate.set()
+                for future in review_futures:
+                    try:
+                        future.result()
+                    except (InterruptedError, Exception):  # noqa: BLE001 —— 取消路径的迟到结果不写回
+                        continue
+                raise
             finally:
                 if review_executor is not None:
                     review_executor.shutdown(wait=True)

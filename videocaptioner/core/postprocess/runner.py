@@ -519,6 +519,12 @@ def run_postprocess_task(
                         if item not in warnings
                     )
         _validate_output(working)
+        # 交付前复查取消（票 06，spec 第 6 条）：停止先于交付提交被接受时，
+        # 不写后处理结果工作稿、不交付部分后处理字幕——成果写入前是最后
+        # 一次明确的取消检查点；检查后的写入不再被追溯（终态竞争规则：
+        # 交付提交后到达的停止按已完成的取消请求处理，不伪装成取消成功）。
+        if cancelled is not None and cancelled():
+            raise InterruptedError("LLM request cancelled")
         output = Path(task.postprocessed_subtitle_path or task.default_output_path()).with_suffix(
             ".srt"
         )

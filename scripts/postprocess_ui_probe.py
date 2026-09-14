@@ -169,14 +169,23 @@ class _ProbeGateway:
             def __init__(self):
                 self.profile = profile
 
-            def complete(self, request):
+            def complete(self, request, *, cancelled=None):
                 from videocaptioner.core.llm.models import LLMResult
 
                 role, payload = _decode_request(request)
                 owner._fire_barrier_once(role)
                 start = time.perf_counter()
                 try:
-                    time.sleep(owner.main_delay if role == "main" else owner.review_delay)
+                    deadline = time.perf_counter() + (
+                        owner.main_delay if role == "main" else owner.review_delay
+                    )
+                    # 受控延迟窗口内轮询取消（票 06）：取消置位即以传输错误
+                    # 解除在途等待，模拟真实 adapter 的请求级尽力通道；
+                    # 未取消时按原延迟自然返回（不缩短受控延迟伪造快速停止）。
+                    while time.perf_counter() < deadline:
+                        if cancelled is not None and cancelled():
+                            raise RuntimeError("probe request cancelled in flight")
+                        time.sleep(min(0.01, deadline - time.perf_counter()))
                     if role == "review":
                         reviews = []
                         for subject in payload["review_subjects"]:
@@ -502,7 +511,15 @@ def run_ui_probe(directory: Path | None = None) -> dict:
     # changes the behaviour and updates these categories; this probe only
     # classifies. No narrow time-window assertions belong in consumers.
     baseline_gaps = []
-    if stop_during_inflight and terminal_after_inflight_end:
+    # 抢占判定（票 06 口径）：取消时刻 → 本地终态时刻的时序，而非 attempt
+    # 窗口（取消解除后 attempt 的 finally 才收尾，窗口尾部含取消路径）。
+    # 终态晚于停止且超出及时门槛 = 未及时抢占；0.30s 是冻结验收门槛。
+    stop_not_preempted = bool(
+        stop_at is not None
+        and terminal_at is not None
+        and terminal_at - stop_at > 0.30
+    )
+    if stop_not_preempted:
         baseline_gaps.append(
             "stop does not preempt the in-flight model request: the terminal"
             " state waits for the request to return naturally"

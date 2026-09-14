@@ -119,7 +119,7 @@ class ControlledGateway:
             def __init__(self):
                 self.profile = profile
 
-            def complete(self, request):
+            def complete(self, request, *, cancelled=None):
                 from videocaptioner.core.llm.models import LLMResult
 
                 start = time.perf_counter()

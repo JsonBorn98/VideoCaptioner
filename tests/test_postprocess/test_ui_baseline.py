@@ -137,16 +137,17 @@ def test_stop_during_first_main_repair_measures_gui_silence_and_cancel_wait(tmp_
     assert report["gateway"]["requests_main"] == 1
     assert report["gateway"]["requests_review"] == 0
 
-    # 现状缺陷按分类记录（不设窄时间窗断言阻止优化票；优化票升级此分类）。
+    # 现状缺陷分类已在票 06 落地后翻转：在途停止及时抢占（≤0.30s 冻结门槛）。
+    # 「请求期间无进度信号」仍是现状缺口（进度静默治理属票 07 范围）。
     gaps = report["baseline_gaps"]
-    assert any("in-flight" in gap for gap in gaps)  # 停止不能抢占在途请求（现状）
-    assert any("in flight" in gap for gap in gaps)  # 请求期间无进度信号（现状）
+    assert not any("preempt" in gap for gap in gaps)  # 票 06：停止及时抢占在途请求
+    assert any("in flight" in gap for gap in gaps)  # 请求期间无进度信号（现状，票 07）
     timeline = report["timeline"]
     assert timeline["stop_during_inflight"] is True
     assert timeline["inflight_role"] == "main"
-    assert timeline["terminal_after_inflight_end"] is True
     assert timeline["stop_to_terminal_signal_s"] is not None
-    assert timeline["stop_to_terminal_signal_s"] >= 0  # 数值留给矩阵，不设上限断言
+    # 票 06 冻结门槛：停止 → 本地终态 ≤0.30s（不再等待在途请求自然返回）。
+    assert timeline["stop_to_terminal_signal_s"] <= 0.30
 
     # 取消不交付过程资产（D28）：manifest 可保留，下游产物不得存在
     # （仅有 output.srt 门禁不能掩盖过程资产交付）。

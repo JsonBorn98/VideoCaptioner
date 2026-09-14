@@ -7,6 +7,7 @@ import json
 import re
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Literal, Mapping, Optional
 from urllib.parse import quote, urlparse, urlunparse
@@ -42,6 +43,9 @@ StructuredChatStrategy = Literal["json_schema", "tool", "json_object"]
 # LLMRequest.timeout overrides the adapter default for a single request.
 DEFAULT_TIMEOUT_SECONDS = 120.0
 TIMEOUT_SECONDS_PER_OUTPUT_TOKEN = 0.015
+# 取消路径的 worker join 上界（秒）：close() 后在读阻塞上多等的兜底窗口，
+# 超出即按可重试传输错误上抛（有界清理，票 06）。
+_CANCEL_JOIN_SECONDS = 5.0
 
 
 def request_timeout_seconds(
@@ -113,6 +117,78 @@ def _diagnostic_text(value: Any) -> Optional[str]:
         if character.isalnum() or character in {"_", "-", "."}
     )
     return normalized or None
+
+
+def _close_quietly(client: Any) -> None:
+    """Close a native client; cleanup failures never mask the business outcome."""
+
+    close = getattr(client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 —— 取消路径的清理不得反噬业务结果
+            logger.debug("closing a per-request client failed during cancellation", exc_info=True)
+
+
+def _run_with_cancel_watchdog(
+    call: Callable[[], Any],
+    cancelled: Callable[[], bool],
+    *,
+    close: Callable[[], None],
+    poll_seconds: float,
+) -> Any:
+    """Run ``call`` while a watchdog turns cancellation into a fast local stop.
+
+    票 06 在途请求的任务级尽力中断通道：``call`` 阻塞在网络读上时，
+    Python 无法从外部抢占它；watchdog 线程以 ``poll_seconds`` 轮询
+    ``cancelled``，置位即 ``close()`` 该请求独享的资源（native client），
+    在途读立即以传输错误解除。``call`` 返回 / 抛出后主线程照常处理
+    结果——取消时刻与返回时刻之间的竞态由调用方在应用前重确认
+    （spec「停止全路径」），此处只保证等待不挂在网络上。
+    """
+    done = threading.Event()
+    outcome: dict[str, Any] = {"result": None, "error": None, "raised": False}
+    watchdog_stop = threading.Event()
+
+    def _watch() -> None:
+        while not watchdog_stop.wait(poll_seconds):
+            if cancelled():
+                close()
+                return
+
+    def _call() -> None:
+        try:
+            outcome["result"] = call()
+        except BaseException as exc:  # noqa: BLE001 —— 原样交回主线程语义
+            outcome["raised"] = True
+            outcome["error"] = exc
+        finally:
+            watchdog_stop.set()
+            done.set()
+
+    worker = threading.Thread(target=_call, daemon=True)
+    watchdog = threading.Thread(target=_watch, daemon=True)
+    watchdog.start()
+    worker.start()
+    while not done.wait(poll_seconds):
+        if cancelled():
+            close()
+    worker.join(_CANCEL_JOIN_SECONDS)
+    watchdog.join()
+    if not done.is_set():
+        # close() 未能解除本次读阻塞（网络栈异常路径）：按可重试传输错误
+        # 上抛，交回网关重试预算 / 取消边界处理，不无限挂住调用方。
+        worker.join()
+        if outcome["raised"]:
+            raise outcome["error"]
+        raise LLMCallError(
+            "LLM request did not unblock after the cancellation close",
+            category=LLMErrorCategory.TRANSIENT,
+            retryable=True,
+        )
+    if outcome["raised"]:
+        raise outcome["error"]
+    return outcome["result"]
 
 
 def _openai_chat_usage(response: Any) -> LLMUsage:
@@ -419,7 +495,12 @@ class LLMAdapter(ABC):
         self.profile = profile
 
     @abstractmethod
-    def complete(self, request: LLMRequest) -> LLMResult:
+    def complete(self, request: LLMRequest, *, cancelled: Optional[Callable[[], bool]] = None) -> LLMResult:
+        """One provider attempt; ``cancelled`` enables best-effort in-flight stop.
+
+        取消通道是可选的尽力语义（票 06）：置位后尽快解除在途等待，
+        迟到响应由调用方在应用前重确认，传输层不保证服务端撤单。
+        """
         raise NotImplementedError
 
     def close(self) -> None:
@@ -467,6 +548,27 @@ class LLMAdapter(ABC):
 
 
 class OpenAICompatibleAdapter(LLMAdapter):
+    """OpenAI-compatible transport.
+
+    ``complete`` 是可取消的尽力通道（票 06）：每个请求创建一个独立
+    ``openai.OpenAI`` client（``max_retries=0``，SDK 隐式重试不再把传输
+    尝试乘出可见预算），请求监视该请求的取消信号；信号置位时只关闭
+    *本次请求自己的* client——在途 HTTP 读随即以 ``APIConnectionError``
+    解除（实测 ~1ms），不影响并发共享该 adapter 的其他在途请求。
+    ``close`` 不再被网关的取消路径调用（网关按 profile 池化 adapter，
+    共享生命周期）；它只释放自建 client 的资源。
+    ``client=`` 注入保留旧签名：注入的 client 退化为共享单例语义，
+    不提供请求级取消（测试桩路径）。
+    """
+
+    # SDK 默认 max_retries=2 会在一次 adapter 尝试内隐式重发 2 次，网关
+    # 侧 max_attempts 与总预算都无法观测这些乘积（票 01 network 探针：
+    # 1 次 adapter 尝试 = 3 次 HTTP）。关闭之，重试完全由网关侧
+    # ``max_attempts``/总预算负责（可见、可数、可取消）。
+    SDK_MAX_RETRIES = 0
+    # 取消监视轮询间隔（秒）：停止响应门槛 0.30s 的 1/10，留足余量。
+    CANCEL_POLL_SECONDS = 0.03
+
     def __init__(
         self,
         profile: LLMModelProfile,
@@ -475,17 +577,72 @@ class OpenAICompatibleAdapter(LLMAdapter):
     ) -> None:
         super().__init__(profile)
         self.timeout = timeout
-        self.client = client or openai.OpenAI(
-            base_url=profile.base_url,
-            api_key=profile.api_key or "not-required",
-            timeout=timeout,
+        self._client = client
+        self.client = self._make_client()
+
+    def _make_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        return openai.OpenAI(
+            base_url=self.profile.base_url,
+            api_key=self.profile.api_key or "not-required",
+            timeout=self.timeout,
+            max_retries=self.SDK_MAX_RETRIES,
         )
 
-    def complete(self, request: LLMRequest) -> LLMResult:
+    def close(self) -> None:
+        """Release native resources owned by this adapter, if any."""
+
+        if self._client is None and self.client is not None:
+            _close_quietly(self.client)
+
+    def _complete_chat_with_cancellation(
+        self, request: LLMRequest, cancelled: Optional[Callable[[], bool]]
+    ) -> LLMResult:
+        """跑一次 chat 请求，尽力把在途等待绑定到 ``cancelled``（票 06）。
+
+        单请求独享 client + 取消监视：``watchdog`` 置位时关闭该请求的
+        client，在途读立即解除；结果 / 异常语义与 ``client.chat…create``
+        完全一致（同一 SDK 调用）。forced-tool 拒绝回退 JSON mode 的
+        既有行为保持（``_complete_chat`` 同一回退）。
+        """
+        if cancelled is None or self._client is not None:
+            return self._complete_chat(self.client, request)
+        client = self._make_client()
+        try:
+            return _run_with_cancel_watchdog(
+                lambda: self._complete_chat(client, request),
+                cancelled,
+                close=lambda: _close_quietly(client),
+                poll_seconds=self.CANCEL_POLL_SECONDS,
+            )
+        finally:
+            _close_quietly(client)
+
+    def _complete_responses_with_cancellation(
+        self, request: LLMRequest, cancelled: Optional[Callable[[], bool]]
+    ) -> LLMResult:
+        """``_complete_chat_with_cancellation`` 的 responses 端点版本。"""
+        if cancelled is None or self._client is not None:
+            return self._complete_responses_once(self.client, request)
+        client = self._make_client()
+        try:
+            return _run_with_cancel_watchdog(
+                lambda: self._complete_responses_once(client, request),
+                cancelled,
+                close=lambda: _close_quietly(client),
+                poll_seconds=self.CANCEL_POLL_SECONDS,
+            )
+        finally:
+            _close_quietly(client)
+
+    def complete(
+        self, request: LLMRequest, *, cancelled: Optional[Callable[[], bool]] = None
+    ) -> LLMResult:
         try:
             if self.profile.openai_endpoint is OpenAIEndpoint.RESPONSES:
-                return self._complete_responses(request)
-            return self._complete_chat(request)
+                return self._complete_responses_with_cancellation(request, cancelled)
+            return self._complete_chat_with_cancellation(request, cancelled)
         except (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError) as exc:
             retry_after: Optional[float] = None
             response = getattr(exc, "response", None)
@@ -571,12 +728,12 @@ class OpenAICompatibleAdapter(LLMAdapter):
             return "tool"
         return "json_object"
 
-    def _complete_chat(self, request: LLMRequest) -> LLMResult:
+    def _complete_chat(self, client: Any, request: LLMRequest) -> LLMResult:
         strategy = (
             self._structured_chat_strategy() if request.response_schema is not None else None
         )
         try:
-            return self._complete_chat_once(request, strategy)
+            return self._complete_chat_once(client, request, strategy)
         except openai.APIStatusError as exc:
             if strategy != "tool" or not _rejects_forced_tool_request(exc):
                 raise
@@ -586,11 +743,19 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 self.profile.model,
                 getattr(exc, "status_code", None),
             )
-        return self._complete_chat_once(request, "json_object")
+        return self._complete_chat_once(client, request, "json_object")
 
     def _complete_chat_once(
-        self, request: LLMRequest, strategy: Optional[StructuredChatStrategy]
+        self,
+        client: Any,
+        request: LLMRequest,
+        strategy: Optional[StructuredChatStrategy] = None,
     ) -> LLMResult:
+        strategy = (
+            self._structured_chat_strategy()
+            if strategy is None and request.response_schema is not None
+            else strategy
+        )
         application_body: dict[str, Any] = {
             "model": self.profile.model,
             "messages": [
@@ -647,7 +812,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         }
         kwargs["extra_body"] = final_body
         kwargs.update(self._transport_options(request))
-        response = self.client.chat.completions.create(**kwargs)
+        response = client.chat.completions.create(**kwargs)
 
         choices = _read_attr(response, "choices", []) or []
         choice = choices[0] if choices else None
@@ -692,7 +857,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             )
         return LLMResult(text=text.strip(), usage=usage, raw=response)
 
-    def _complete_responses(self, request: LLMRequest) -> LLMResult:
+    def _complete_responses_once(self, client: Any, request: LLMRequest) -> LLMResult:
         application_body: dict[str, Any] = {
             "model": self.profile.model,
             "input": [
@@ -726,7 +891,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         }
         kwargs["extra_body"] = final_body
         kwargs.update(self._transport_options(request))
-        response = self.client.responses.create(**kwargs)
+        response = client.responses.create(**kwargs)
 
         status_value = _diagnostic_text(_read_attr(response, "status"))
         status_label = status_value or "missing"
@@ -792,7 +957,12 @@ class AnthropicMessagesAdapter(LLMAdapter):
         self.session = session or requests.Session()
         self.timeout = timeout
 
-    def complete(self, request: LLMRequest) -> LLMResult:
+    def complete(
+        self, request: LLMRequest, *, cancelled: Optional[Callable[[], bool]] = None
+    ) -> LLMResult:
+        # requests.Session 无请求级抢占通道；在途等待由网关排队/退避取消
+        # 与请求超时兜底（票 06：此传输的取消尽力语义=超时窗口）。
+        del cancelled
         if request.response_schema is not None:
             self._validate_structured_output_compatibility(request)
         system_text = "\n\n".join(
@@ -999,7 +1169,12 @@ class GeminiAdapter(LLMAdapter):
         for name in names:
             self._delete_cached_content(name)
 
-    def complete(self, request: LLMRequest) -> LLMResult:
+    def complete(
+        self, request: LLMRequest, *, cancelled: Optional[Callable[[], bool]] = None
+    ) -> LLMResult:
+        # requests.Session 无请求级抢占通道；在途等待由网关排队/退避取消
+        # 与请求超时兜底（票 06：此传输的取消尽力语义=超时窗口）。
+        del cancelled
         system_text = "\n\n".join(
             item.content for item in request.messages if item.role == "system"
         )
