@@ -6,7 +6,7 @@ Claimed-at: 2026-09-15T03:04:40.603Z
 
 **阻塞于.** 无，可立即开始
 
-**状态.** claimed
+**状态.** resolved
 
 - [ ] qconfig 6 项默认与核心 PostprocessConfig 权威一致（ui/common/config.py 与 _POSTPROCESS_DEFAULTS 同步注释）
 - [ ] 新 tab 「显示限长」路由 viewing，插入「文本处理」之后，8 tab 导航完整
