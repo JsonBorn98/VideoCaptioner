@@ -233,6 +233,7 @@ class PostprocessSettingInterface(QWidget):
         self._refreshProfileChoices()
         self._connectPolicyPersistence()
         self._onPresetChanged(cfg.get(cfg.postprocess_profile))
+        self._refreshViewingLimitCards()
 
         self.vBoxLayout.setContentsMargins(36, 26, 36, 18)
         self.vBoxLayout.setSpacing(8)
@@ -668,11 +669,21 @@ class PostprocessSettingInterface(QWidget):
                 if absolute != cfg.get(pair.absolute_item):
                     cfg.set(pair.absolute_item, absolute)
                 # 收紧滑块/输入框范围，令用户拖不出目标 > 绝对的组合
-                _, absolute_high = pair.absolute_item.range
-                pair.target_card(self).setRange(target_low, cfg.get(pair.absolute_item))
-                pair.absolute_card(self).setRange(cfg.get(pair.target_item), absolute_high)
         finally:
             self._clampingViewingLimits = False
+        self._refreshViewingLimitCards()
+
+    def _refreshViewingLimitCards(self) -> None:
+        """同步限长控件范围与可用状态。"""
+        for pair in self._VIEWING_LIMIT_PAIRS:
+            target_low, _ = pair.target_item.range
+            _, absolute_high = pair.absolute_item.range
+            target_card = pair.target_card(self)
+            absolute_card = pair.absolute_card(self)
+            target_card.setRange(target_low, cfg.get(pair.absolute_item))
+            absolute_card.setRange(cfg.get(pair.target_item), absolute_high)
+            target_card.refreshValue()
+            absolute_card.refreshValue()
         self._refreshViewingLimitEnabled()
 
     def _refreshViewingLimitEnabled(self) -> None:
@@ -1370,7 +1381,7 @@ class PostprocessSettingInterface(QWidget):
         finally:
             self._applyingPolicy = False
         self._onCompensationChanged()  # 依新方案刷新联动范围
-        self._onViewingLimitChanged()  # 依新方案刷新限长联动范围与置灰态
+        self._refreshViewingLimitCards()  # 依新方案刷新限长控件范围与置灰态
 
     def _applyPolicy(self, policy: SpeedPolicy) -> None:
         self._applyingPolicy = True

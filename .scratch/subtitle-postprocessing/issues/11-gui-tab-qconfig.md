@@ -8,7 +8,7 @@ Claimed-at: 2026-09-15T03:04:40.603Z
 
 **状态.** resolved
 
-- [ ] qconfig 6 项默认与核心 PostprocessConfig 权威一致（ui/common/config.py 与 _POSTPROCESS_DEFAULTS 同步注释）
-- [ ] 新 tab 「显示限长」路由 viewing，插入「文本处理」之后，8 tab 导航完整
-- [ ] offscreen 驱动：改值→set_field→方案 JSON 落盘；方案切换（_onPresetChanged）快照应用刷新新 tab 全部 6 控件
-- [ ] 每项挂 _addProfileReset 复位按钮，复位回出厂值
+- [x] qconfig 6 项默认与核心 PostprocessConfig 权威一致（ui/common/config.py 与 _POSTPROCESS_DEFAULTS 同步注释）
+- [x] 新 tab 「显示限长」路由 viewing，插入「文本处理」之后，8 tab 导航完整
+- [x] offscreen 驱动：改值→set_field→方案 JSON 落盘；方案切换（_onPresetChanged）快照应用刷新新 tab 全部 6 控件
+- [x] 每项挂 _addProfileReset 复位按钮，复位回出厂值

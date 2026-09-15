@@ -244,6 +244,32 @@ widget.close()
     )
 
 
+def test_postprocess_viewing_settings_keep_valid_high_profile_limits(tmp_path):
+    profile_path = repr(str(tmp_path / "profiles.json"))
+    _run_qt_script(
+        f"""
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.core.postprocess import PostprocessProfileStore
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.speed_setting_interface import PostprocessSettingInterface
+
+app = QApplication([])
+store = PostprocessProfileStore({profile_path})
+store.set_field('balanced', 'single_line_absolute_cjk', 400)
+store.set_field('balanced', 'single_line_target_cjk', 300)
+widget = PostprocessSettingInterface(profile_store=store)
+
+# 核心只要求正数和 target <= absolute；GUI 加载方案时不得静默改写有效值。
+assert cfg.get(cfg.single_line_target_cjk) == 300
+assert cfg.get(cfg.single_line_absolute_cjk) == 400
+assert widget.singleLineTargetCjkCard.spinBox.value() == 300
+assert widget.singleLineAbsoluteCjkCard.spinBox.value() == 400
+widget.close()
+""",
+        tmp_dir=tmp_path / "appdata",
+    )
+
+
 def test_postprocess_viewing_limit_inputs_gray_out_only_when_both_sides_auto_wrap(tmp_path):
     profile_path = repr(str(tmp_path / "profiles.json"))
     _run_qt_script(

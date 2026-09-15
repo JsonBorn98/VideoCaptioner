@@ -157,6 +157,10 @@ class SliderSpinBoxSettingCard(SettingCard):
         finally:
             self._syncing = False
 
+    def refreshValue(self) -> None:
+        """在运行时范围变化后，把当前配置值回填到两个输入控件。"""
+        self.setValue(qconfig.get(self.configItem))
+
     def __onValueChanged(self, value: int):
         if self._syncing:
             return

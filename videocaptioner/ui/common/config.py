@@ -49,6 +49,9 @@ from videocaptioner.ui.common.translation_migration import migrate_legacy_transl
 
 _BALANCED_SPEED_POLICY = get_speed_policy()
 _POSTPROCESS_DEFAULTS = PostprocessConfig()
+# Qt 的 Slider / SpinBox 使用有符号 32 位整数；这个上限避免 GUI 比核心
+# 额外施加业务上限，同时仍可让控件安全表示任意实际的显示长度配置。
+_MAX_VIEWING_LENGTH = 2_147_483_647
 
 
 class Language(Enum):
@@ -541,7 +544,8 @@ class Config(QConfig):
 
     # ------------------- 显示限长 -------------------
     # keep in sync with core/postprocess/config.py (PostprocessConfig).
-    # _POSTPROCESS_DEFAULTS 是这六项默认值的唯一权威来源。
+    # _POSTPROCESS_DEFAULTS 是这六项默认值的唯一权威来源；范围只受 Qt
+    # 整数控件表示能力限制，不额外收紧核心允许的正整数。
     original_display_mode = OptionsConfigItem(
         "SubtitleViewing",
         "OriginalDisplayMode",
@@ -558,25 +562,25 @@ class Config(QConfig):
         "SubtitleViewing",
         "SingleLineTargetCjk",
         _POSTPROCESS_DEFAULTS.single_line_target_cjk,
-        RangeValidator(1, 200),
+        RangeValidator(1, _MAX_VIEWING_LENGTH),
     )
     single_line_absolute_cjk = RangeConfigItem(
         "SubtitleViewing",
         "SingleLineAbsoluteCjk",
         _POSTPROCESS_DEFAULTS.single_line_absolute_cjk,
-        RangeValidator(1, 200),
+        RangeValidator(1, _MAX_VIEWING_LENGTH),
     )
     single_line_target_latin = RangeConfigItem(
         "SubtitleViewing",
         "SingleLineTargetLatin",
         _POSTPROCESS_DEFAULTS.single_line_target_latin,
-        RangeValidator(1, 200),
+        RangeValidator(1, _MAX_VIEWING_LENGTH),
     )
     single_line_absolute_latin = RangeConfigItem(
         "SubtitleViewing",
         "SingleLineAbsoluteLatin",
         _POSTPROCESS_DEFAULTS.single_line_absolute_latin,
-        RangeValidator(1, 200),
+        RangeValidator(1, _MAX_VIEWING_LENGTH),
     )
 
     # ------------------- 字幕合成配置 -------------------
