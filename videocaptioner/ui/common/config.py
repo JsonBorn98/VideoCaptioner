@@ -539,6 +539,46 @@ class Config(QConfig):
         "SubtitleSpeed", "SaveTimingSidecar", False, BoolValidator()
     )
 
+    # ------------------- 显示限长 -------------------
+    # keep in sync with core/postprocess/config.py (PostprocessConfig).
+    # _POSTPROCESS_DEFAULTS 是这六项默认值的唯一权威来源。
+    original_display_mode = OptionsConfigItem(
+        "SubtitleViewing",
+        "OriginalDisplayMode",
+        _POSTPROCESS_DEFAULTS.original_display_mode,
+        OptionsValidator(["single_line", "auto_wrap"]),
+    )
+    translated_display_mode = OptionsConfigItem(
+        "SubtitleViewing",
+        "TranslatedDisplayMode",
+        _POSTPROCESS_DEFAULTS.translated_display_mode,
+        OptionsValidator(["single_line", "auto_wrap"]),
+    )
+    single_line_target_cjk = RangeConfigItem(
+        "SubtitleViewing",
+        "SingleLineTargetCjk",
+        _POSTPROCESS_DEFAULTS.single_line_target_cjk,
+        RangeValidator(1, 200),
+    )
+    single_line_absolute_cjk = RangeConfigItem(
+        "SubtitleViewing",
+        "SingleLineAbsoluteCjk",
+        _POSTPROCESS_DEFAULTS.single_line_absolute_cjk,
+        RangeValidator(1, 200),
+    )
+    single_line_target_latin = RangeConfigItem(
+        "SubtitleViewing",
+        "SingleLineTargetLatin",
+        _POSTPROCESS_DEFAULTS.single_line_target_latin,
+        RangeValidator(1, 200),
+    )
+    single_line_absolute_latin = RangeConfigItem(
+        "SubtitleViewing",
+        "SingleLineAbsoluteLatin",
+        _POSTPROCESS_DEFAULTS.single_line_absolute_latin,
+        RangeValidator(1, 200),
+    )
+
     # ------------------- 字幕合成配置 -------------------
     soft_subtitle = ConfigItem("Video", "SoftSubtitle", False, BoolValidator())
     need_video = ConfigItem("Video", "NeedVideo", True, BoolValidator())

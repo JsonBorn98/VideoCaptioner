@@ -212,6 +212,7 @@ class PostprocessSettingInterface(QWidget):
         for route_key, title in (
             ("overview", self.tr("方案")),
             ("text", self.tr("文本处理")),
+            ("viewing", self.tr("显示限长")),
             ("reading", self.tr("阅读目标")),
             ("timing", self.tr("时间与结构")),
             ("semantic", self.tr("语义修复")),
@@ -222,6 +223,7 @@ class PostprocessSettingInterface(QWidget):
 
         self._buildOverviewTab()
         self._buildTextTab()
+        self._buildViewingTab()
         self._buildReadingTab()
         self._buildTimingTab()
         self._buildSemanticTab()
@@ -493,6 +495,133 @@ class PostprocessSettingInterface(QWidget):
             self._addProfileReset(card, item, field)
             group.addSettingCard(card)
         tab.addGroup(group)
+
+    def _buildViewingTab(self) -> None:
+        tab = self._tabs["viewing"]
+        mode_group = SettingCardGroup(self.tr("显示模式"), tab.scrollWidget)
+        self.originalDisplayModeCard = ComboBoxSettingCard(
+            cfg.original_display_mode,
+            FIF.FONT,
+            self.tr("原文侧显示模式"),
+            self.tr("单行限长会执行显示长度约束；自动换行交给播放器或渲染器"),
+            texts=[self.tr("单行限长"), self.tr("自动换行")],
+            parent=mode_group,
+        )
+        self.translatedDisplayModeCard = ComboBoxSettingCard(
+            cfg.translated_display_mode,
+            FIF.FONT,
+            self.tr("译文侧显示模式"),
+            self.tr("单行限长会执行显示长度约束；自动换行交给播放器或渲染器"),
+            texts=[self.tr("单行限长"), self.tr("自动换行")],
+            parent=mode_group,
+        )
+        for card, item, field in (
+            (self.originalDisplayModeCard, cfg.original_display_mode, "original_display_mode"),
+            (
+                self.translatedDisplayModeCard,
+                cfg.translated_display_mode,
+                "translated_display_mode",
+            ),
+        ):
+            self._addProfileReset(card, item, field)
+            mode_group.addSettingCard(card)
+        tab.addGroup(mode_group)
+
+        limit_group = SettingCardGroup(self.tr("单行限长"), tab.scrollWidget)
+        self.singleLineTargetCjkCard = SliderSpinBoxSettingCard(
+            cfg.single_line_target_cjk,
+            FIF.FONT,
+            self.tr("中文目标上限"),
+            self.tr("折算字符数软目标；为语义和节奏可保留较长内容"),
+            minimum=cfg.single_line_target_cjk.range[0],
+            maximum=cfg.single_line_target_cjk.range[1],
+            step=1,
+            parent=limit_group,
+        )
+        self.singleLineAbsoluteCjkCard = SliderSpinBoxSettingCard(
+            cfg.single_line_absolute_cjk,
+            FIF.FONT,
+            self.tr("中文绝对上限"),
+            self.tr("折算字符数硬条件；目标上限不得高于此值"),
+            minimum=cfg.single_line_absolute_cjk.range[0],
+            maximum=cfg.single_line_absolute_cjk.range[1],
+            step=1,
+            parent=limit_group,
+        )
+        self.singleLineTargetLatinCard = SliderSpinBoxSettingCard(
+            cfg.single_line_target_latin,
+            FIF.FONT,
+            self.tr("拉丁目标上限"),
+            self.tr("折算字符数软目标；半角字符按 0.5 计数"),
+            minimum=cfg.single_line_target_latin.range[0],
+            maximum=cfg.single_line_target_latin.range[1],
+            step=1,
+            parent=limit_group,
+        )
+        self.singleLineAbsoluteLatinCard = SliderSpinBoxSettingCard(
+            cfg.single_line_absolute_latin,
+            FIF.FONT,
+            self.tr("拉丁绝对上限"),
+            self.tr("折算字符数硬条件；目标上限不得高于此值"),
+            minimum=cfg.single_line_absolute_latin.range[0],
+            maximum=cfg.single_line_absolute_latin.range[1],
+            step=1,
+            parent=limit_group,
+        )
+        for card, item, field in (
+            (self.singleLineTargetCjkCard, cfg.single_line_target_cjk, "single_line_target_cjk"),
+            (
+                self.singleLineAbsoluteCjkCard,
+                cfg.single_line_absolute_cjk,
+                "single_line_absolute_cjk",
+            ),
+            (
+                self.singleLineTargetLatinCard,
+                cfg.single_line_target_latin,
+                "single_line_target_latin",
+            ),
+            (
+                self.singleLineAbsoluteLatinCard,
+                cfg.single_line_absolute_latin,
+                "single_line_absolute_latin",
+            ),
+        ):
+            self._addProfileReset(card, item, field)
+            limit_group.addSettingCard(card)
+        tab.addGroup(limit_group)
+        self._connectViewingLimitRanges()
+
+    def _connectViewingLimitRanges(self) -> None:
+        """Keep target/absolute inputs inside PostprocessConfig's ordered limits."""
+        for item in (
+            cfg.single_line_target_cjk,
+            cfg.single_line_absolute_cjk,
+            cfg.single_line_target_latin,
+            cfg.single_line_absolute_latin,
+        ):
+            item.valueChanged.connect(self._refreshViewingLimitRanges)
+        self._refreshViewingLimitRanges()
+
+    def _refreshViewingLimitRanges(self, *_: Any) -> None:
+        pairs = (
+            (
+                cfg.single_line_target_cjk,
+                self.singleLineTargetCjkCard,
+                cfg.single_line_absolute_cjk,
+                self.singleLineAbsoluteCjkCard,
+            ),
+            (
+                cfg.single_line_target_latin,
+                self.singleLineTargetLatinCard,
+                cfg.single_line_absolute_latin,
+                self.singleLineAbsoluteLatinCard,
+            ),
+        )
+        for target_item, target_card, absolute_item, absolute_card in pairs:
+            target_low, _ = target_item.range
+            _, absolute_high = absolute_item.range
+            target_card.setRange(target_low, cfg.get(absolute_item))
+            absolute_card.setRange(cfg.get(target_item), absolute_high)
 
     def _doubleCard(
         self,
@@ -1067,6 +1196,12 @@ class PostprocessSettingInterface(QWidget):
             (cfg.min_compensation_ms, "min_compensation_ms"),
             (cfg.max_compensation_gap_ms, "max_compensation_gap_ms"),
             (cfg.max_compensation_ms, "max_compensation_ms"),
+            (cfg.original_display_mode, "original_display_mode"),
+            (cfg.translated_display_mode, "translated_display_mode"),
+            (cfg.single_line_target_cjk, "single_line_target_cjk"),
+            (cfg.single_line_absolute_cjk, "single_line_absolute_cjk"),
+            (cfg.single_line_target_latin, "single_line_target_latin"),
+            (cfg.single_line_absolute_latin, "single_line_absolute_latin"),
         ):
             item.valueChanged.connect(
                 lambda value, field_name=field_name: self._persistProfileValue(
@@ -1149,11 +1284,18 @@ class PostprocessSettingInterface(QWidget):
                 (cfg.min_compensation_ms, config.min_compensation_ms),
                 (cfg.max_compensation_gap_ms, config.max_compensation_gap_ms),
                 (cfg.max_compensation_ms, config.max_compensation_ms),
+                (cfg.original_display_mode, config.original_display_mode),
+                (cfg.translated_display_mode, config.translated_display_mode),
+                (cfg.single_line_target_cjk, config.single_line_target_cjk),
+                (cfg.single_line_absolute_cjk, config.single_line_absolute_cjk),
+                (cfg.single_line_target_latin, config.single_line_target_latin),
+                (cfg.single_line_absolute_latin, config.single_line_absolute_latin),
             ):
                 cfg.set(item, value)
         finally:
             self._applyingPolicy = False
         self._onCompensationChanged()  # 依新方案刷新联动范围
+        self._refreshViewingLimitRanges()  # 依新方案刷新目标/绝对上限范围
 
     def _applyPolicy(self, policy: SpeedPolicy) -> None:
         self._applyingPolicy = True

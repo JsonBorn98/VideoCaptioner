@@ -180,6 +180,61 @@ print('OK')
     )
 
 
+def test_postprocess_viewing_settings_persist_and_follow_profile_switches(tmp_path):
+    profile_path = repr(str(tmp_path / "profiles.json"))
+    _run_qt_script(
+        f"""
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.core.postprocess import PostprocessProfileStore
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.speed_setting_interface import PostprocessSettingInterface
+
+app = QApplication([])
+store = PostprocessProfileStore({profile_path})
+store.set_field('balanced', 'original_display_mode', 'auto_wrap')
+store.set_field('balanced', 'translated_display_mode', 'single_line')
+store.set_field('balanced', 'single_line_target_cjk', 17)
+store.set_field('balanced', 'single_line_absolute_cjk', 23)
+store.set_field('balanced', 'single_line_target_latin', 22)
+store.set_field('balanced', 'single_line_absolute_latin', 29)
+widget = PostprocessSettingInterface(profile_store=store)
+
+assert tuple(widget._tabs) == (
+    'overview', 'text', 'viewing', 'reading', 'timing', 'semantic', 'alignment', 'report'
+)
+assert cfg.get(cfg.original_display_mode) == 'auto_wrap'
+assert cfg.get(cfg.translated_display_mode) == 'single_line'
+assert cfg.get(cfg.single_line_target_cjk) == 17
+assert cfg.get(cfg.single_line_absolute_cjk) == 23
+assert cfg.get(cfg.single_line_target_latin) == 22
+assert cfg.get(cfg.single_line_absolute_latin) == 29
+
+cfg.set(cfg.single_line_target_cjk, 18)
+app.processEvents()
+assert store.get('balanced').config.single_line_target_cjk == 18
+assert widget.singleLineTargetCjkCard.spinBox.maximum() == 23
+assert widget.singleLineAbsoluteCjkCard.spinBox.minimum() == 18
+
+cfg.set(cfg.postprocess_profile, 'loose')
+app.processEvents()
+assert cfg.get(cfg.original_display_mode) == 'single_line'
+assert cfg.get(cfg.translated_display_mode) == 'single_line'
+assert cfg.get(cfg.single_line_target_cjk) == 16
+assert cfg.get(cfg.single_line_absolute_cjk) == 20
+assert cfg.get(cfg.single_line_target_latin) == 21
+assert cfg.get(cfg.single_line_absolute_latin) == 25
+
+cfg.set(cfg.single_line_target_cjk, 18)
+widget._resetProfileField(
+    cfg.single_line_target_cjk, 'single_line_target_cjk'
+)
+assert cfg.get(cfg.single_line_target_cjk) == 16
+assert store.get('loose').config.single_line_target_cjk == 16
+widget.close()
+"""
+    )
+
+
 def test_postprocess_settings_tabs_keep_dark_theme_background_transparent(tmp_path):
     profile_path = repr(str(tmp_path / "profiles.json"))
     _run_qt_script(
