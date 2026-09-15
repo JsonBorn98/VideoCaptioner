@@ -303,6 +303,16 @@ def _add_postprocess_options(parser: argparse.ArgumentParser, *, hidden: bool = 
         action="store_true",
         help=h("Do not send uncertain semantic candidates to an LLM reviewer"),
     )
+    grp.add_argument(
+        "--original-display-mode",
+        choices=["single_line", "auto_wrap"],
+        help=h("Original subtitle display mode (default: single_line)"),
+    )
+    grp.add_argument(
+        "--translated-display-mode",
+        choices=["single_line", "auto_wrap"],
+        help=h("Translated subtitle display mode (default: single_line)"),
+    )
 
 
 def _add_canonical_srt_output(parser: argparse.ArgumentParser) -> None:
@@ -1205,6 +1215,8 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
     _set("postprocess.semantic_window", getattr(args, "speed_semantic_window", None))
     if getattr(args, "no_speed_llm_review", False):
         _set("postprocess.llm_uncertain_review", False)
+    _set("postprocess.original_display_mode", getattr(args, "original_display_mode", None))
+    _set("postprocess.translated_display_mode", getattr(args, "translated_display_mode", None))
 
     # Translate
     translator = getattr(args, "translator", None)

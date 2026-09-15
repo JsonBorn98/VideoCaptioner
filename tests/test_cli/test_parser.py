@@ -173,10 +173,39 @@ class TestTranscribeParser:
         assert postprocess["semantic_window"] == 7
         assert postprocess["llm_uncertain_review"] is False
 
+    def test_display_mode_flags_map_to_dedicated_config_for_both_entry_points(self):
+        parser = build_parser()
+        for command, input_path in (("postprocess", "input.srt"), ("process", "input.mp4")):
+            args = parser.parse_args(
+                [
+                    command,
+                    input_path,
+                    "--original-display-mode",
+                    "auto_wrap",
+                    "--translated-display-mode",
+                    "single_line",
+                ]
+            )
+
+            assert _build_cli_overrides(args)["postprocess"] == {
+                "original_display_mode": "auto_wrap",
+                "translated_display_mode": "single_line",
+            }
+
+    def test_display_mode_flags_reject_invalid_values(self):
+        parser = build_parser()
+        for command, input_path in (("postprocess", "input.srt"), ("process", "input.mp4")):
+            with pytest.raises(SystemExit) as exc:
+                parser.parse_args([command, input_path, "--original-display-mode", "invalid"])
+
+            assert exc.value.code == EXIT.USAGE_ERROR
+
     def test_postprocess_defaults_absent_when_flags_unset(self):
         overrides = _build_cli_overrides(Namespace())
         # No postprocess overrides should be emitted so config-file/defaults win.
         assert "remove_placeholders" not in overrides.get("postprocess", {})
+        assert "original_display_mode" not in overrides.get("postprocess", {})
+        assert "translated_display_mode" not in overrides.get("postprocess", {})
 
     def test_transcribe_command_builds_qwen_config(self, tmp_path, monkeypatch):
         import videocaptioner.core.asr as asr_package

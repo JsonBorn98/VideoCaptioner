@@ -41,6 +41,15 @@ LLM_API_KEY_ENV_OVERRIDE = "VIDEOCAPTIONER_LLM_API_KEY"
 # Sentinel distinguishing "key absent" from a falsy stored value.
 _MISSING = object()
 
+
+class ResolvedConfig(dict):
+    """Merged CLI config with provenance for viewing-profile overrides."""
+
+    def __init__(self, values: dict, *, explicit_viewing_fields: set[str]) -> None:
+        super().__init__(values)
+        self.explicit_viewing_fields = frozenset(explicit_viewing_fields)
+
+
 # Environment variable mappings: env var name → config dotted key.
 #
 # LLM model selection is profile-based (ADR-0015): the three profile-id keys
@@ -155,6 +164,13 @@ DEFAULTS: Dict[str, Any] = {
         "enabled": True,
         "profile": "balanced",
         "media": "",
+        # Keep in sync with core/postprocess/config.py PostprocessConfig.
+        "original_display_mode": "single_line",
+        "translated_display_mode": "single_line",
+        "single_line_target_cjk": 16,
+        "single_line_absolute_cjk": 20,
+        "single_line_target_latin": 21,
+        "single_line_absolute_latin": 25,
     },
     "translate": {
         "mode": "enhanced_llm",
@@ -301,11 +317,28 @@ def build_config(
     # Layer 3: CLI argument overrides
     if cli_overrides:
         config = _deep_merge(config, cli_overrides)
+    viewing_fields = {
+        "original_display_mode",
+        "translated_display_mode",
+        "single_line_target_cjk",
+        "single_line_absolute_cjk",
+        "single_line_target_latin",
+        "single_line_absolute_latin",
+    }
+    explicit_viewing_fields = {
+        key
+        for layer in (file_config, env_config, cli_overrides or {})
+        for key in layer.get("postprocess", {})
+        if key in viewing_fields
+    }
     # The CLI is agent-facing: silently ignored LLM keys are a debugging hell,
     # so leftover pre-profile keys get a one-time stderr warning plus migration
     # guidance. The data itself is tolerated, not migrated (dead data, no fail).
     _warn_legacy_llm_keys(file_config, cli_overrides or {}, os.environ)
-    return config
+    return ResolvedConfig(
+        config,
+        explicit_viewing_fields=explicit_viewing_fields,
+    )
 
 
 _LEGACY_LLM_FILE_KEYS = (

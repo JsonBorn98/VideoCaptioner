@@ -80,6 +80,142 @@ def test_standalone_command_preserves_input_and_writes_named_output(
     assert str(output_path) in capsys.readouterr().out
 
 
+def test_toml_viewing_options_override_resolved_postprocess_profile(monkeypatch, tmp_path):
+    import videocaptioner.core.postprocess as postprocess_package
+
+    source = tmp_path / "sample.srt"
+    source.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+    store = PostprocessProfileStore(tmp_path / "profiles.json")
+    monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
+    captured = {}
+
+    def fake_run(task, **_kwargs):
+        captured["config"] = task.config_snapshot
+        return type(
+            "Result",
+            (),
+            {
+                "warnings": [],
+                "succeeded": True,
+                "output_data": None,
+                "continue_downstream": True,
+                "task": task,
+            },
+        )()
+
+    monkeypatch.setattr(postprocess_package, "run_postprocess_task", fake_run)
+    args = Namespace(
+        input=str(source),
+        output=None,
+        layout="source-only",
+        profile="balanced",
+        speed_profile=None,
+        media=None,
+        speed_media=None,
+        quiet=True,
+        verbose=False,
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[postprocess]\n"
+        'original_display_mode = "auto_wrap"\n'
+        'translated_display_mode = "single_line"\n'
+        "single_line_target_cjk = 18\n"
+        "single_line_absolute_cjk = 22\n"
+        "single_line_target_latin = 24\n"
+        "single_line_absolute_latin = 28\n",
+        encoding="utf-8",
+    )
+    config = build_config(
+        {"llm": {"profile_id": "main-profile"}},
+        config_path,
+    )
+
+    assert command.run(args, config) == EXIT.SUCCESS
+    resolved = captured["config"]
+    assert resolved.original_display_mode == "auto_wrap"
+    assert resolved.translated_display_mode == "single_line"
+    assert resolved.single_line_target_cjk == 18
+    assert resolved.single_line_absolute_cjk == 22
+    assert resolved.single_line_target_latin == 24
+    assert resolved.single_line_absolute_latin == 28
+
+
+def test_default_config_does_not_override_postprocess_profile_viewing_options(monkeypatch, tmp_path):
+    import videocaptioner.core.postprocess as postprocess_package
+
+    source = tmp_path / "sample.srt"
+    source.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+    store = PostprocessProfileStore(tmp_path / "profiles.json")
+    store.set_field("balanced", "original_display_mode", "auto_wrap")
+    captured = {}
+
+    def fake_run(task, **_kwargs):
+        captured["config"] = task.config_snapshot
+        return type(
+            "Result",
+            (),
+            {
+                "warnings": [],
+                "succeeded": True,
+                "output_data": None,
+                "continue_downstream": True,
+                "task": task,
+            },
+        )()
+
+    monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
+    monkeypatch.setattr(postprocess_package, "run_postprocess_task", fake_run)
+    args = Namespace(
+        input=str(source),
+        output=None,
+        layout="source-only",
+        profile="balanced",
+        speed_profile=None,
+        media=None,
+        speed_media=None,
+        quiet=True,
+        verbose=False,
+    )
+
+    assert command.run(args, _config(postprocess={})) == EXIT.SUCCESS
+    assert captured["config"].original_display_mode == "auto_wrap"
+
+
+def test_invalid_toml_viewing_limits_return_usage_error(monkeypatch, tmp_path, capsys):
+    import videocaptioner.core.postprocess as postprocess_package
+
+    source = tmp_path / "sample.srt"
+    source.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+    store = PostprocessProfileStore(tmp_path / "profiles.json")
+    monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
+    args = Namespace(
+        input=str(source),
+        output=None,
+        layout="source-only",
+        profile="balanced",
+        speed_profile=None,
+        media=None,
+        speed_media=None,
+        quiet=True,
+        verbose=False,
+    )
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[postprocess]\n"
+        "single_line_target_cjk = 23\n"
+        "single_line_absolute_cjk = 22\n",
+        encoding="utf-8",
+    )
+
+    assert command.run(
+        args,
+        build_config({"llm": {"profile_id": "main-profile"}}, config_path),
+    ) == EXIT.USAGE_ERROR
+    assert "cannot exceed" in capsys.readouterr().err
+
+
 def test_explicit_ass_output_is_normalized_to_srt(monkeypatch, tmp_path, capsys):
     import videocaptioner.core.postprocess as postprocess_package
 

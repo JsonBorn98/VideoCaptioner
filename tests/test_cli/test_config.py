@@ -81,6 +81,16 @@ def test_default_enhanced_batch_size_is_ten():
     assert DEFAULTS["translate"]["enhanced_batch_size"] == 10
 
 
+def test_default_postprocess_viewing_options_match_core_defaults():
+    defaults = DEFAULTS["postprocess"]
+    assert defaults["original_display_mode"] == "single_line"
+    assert defaults["translated_display_mode"] == "single_line"
+    assert defaults["single_line_target_cjk"] == 16
+    assert defaults["single_line_absolute_cjk"] == 20
+    assert defaults["single_line_target_latin"] == 21
+    assert defaults["single_line_absolute_latin"] == 25
+
+
 class TestDeepMerge:
     def test_flat_override(self):
         assert _deep_merge({"a": 1}, {"a": 2}) == {"a": 2}

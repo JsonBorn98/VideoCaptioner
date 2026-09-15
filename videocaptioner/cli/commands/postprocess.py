@@ -18,6 +18,17 @@ _LAYOUT_MODES = {
     "target-only": "translate_only",
 }
 
+_VIEWING_FIELDS = frozenset(
+    {
+        "original_display_mode",
+        "translated_display_mode",
+        "single_line_target_cjk",
+        "single_line_absolute_cjk",
+        "single_line_target_latin",
+        "single_line_absolute_latin",
+    }
+)
+
 _CONFIG_OVERRIDE_FIELDS = {
     "remove_placeholders": "remove_placeholders",
     "normalize_quotes": "normalize_quotes",
@@ -33,6 +44,12 @@ _CONFIG_OVERRIDE_FIELDS = {
     "semantic_repair": "speed_semantic_repair",
     "semantic_window": "speed_semantic_window",
     "llm_uncertain_review": "speed_llm_uncertain_review",
+    "original_display_mode": "original_display_mode",
+    "translated_display_mode": "translated_display_mode",
+    "single_line_target_cjk": "single_line_target_cjk",
+    "single_line_absolute_cjk": "single_line_absolute_cjk",
+    "single_line_target_latin": "single_line_target_latin",
+    "single_line_absolute_latin": "single_line_absolute_latin",
 }
 
 
@@ -160,12 +177,17 @@ def run(args: Namespace, config: dict) -> int:
         return EXIT.USAGE_ERROR
 
     section = config.get("postprocess", {})
+    explicit_fields = getattr(config, "explicit_viewing_fields", ())
     overrides = {
         field_name: section[key]
         for key, field_name in _CONFIG_OVERRIDE_FIELDS.items()
-        if key in section
+        if key in section and (key not in _VIEWING_FIELDS or key in explicit_fields)
     }
-    resolved = replace(resolved, **overrides)
+    try:
+        resolved = replace(resolved, **overrides)
+    except ValueError as exc:
+        output.error(f"Invalid postprocess configuration: {exc}")
+        return EXIT.USAGE_ERROR
     # Compress re-translation and semantic repair resolve their model from the
     # profile store (utility binding first, then derived from main). Only a
     # config that actually issues utility LLM requests needs a profile, and it
