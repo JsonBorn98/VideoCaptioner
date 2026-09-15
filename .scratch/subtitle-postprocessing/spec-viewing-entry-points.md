@@ -68,3 +68,4 @@
 - 验收口径：GUI 改值 → 起任务 → 后处理结果符合该限长（现有 `test_end_to_end_delivery.py` 的混合模式用例已覆盖核心行为，本 spec 只验入口到核心的传递）。
 - 本 spec 不修改 ADR-0020；其「运行代码尚未迁移」备注指显式资产/批量容量等遗留，显示模式核心部分已完成，此处仅补入口。
 - GUI tab 数从 7 到 8：新增 tab 的注册、路由 key（建议 `viewing`）与标题「显示限长」。
+- **勘误（2026-09-15，票 12 裁决）**：方案段与 US6 的「每侧 4 个限长输入框 / 某侧 auto_wrap 只置灰该侧输入框」与本 spec 实现决策段的「核心零改动 6 字段」矛盾——核心限长四值两侧共享（`scan_viewing_lengths` 对每个 single_line 侧用同一组值），UI 侧为共享 4 卡（票 11 已交付）。置灰口径裁定为「两侧均 auto_wrap 才置灰共享 4 卡输入框（不含复位按钮），任一侧 single_line 保持可用，值照常持久化」；详见 `.scratch/subtitle-postprocessing/issues/12-gui.md` 的 Comments 裁决。
