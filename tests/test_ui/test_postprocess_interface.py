@@ -1,11 +1,17 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
-def _run_qt_script(script: str) -> None:
+def _run_qt_script(script: str, tmp_dir: Path | None = None) -> None:
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
+    if tmp_dir is not None:
+        # 隔离 qconfig settings.json：否则上一个子进程的 cfg.set 会落盘到
+        # 真实 AppData，污染下一个测试的初始 qconfig 状态（QConfig.set 对
+        # 相等值直接返回不发信号，断言随之漂移）。
+        env["VIDEOCAPTIONER_APPDATA_PATH"] = str(tmp_dir.resolve())
     result = subprocess.run(
         [sys.executable, "-c", script],
         env=env,
@@ -100,9 +106,7 @@ def test_postprocess_run_reloads_latest_saved_profile(tmp_path):
     # LLM 方案库存独立文件：后处理方案库用 profiles.json，两者 schema 不同。
     seed = _seed_main_profile_script(str(tmp_path / "llm_profiles.json"))
     srt = tmp_path / "in.srt"
-    srt.write_text(
-        "1\n00:00:00,000 --> 00:00:02,000\nhello world\n", encoding="utf-8"
-    )
+    srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nhello world\n", encoding="utf-8")
     srt_path = repr(str(srt))
     _run_qt_script(
         f"""
@@ -209,6 +213,10 @@ assert cfg.get(cfg.single_line_absolute_cjk) == 23
 assert cfg.get(cfg.single_line_target_latin) == 22
 assert cfg.get(cfg.single_line_absolute_latin) == 29
 
+# 原文侧 auto_wrap、译文侧单行：限长仍约束译文侧，输入保持可用（共享四值）
+assert widget.singleLineTargetCjkCard.spinBox.isEnabled()
+assert widget.singleLineAbsoluteLatinCard.spinBox.isEnabled()
+
 cfg.set(cfg.single_line_target_cjk, 18)
 app.processEvents()
 assert store.get('balanced').config.single_line_target_cjk == 18
@@ -231,7 +239,161 @@ widget._resetProfileField(
 assert cfg.get(cfg.single_line_target_cjk) == 16
 assert store.get('loose').config.single_line_target_cjk == 16
 widget.close()
-"""
+""",
+        tmp_dir=tmp_path / "appdata",
+    )
+
+
+def test_postprocess_viewing_limit_inputs_gray_out_only_when_both_sides_auto_wrap(tmp_path):
+    profile_path = repr(str(tmp_path / "profiles.json"))
+    _run_qt_script(
+        f"""
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.core.postprocess import PostprocessProfileStore
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.speed_setting_interface import PostprocessSettingInterface
+
+app = QApplication([])
+store = PostprocessProfileStore({profile_path})
+widget = PostprocessSettingInterface(profile_store=store)
+cards = (
+    widget.singleLineTargetCjkCard,
+    widget.singleLineAbsoluteCjkCard,
+    widget.singleLineTargetLatinCard,
+    widget.singleLineAbsoluteLatinCard,
+)
+# 复位按钮只灰「输入框本体」，不连带禁用（值照常持久化，不因置灰跳过）
+from qfluentwidgets import ToolButton
+reset_button = cards[0].findChild(ToolButton, 'postprocessResetButton')
+
+def spin_enabled():
+    return [card.spinBox.isEnabled() for card in cards]
+
+def slider_enabled():
+    return [card.slider.isEnabled() for card in cards]
+
+# 默认两侧单行限长：输入可用
+assert all(spin_enabled()), spin_enabled()
+
+# 先改一个值让复位按钮亮起（未修改参数的复位按钮本就禁用，与置灰无关）
+cfg.set(cfg.single_line_target_cjk, 19)
+app.processEvents()
+assert reset_button is not None and reset_button.isEnabled()
+
+# 原文侧切 auto_wrap：译文侧仍单行限长，共享限长值仍参与验收，输入保持可用
+cfg.set(cfg.original_display_mode, 'auto_wrap')
+app.processEvents()
+assert all(spin_enabled()), 'shared limits still bind the translated side'
+assert store.get('balanced').config.original_display_mode == 'auto_wrap'
+
+# 译文侧也切 auto_wrap：限长不再参与任何侧验收，输入框/滑块置灰（复位按钮不灰）
+cfg.set(cfg.translated_display_mode, 'auto_wrap')
+app.processEvents()
+assert not any(spin_enabled()), spin_enabled()
+assert not any(slider_enabled()), slider_enabled()
+assert reset_button is not None and reset_button.isEnabled(), (
+    'reset must stay usable while inputs are grayed out'
+)
+
+# 置灰期间改值照常持久化（cfg 与方案存储同步，不因置灰跳过）
+cfg.set(cfg.single_line_absolute_cjk, 23)
+app.processEvents()
+assert store.get('balanced').config.single_line_absolute_cjk == 23
+assert cfg.get(cfg.single_line_absolute_cjk) == 23
+
+# 切回 single_line：输入恢复可用，旧值保留（置灰期间的写入没有被清掉）
+cfg.set(cfg.translated_display_mode, 'single_line')
+app.processEvents()
+assert all(spin_enabled())
+assert cfg.get(cfg.single_line_target_cjk) == 19
+assert store.get('balanced').config.single_line_target_cjk == 19
+widget.close()
+""",
+        tmp_dir=tmp_path / "appdata",
+    )
+
+
+def test_postprocess_viewing_limit_clamp_normalizes_target_above_absolute(tmp_path):
+    profile_path = repr(str(tmp_path / "profiles.json"))
+    _run_qt_script(
+        f"""
+from PyQt5.QtWidgets import QApplication
+from videocaptioner.core.postprocess import PostprocessProfileStore
+from videocaptioner.core.postprocess.config import PostprocessConfig
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.view.speed_setting_interface import PostprocessSettingInterface
+
+app = QApplication([])
+store = PostprocessProfileStore({profile_path})
+widget = PostprocessSettingInterface(profile_store=store)
+# 桩掉错误条：规整路径不应弹「无法保存参数」（陈旧信号载荷曾触发
+# store 校验失败，spec US7「被 UI 联动纠正而不是等运行报错」）
+errors = []
+widget._showProfileError = lambda action, exc: errors.append((action, str(exc)))
+
+# 把绝对上限压到目标以下：规整以绝对为锚压低目标（幂等，写回合法值并落盘，
+# 不反向抬高绝对上限——CONTEXT.md「绝对长度上限」是验收必要条件）
+cfg.set(cfg.single_line_absolute_cjk, 10)
+app.processEvents()
+assert cfg.get(cfg.single_line_absolute_cjk) == 10, cfg.get(cfg.single_line_absolute_cjk)
+assert cfg.get(cfg.single_line_target_cjk) == 10
+profile = store.get('balanced').config
+assert profile.single_line_absolute_cjk == 10
+assert profile.single_line_target_cjk == 10
+assert not errors, errors
+# 规整后与核心 PostprocessConfig 校验一致（目标 ≤ 绝对、两上限为正）
+PostprocessConfig(
+    original_display_mode=profile.original_display_mode,
+    translated_display_mode=profile.translated_display_mode,
+    single_line_target_cjk=profile.single_line_target_cjk,
+    single_line_absolute_cjk=profile.single_line_absolute_cjk,
+    single_line_target_latin=profile.single_line_target_latin,
+    single_line_absolute_latin=profile.single_line_absolute_latin,
+)
+
+# 先抬目标、再收紧范围：目标卡上限钉在绝对值上，拖不出非法组合
+cfg.set(cfg.single_line_absolute_cjk, 22)
+app.processEvents()
+cfg.set(cfg.single_line_target_cjk, 20)
+app.processEvents()
+assert widget.singleLineTargetCjkCard.spinBox.maximum() == 22
+assert widget.singleLineAbsoluteCjkCard.spinBox.minimum() == 20
+assert widget.singleLineTargetLatinCard.spinBox.maximum() == cfg.get(cfg.single_line_absolute_latin)
+assert widget.singleLineAbsoluteLatinCard.spinBox.minimum() == cfg.get(cfg.single_line_target_latin)
+assert not errors, errors
+
+# 复位限长字段后联动范围跟着刷新（曾经复位停在旧值上，可拖出非法组合）。
+# 场景：cjk pair 处于 20/22；复位 target_cjk 回出厂 16 → 卡上限应仍钉在 22。
+widget._resetProfileField(cfg.single_line_target_cjk, 'single_line_target_cjk')
+app.processEvents()
+assert cfg.get(cfg.single_line_target_cjk) == 16
+assert cfg.get(cfg.single_line_absolute_cjk) == 22
+assert widget.singleLineTargetCjkCard.spinBox.maximum() == 22, (
+    widget.singleLineTargetCjkCard.spinBox.maximum()
+)
+assert widget.singleLineAbsoluteCjkCard.spinBox.minimum() == 16
+# 再压低 target 到 12 并复位 absolute_cjk 回出厂 20 → 下限应跟到 12、上限到 20
+cfg.set(cfg.single_line_target_cjk, 12)
+app.processEvents()
+widget._resetProfileField(cfg.single_line_absolute_cjk, 'single_line_absolute_cjk')
+app.processEvents()
+assert cfg.get(cfg.single_line_absolute_cjk) == 20
+assert widget.singleLineTargetCjkCard.spinBox.maximum() == 20
+assert widget.singleLineAbsoluteCjkCard.spinBox.minimum() == 12
+assert not errors, errors
+
+# 非法组合（目标 > 绝对）经方案切换恢复合法：方案快照自带校验过的值
+cfg.set(cfg.single_line_target_latin, 30)
+app.processEvents()
+assert cfg.get(cfg.single_line_target_latin) == cfg.get(cfg.single_line_absolute_latin)
+assert not errors, errors
+cfg.set(cfg.postprocess_profile, 'loose')
+app.processEvents()
+assert cfg.get(cfg.single_line_target_latin) == 21
+assert cfg.get(cfg.single_line_absolute_latin) == 25
+widget.close()
+""",
+        tmp_dir=tmp_path / "appdata",
     )
 
 

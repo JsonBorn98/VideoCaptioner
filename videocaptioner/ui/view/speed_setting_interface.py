@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QLabel, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
@@ -26,6 +26,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
+from videocaptioner.core.postprocess.config import SINGLE_LINE
 from videocaptioner.core.postprocess.profiles import (
     TEMPLATE_IDS,
     PostprocessProfileStore,
@@ -340,6 +341,12 @@ class PostprocessSettingInterface(QWidget):
             cfg.set(config_item, value)
         finally:
             self._applyingPolicy = False
+        # 复位绕过了 valueChanged 触发的联动钳制（_applyingPolicy guard），
+        # 限长字段须补刷新：否则目标卡上限停在复位前的绝对值上。
+        if config_item in {pair.target_item for pair in self._VIEWING_LIMIT_PAIRS} | {
+            pair.absolute_item for pair in self._VIEWING_LIMIT_PAIRS
+        }:
+            self._onViewingLimitChanged()
 
     def _policyDefault(self, getter: Callable[[SpeedPolicy], Any]) -> Any:
         return getter(self._resolveCurrentPolicy())
@@ -589,39 +596,99 @@ class PostprocessSettingInterface(QWidget):
             self._addProfileReset(card, item, field)
             limit_group.addSettingCard(card)
         tab.addGroup(limit_group)
-        self._connectViewingLimitRanges()
+        self._connectViewingLimitClamp()
 
-    def _connectViewingLimitRanges(self) -> None:
-        """Keep target/absolute inputs inside PostprocessConfig's ordered limits."""
-        for item in (
+    # 显示限长四值的联动置灰/钳制（票 12）。限长四值两侧共享（核心
+    # PostprocessConfig 只有 4 个限长字段，viewing.py 对每个单行限长侧用同一
+    # 组值），故置灰判据是「两侧均 auto_wrap」——此时限长不参与任何侧的验收
+    # （PostprocessConfig.any_viewing_single_line 为 False），输入框置灰如实表达
+    # 「当前不生效」；任一侧仍单行限长时限长就约束该侧，输入保持可用。
+    # 判据刻意在此重算而不抽共享谓词：spec 明令「不碰 core/postprocess/」。
+    class _ViewingLimitPair(NamedTuple):
+        """一对目标/绝对上限（同一语言侧）——联动结构的单一事实源。
+
+        卡片是实例属性（构建期才存在），故只持取用函数；顺序与
+        _buildViewingTab 的卡片构建顺序一一对应。
+        """
+
+        target_item: Any
+        absolute_item: Any
+        target_card: Callable[[Any], Any]
+        absolute_card: Callable[[Any], Any]
+
+    _VIEWING_LIMIT_PAIRS: tuple[_ViewingLimitPair, ...] = (
+        _ViewingLimitPair(
             cfg.single_line_target_cjk,
             cfg.single_line_absolute_cjk,
+            lambda interface: interface.singleLineTargetCjkCard,
+            lambda interface: interface.singleLineAbsoluteCjkCard,
+        ),
+        _ViewingLimitPair(
             cfg.single_line_target_latin,
             cfg.single_line_absolute_latin,
-        ):
-            item.valueChanged.connect(self._refreshViewingLimitRanges)
-        self._refreshViewingLimitRanges()
+            lambda interface: interface.singleLineTargetLatinCard,
+            lambda interface: interface.singleLineAbsoluteLatinCard,
+        ),
+    )
 
-    def _refreshViewingLimitRanges(self, *_: Any) -> None:
-        pairs = (
-            (
-                cfg.single_line_target_cjk,
-                self.singleLineTargetCjkCard,
-                cfg.single_line_absolute_cjk,
-                self.singleLineAbsoluteCjkCard,
-            ),
-            (
-                cfg.single_line_target_latin,
-                self.singleLineTargetLatinCard,
-                cfg.single_line_absolute_latin,
-                self.singleLineAbsoluteLatinCard,
-            ),
+    def _connectViewingLimitClamp(self) -> None:
+        """连动钳制显示限长四值（目标 ≤ 绝对），并按显示模式联动置灰。"""
+        self._clampingViewingLimits = False
+        for pair in self._VIEWING_LIMIT_PAIRS:
+            pair.target_item.valueChanged.connect(self._onViewingLimitChanged)
+            pair.absolute_item.valueChanged.connect(self._onViewingLimitChanged)
+        # 两侧显示模式任一切换都重估置灰（值照常持久化，不因置灰跳过）
+        cfg.original_display_mode.valueChanged.connect(self._refreshViewingLimitEnabled)
+        cfg.translated_display_mode.valueChanged.connect(self._refreshViewingLimitEnabled)
+        self._onViewingLimitChanged()
+
+    def _onViewingLimitChanged(self, *_: Any) -> None:
+        """把限长四值规整到合法区（目标 ≤ 绝对、两两为正），并收紧可选范围。
+
+        仿补偿 clamp：防重入 guard + 写回合法值，规整幂等（合法输入原样
+        返回），不与持久化/应用流程死循环。触发顺序上本钳制先于
+        _persistProfileValue 连接（构造期 _buildViewingTab 先于
+        _connectPolicyPersistence），store 收到的总是已收敛的组合。
+        规整以绝对上限为锚（CONTEXT.md「绝对长度上限」是验收必要条件）：
+        目标 > 绝对时压低目标，不反向抬高绝对上限。
+        """
+        if self._applyingPolicy or getattr(self, "_clampingViewingLimits", False):
+            return
+        if not hasattr(self, "singleLineTargetCjkCard"):
+            return
+        self._clampingViewingLimits = True
+        try:
+            for pair in self._VIEWING_LIMIT_PAIRS:
+                # 规整（顺序与 PostprocessConfig 校验一致：目标 ≤ 绝对、两上限为正）
+                target_low, _ = pair.target_item.range
+                absolute = max(target_low, cfg.get(pair.absolute_item))
+                target = min(max(target_low, cfg.get(pair.target_item)), absolute)
+                if target != cfg.get(pair.target_item):
+                    cfg.set(pair.target_item, target)
+                if absolute != cfg.get(pair.absolute_item):
+                    cfg.set(pair.absolute_item, absolute)
+                # 收紧滑块/输入框范围，令用户拖不出目标 > 绝对的组合
+                _, absolute_high = pair.absolute_item.range
+                pair.target_card(self).setRange(target_low, cfg.get(pair.absolute_item))
+                pair.absolute_card(self).setRange(cfg.get(pair.target_item), absolute_high)
+        finally:
+            self._clampingViewingLimits = False
+        self._refreshViewingLimitEnabled()
+
+    def _refreshViewingLimitEnabled(self) -> None:
+        """两侧均 auto_wrap 时置灰限长输入（值已不参与任何验收）；否则可用。
+
+        仅置灰滑块与输入框本体：卡片标题和「恢复出厂值」按钮保持可用，
+        置灰期间改值/复位/方案切换照常持久化，切回单行限长旧值即恢复。
+        """
+        any_single_line = (
+            cfg.get(cfg.original_display_mode) == SINGLE_LINE
+            or cfg.get(cfg.translated_display_mode) == SINGLE_LINE
         )
-        for target_item, target_card, absolute_item, absolute_card in pairs:
-            target_low, _ = target_item.range
-            _, absolute_high = absolute_item.range
-            target_card.setRange(target_low, cfg.get(absolute_item))
-            absolute_card.setRange(cfg.get(target_item), absolute_high)
+        for pair in self._VIEWING_LIMIT_PAIRS:
+            for card in (pair.target_card(self), pair.absolute_card(self)):
+                card.slider.setEnabled(any_single_line)
+                card.spinBox.setEnabled(any_single_line)
 
     def _doubleCard(
         self,
@@ -1204,17 +1271,25 @@ class PostprocessSettingInterface(QWidget):
             (cfg.single_line_absolute_latin, "single_line_absolute_latin"),
         ):
             item.valueChanged.connect(
-                lambda value, field_name=field_name: self._persistProfileValue(
-                    field_name, value
+                lambda value, item=item, field_name=field_name: self._persistProfileValue(
+                    item, field_name, value
                 )
             )
 
-    def _persistProfileValue(self, field_name: str, value: Any) -> None:
+    def _persistProfileValue(self, config_item: Any, field_name: str, value: Any) -> None:
         if self._applyingPolicy:
             return
+        # 忽略信号载荷 value，改读 config_item 当前值：钳制槽
+        # （_onViewingLimitChanged）先于本槽连接，非法限长值已被规整写回，但
+        # 信号载荷仍是规整前的陈旧原值；按载荷写 store 会触发
+        # PostprocessConfig 校验失败并弹「无法保存参数」错误条。
+        # config_item 由连接处闭包直接持有——field_name 是 PostprocessConfig
+        # 字段名，不总等于 cfg 属性名（如 tail_compensation vs
+        # cfg.need_tail_compensation），不能反向 getattr。
+        current = cfg.get(config_item)
         try:
             self._requireProfileStore().set_field(
-                cfg.get(cfg.postprocess_profile), field_name, value
+                cfg.get(cfg.postprocess_profile), field_name, current
             )
         except Exception as exc:
             self._showProfileError(self.tr("无法保存参数"), exc)
@@ -1295,7 +1370,7 @@ class PostprocessSettingInterface(QWidget):
         finally:
             self._applyingPolicy = False
         self._onCompensationChanged()  # 依新方案刷新联动范围
-        self._refreshViewingLimitRanges()  # 依新方案刷新目标/绝对上限范围
+        self._onViewingLimitChanged()  # 依新方案刷新限长联动范围与置灰态
 
     def _applyPolicy(self, policy: SpeedPolicy) -> None:
         self._applyingPolicy = True
