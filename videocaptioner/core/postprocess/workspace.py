@@ -33,12 +33,14 @@ MANIFEST_FILENAME = "manifest.json"
 MANIFEST_SCHEMA = "videocaptioner.workspace_manifest"
 MANIFEST_VERSION = 1
 
+# 「context」（全文简报）槽位 2026-09-15 裁决移除：源自 D07 未获确认的
+# 「复用全文简报」建议（spec 误写为过程文件清单），无 schema/消费者/生产者，
+# 只留下永久「过程资产缺失」警告；需要简报复用时重新加回 kind。
 UPSTREAM_ASSET_KINDS = (
     "glossary",
     "audit",
     "checkpoint",
     "translation_snapshot",
-    "context",
 )
 # 下游产物（票 08，D21/D28）：由核心任务入口在模块成功后写入过程目录；
 # 每次运行按当前 manifest 重建清单，未产生的种类不再列为资产。
@@ -53,7 +55,6 @@ ASSET_FILENAMES = {
     "audit": "translation-audit.md",
     "checkpoint": "translation-checkpoint.json",
     "translation_snapshot": "translation-snapshot.json",
-    "context": "context.json",
     "qa_report": "qa-report.md",
     "speed_changes": "speed-changes.json",
     "postprocess_state": "postprocess-state.json",
@@ -74,7 +75,6 @@ _JSON_ASSET_KINDS = frozenset(
         "glossary",
         "checkpoint",
         "translation_snapshot",
-        "context",
         "postprocess_state",
     }
 )

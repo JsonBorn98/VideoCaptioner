@@ -19,7 +19,6 @@ _UPSTREAM_KINDS = (
     "audit",
     "checkpoint",
     "translation_snapshot",
-    "context",
 )
 _FORBIDDEN_MANIFEST_KEYS = {
     "api_key",
