@@ -1707,23 +1707,9 @@ class EnhancedTranslationOrchestrator:
         # 直接采用已保存的结构化审计问题、零请求；其余批照常重跑。不做部分
         # 匹配推断：批规划变化时键不匹配的批自然重跑。空问题批同样算已完成
         # （审计批只对有问题的字幕产生问题对象），照常采用。
-        resumed: dict[tuple[int, ...], tuple[TranslationAuditIssue, ...]] = {}
-        if resume_audit_batches:
-            planned_keys = {batch.subject_ids for batch in batches}
-            source_by_id = {cue.cue_id: cue.text for cue in cues}
-            for key, issues in resume_audit_batches.items():
-                if key not in planned_keys:
-                    continue
-                # 采的内容在当前位置刷新：原文与译文以本次运行的数据为准。
-                resumed[key] = tuple(
-                    replace(
-                        issue,
-                        original_text=source_by_id.get(issue.cue_id, issue.original_text),
-                        translated_text=translations.get(issue.cue_id, issue.translated_text),
-                    )
-                    for issue in issues
-                    if issue.cue_id in key
-                )
+        resumed = self._adopt_resumed_audit_batches(
+            batches, cues, translations, resume_audit_batches
+        )
         model_issues: list[TranslationAuditIssue] = []
         if batches:
             limit = role.profile.clamped_concurrency(self.config.max_concurrency)
@@ -1798,6 +1784,40 @@ class EnhancedTranslationOrchestrator:
                 )
             )
         return dict(translations), tuple(issues)
+
+    @staticmethod
+    def _adopt_resumed_audit_batches(
+        batches: Sequence[TranslationBatch],
+        cues: Sequence[SubtitleCue],
+        translations: Mapping[int, str],
+        resume_audit_batches: Optional[
+            Mapping[tuple[int, ...], tuple[TranslationAuditIssue, ...]]
+        ],
+    ) -> dict[tuple[int, ...], tuple[TranslationAuditIssue, ...]]:
+        """Adopt only checkpoint batches whose key exactly matches the plan.
+
+        恢复只认键完全匹配的批：其余批照常重跑，不做部分匹配推断。
+        采的内容在当前位置刷新：原文与译文以本次运行的数据为准。
+        """
+
+        if not resume_audit_batches:
+            return {}
+        planned_keys = {batch.subject_ids for batch in batches}
+        source_by_id = {cue.cue_id: cue.text for cue in cues}
+        resumed: dict[tuple[int, ...], tuple[TranslationAuditIssue, ...]] = {}
+        for key, issues in resume_audit_batches.items():
+            if key not in planned_keys:
+                continue
+            resumed[key] = tuple(
+                replace(
+                    issue,
+                    original_text=source_by_id.get(issue.cue_id, issue.original_text),
+                    translated_text=translations.get(issue.cue_id, issue.translated_text),
+                )
+                for issue in issues
+                if issue.cue_id in key
+            )
+        return resumed
 
     @staticmethod
     def _audit_payload(

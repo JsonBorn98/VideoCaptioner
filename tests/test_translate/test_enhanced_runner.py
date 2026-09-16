@@ -1006,36 +1006,11 @@ def _audit_payload_ids(request) -> list[int]:
 
 
 def _audit_config(batch_size: int = 2, max_concurrency: int = 1):
-    from videocaptioner.core.llm.models import (
-        LLMModelProfile,
-        LLMTransport,
-        ProviderDialect,
-    )
-    from videocaptioner.core.translate.enhanced.models import (
-        EnhancedTranslationConfig,
-        TranslationRoleSnapshot,
-    )
+    """串行审计场景配置：复用既有配置工厂，只改批大小与并发。"""
+    from dataclasses import replace as _dataclass_replace
 
-    def _profile(profile_id):
-        return LLMModelProfile(
-            profile_id=profile_id,
-            name=profile_id,
-            transport=LLMTransport.OPENAI_COMPATIBLE,
-            dialect=ProviderDialect.GENERIC,
-            base_url=f"https://{profile_id}.test/v1",
-            api_key="secret",
-            model=f"{profile_id}-model",
-            work_context_tokens=16_384,
-            max_concurrency=1,
-        )
-
-    return EnhancedTranslationConfig(
-        main_role=TranslationRoleSnapshot("main", _profile("main"), "MAIN USER PROMPT"),
-        review_role=TranslationRoleSnapshot(
-            "review", _profile("review"), "REVIEW USER PROMPT"
-        ),
-        source_language="English",
-        target_language="简体中文",
+    return _dataclass_replace(
+        _enhanced_config_with_profiles(),
         batch_size=batch_size,
         max_concurrency=max_concurrency,
     )
@@ -1132,7 +1107,7 @@ def test_audit_batch_keys_replan_without_partial_matching(tmp_path):
 
 
 def test_audit_checkpoint_corruption_warns_and_reruns_all_batches(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     """审计检查点损坏或缺失时该级视为未完成并告警，任务继续。"""
     source = _four_cue_source()
@@ -1159,19 +1134,15 @@ def test_audit_checkpoint_corruption_warns_and_reruns_all_batches(
         warnings_seen.append(message % args if args else message)
         return original_warning(message, *args)
 
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(runner_module.logger, "warning", collect_warning)
-    try:
-        resumed_gateway = _AuditScriptedGateway()
-        run = run_enhanced_translation_real(
-            source,
-            config,
-            output_dir=tmp_path,
-            base_name="episode",
-            gateway=resumed_gateway,
-        )
-    finally:
-        monkeypatch.undo()
+    resumed_gateway = _AuditScriptedGateway()
+    run = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=resumed_gateway,
+    )
 
     # 全部审计批重跑（含原已完成的第 1 批）；审计级视为未完成。
     assert resumed_gateway.audit_calls == 2
@@ -1185,21 +1156,18 @@ def test_manual_audit_confirmation_fires_once_after_all_batches_resume(
     tmp_path,
 ):
     """人工审计确认在全部审计批到齐后触发且只触发一次。"""
-    from videocaptioner.core.translate.enhanced.models import TranslationAuditMode
+    from dataclasses import replace as _dataclass_replace
+
+    from videocaptioner.core.translate.enhanced.models import (
+        TranslationAuditMode,
+        TranslationExecutionMode,
+    )
 
     source = _four_cue_source()
-    config = _audit_config(batch_size=2)
-    config = type(config)(
-        main_role=config.main_role,
-        review_role=config.review_role,
-        source_language=config.source_language,
-        target_language=config.target_language,
-        batch_size=config.batch_size,
-        max_concurrency=config.max_concurrency,
+    config = _dataclass_replace(
+        _audit_config(batch_size=2),
         audit_mode=TranslationAuditMode.REVIEW_AND_CONFIRM,
-        execution_mode=__import__(
-            "videocaptioner.core.translate.enhanced.models", fromlist=["TranslationExecutionMode"]
-        ).TranslationExecutionMode.GUI_STANDALONE,
+        execution_mode=TranslationExecutionMode.GUI_STANDALONE,
     )
 
     # 中断：第 1 批完成后失败。
@@ -1237,7 +1205,7 @@ def test_manual_audit_confirmation_fires_once_after_all_batches_resume(
     assert run.subtitle_data.segments[1].translated_text == "修正的第二段。"
 
 
-def test_stop_during_audit_preserves_completed_batches_in_manifest(tmp_path):
+def test_stop_during_audit_preserves_completed_batches_in_manifest(tmp_path, monkeypatch):
     """主动停止发生在审计阶段时已完成审计批保留并登记在 manifest。"""
     source = _four_cue_source()
     config = _audit_config(batch_size=2)
@@ -1257,20 +1225,14 @@ def test_stop_during_audit_preserves_completed_batches_in_manifest(tmp_path):
             kwargs["on_audit_batch"]((1, 2), ())
             raise InterruptedError("stopped during audit")
 
-    monkeypatch_local = pytest.MonkeyPatch()
-    monkeypatch_local.setattr(
-        runner_module, "EnhancedTranslationOrchestrator", StoppedRun
-    )
-    try:
-        with pytest.raises(InterruptedError, match="stopped during audit"):
-            run_enhanced_translation_real(
-                source,
-                config,
-                output_dir=tmp_path,
-                base_name="episode",
-            )
-    finally:
-        monkeypatch_local.undo()
+    monkeypatch.setattr(runner_module, "EnhancedTranslationOrchestrator", StoppedRun)
+    with pytest.raises(InterruptedError, match="stopped during audit"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+        )
 
     staging = _staging_dir(tmp_path)
     manifest = json.loads(
@@ -1282,6 +1244,95 @@ def test_stop_during_audit_preserves_completed_batches_in_manifest(tmp_path):
         (staging / "audit-checkpoint.json").read_text(encoding="utf-8")
     )
     assert [batch["subtitle_ids"] for batch in checkpoint["batches"]] == [[1, 2]]
+
+
+def test_auto_fix_resume_path_matches_uninterrupted_result(tmp_path):
+    """自动修复客观问题路径经恢复批采纳后结果与不中断运行一致。"""
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2, max_concurrency=1)
+
+    # 不中断基线：AUTO_APPLY_REVIEW（_audit_config 默认），修复段 2。
+    baseline_gateway = _AuditScriptedGateway()
+    baseline = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path / "baseline",
+        base_name="episode",
+        gateway=baseline_gateway,
+    )
+    assert baseline.subtitle_data.segments[1].translated_text == "修正的第二段。"
+    assert baseline.result.audit_report.issues[0].disposition.value == "auto_fixed"
+
+    # 中断：审计第 1 批成功后第 2 批失败。
+    interrupted_gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=interrupted_gateway,
+        )
+
+    # 恢复：同一输出目录重跑，采纳的第 1 批经自动修复路径得到同一结果。
+    resumed_gateway = _AuditScriptedGateway()
+    resumed = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=resumed_gateway,
+    )
+    assert resumed_gateway.audit_calls == 1
+    assert [
+        segment.translated_text for segment in resumed.subtitle_data.segments
+    ] == [segment.translated_text for segment in baseline.subtitle_data.segments]
+    assert [
+        (issue.cue_id, issue.message, issue.suggested_translation, issue.disposition)
+        for issue in resumed.result.audit_report.issues
+    ] == [
+        (issue.cue_id, issue.message, issue.suggested_translation, issue.disposition)
+        for issue in baseline.result.audit_report.issues
+    ]
+
+
+def test_replanned_resume_does_not_re_register_stale_keys(tmp_path):
+    """装载的检查点里键不匹配当前规划的批不进新 manifest，避免虚记完成。"""
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2)
+
+    # 中断：batch_size=2，第 1 批 (1,2) 成功后失败；检查点只含 (1,2)。
+    gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=gateway,
+        )
+
+    # 恢复时改批处理上限：新规划 (1,2,3)+(4)，(1,2) 不在其中，全部重跑。
+    # 第 1 批完成后中断：manifest 只登记新规划的 (1,2,3)，旧键 (1,2) 被替换。
+    resumed_gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            _audit_config(batch_size=3),
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=resumed_gateway,
+        )
+
+    staging = _staging_dir(tmp_path)
+    manifest = json.loads(
+        (staging / "recovery-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["completed"]["audit_batches"] == [[1, 2, 3]]
+    checkpoint = json.loads(
+        (staging / "audit-checkpoint.json").read_text(encoding="utf-8")
+    )
+    assert [batch["subtitle_ids"] for batch in checkpoint["batches"]] == [[1, 2, 3]]
 
 
 def test_resumed_audit_report_equivalent_to_uninterrupted_run(tmp_path):

@@ -7,6 +7,7 @@ from pathlib import Path
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
 from videocaptioner.cli.config import get
+from videocaptioner.core.recovery import resumed_count, resumed_flag
 
 # BCP 47 → TargetLanguage.value (Chinese label) mapping for internal use
 _LANG_MAP = {
@@ -462,24 +463,10 @@ def run(args: Namespace, config: dict) -> int:
                     getattr(enhanced_run.result.audit_report, "usages", ())
                 )
                 recovery_summary = getattr(enhanced_run, "recovery_summary", None)
-                recovery_analysis = (
-                    recovery_summary is not None
-                    and recovery_summary.completed.get("analysis", 0) > 0
-                )
-                recovery_glossary = (
-                    recovery_summary is not None
-                    and recovery_summary.completed.get("glossary", 0) > 0
-                )
-                recovery_segments = (
-                    0
-                    if recovery_summary is None
-                    else recovery_summary.completed.get("translation_segments", 0)
-                )
-                recovery_audit_batches = (
-                    0
-                    if recovery_summary is None
-                    else recovery_summary.completed.get("audit_batches", 0)
-                )
+                recovery_analysis = resumed_flag(recovery_summary, "analysis")
+                recovery_glossary = resumed_flag(recovery_summary, "glossary")
+                recovery_segments = resumed_count(recovery_summary, "translation_segments")
+                recovery_audit_batches = resumed_count(recovery_summary, "audit_batches")
                 enhanced_artifact_paths = (
                     args.glossary_path,
                     args.translation_audit_report_path,

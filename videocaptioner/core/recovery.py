@@ -38,6 +38,18 @@ class RecoverySummary:
     configuration_drift: tuple[str, ...] = ()
 
 
+def resumed_count(summary: "RecoverySummary | None", key: str) -> int:
+    """Return one completed-level count, treating no-resume as zero."""
+
+    return 0 if summary is None else int(summary.completed.get(key, 0))
+
+
+def resumed_flag(summary: "RecoverySummary | None", key: str) -> bool:
+    """Return whether one completed level was actually resumed."""
+
+    return resumed_count(summary, key) > 0
+
+
 def now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 

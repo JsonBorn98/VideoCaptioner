@@ -51,6 +51,7 @@ from .models import (
     EnhancedTranslationResult,
     SubtitleCue,
     TermCandidate,
+    TranslationAuditIssue,
     TranslationAuditReport,
     TranslationContextBrief,
 )
@@ -269,7 +270,7 @@ def run_enhanced_translation(
     resumed_translations: dict[int, str] = {}
     checkpoint_glossary: AuthoritativeGlossary | None = None
     resumed_analysis: tuple[TranslationContextBrief, tuple[TermCandidate, ...]] | None = None
-    resumed_audit_batches: dict[tuple[int, ...], Any] = {}
+    resumed_audit_batches: dict[tuple[int, ...], tuple[TranslationAuditIssue, ...]] = {}
     recovery_summary: RecoverySummary | None = None
     if manifest is not None:
         completed = manifest["completed"]
@@ -303,7 +304,6 @@ def run_enhanced_translation(
                 cue_id: text for cue_id, text in loaded_translations.items() if cue_id in completed_ids
             }
             resume_warnings.extend(warnings)
-        resumed_audit_batches = {}
         audit_batch_keys = completed.get("audit_batches", [])
         if audit_batch_keys:
             # 恢复只信 manifest；文件缺失或损坏时该级视为未完成并告警。
@@ -420,12 +420,14 @@ def run_enhanced_translation(
         # The checkpoint file is atomically durable before the manifest records its IDs.
         _mark_completed(translation_ids=sorted(accumulated_translations))
 
-    # 审计检查点按批累积：恢复装载的批与新跑的批合并后全量原子重写，
-    # 采过的批重写内容不变（幂等），故无需区分恢复与新跑。
-    accumulated_audit_batches: dict[tuple[int, ...], Any] = dict(resumed_audit_batches)
+    # 审计检查点按批累积：编排器对恢复的批与新跑的批都走 on_audit_batch
+    # 回调（含键完全匹配的采纳批），这里只登记本次规划内的批；装载的
+    # 检查点里键不匹配当前规划的批不进 manifest，避免虚记完成。
+    accumulated_audit_batches: dict[tuple[int, ...], tuple[TranslationAuditIssue, ...]] = {}
 
     def persist_audit_batch(
-        subtitle_ids: tuple[int, ...], issues: Any
+        subtitle_ids: tuple[int, ...],
+        issues: tuple[TranslationAuditIssue, ...],
     ) -> None:
         accumulated_audit_batches[subtitle_ids] = tuple(issues)
         try:

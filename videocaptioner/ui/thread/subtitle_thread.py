@@ -32,7 +32,12 @@ from videocaptioner.core.llm.utility import (
 )
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
 from videocaptioner.core.postprocess.translation import snapshot_from_subtitle_config
-from videocaptioner.core.recovery import RecoveryDecision, RecoverySummary
+from videocaptioner.core.recovery import (
+    RecoveryDecision,
+    RecoverySummary,
+    resumed_count,
+    resumed_flag,
+)
 from videocaptioner.core.split.split import SubtitleSplitter
 from videocaptioner.core.subtitle import clone_subtitle_data
 from videocaptioner.core.translate.enhanced import (
@@ -484,27 +489,17 @@ class SubtitleThread(QThread):
                     build_translate_stage_summary(
                         len(asr_data.segments),
                         failed_count=translator.failed_count if translator else 0,
-                        recovery_skipped_glossary=(
-                            self._enhanced_recovery_summary is not None
-                            and self._enhanced_recovery_summary.completed.get("glossary", 0) > 0
+                        recovery_skipped_analysis=resumed_flag(
+                            self._enhanced_recovery_summary, "analysis"
                         ),
-                        recovery_skipped_analysis=(
-                            self._enhanced_recovery_summary is not None
-                            and self._enhanced_recovery_summary.completed.get("analysis", 0) > 0
+                        recovery_skipped_glossary=resumed_flag(
+                            self._enhanced_recovery_summary, "glossary"
                         ),
-                        recovery_skipped_segments=(
-                            0
-                            if self._enhanced_recovery_summary is None
-                            else self._enhanced_recovery_summary.completed.get(
-                                "translation_segments", 0
-                            )
+                        recovery_skipped_segments=resumed_count(
+                            self._enhanced_recovery_summary, "translation_segments"
                         ),
-                        recovery_skipped_audit_batches=(
-                            0
-                            if self._enhanced_recovery_summary is None
-                            else self._enhanced_recovery_summary.completed.get(
-                                "audit_batches", 0
-                            )
+                        recovery_skipped_audit_batches=resumed_count(
+                            self._enhanced_recovery_summary, "audit_batches"
                         ),
                     )
                 )

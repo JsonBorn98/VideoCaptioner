@@ -104,7 +104,7 @@ def build_translate_stage_summary(
     if recovery_skipped_segments:
         counts.append(("从恢复检查点继续，跳过字幕段", recovery_skipped_segments))
     if recovery_skipped_audit_batches:
-        counts.append(("从恢复检查点继续，跳过审计批", recovery_skipped_audit_batches))
+        counts.append(("从恢复检查点继续，审计检查点", recovery_skipped_audit_batches))
     if failed_count:
         counts.append(("翻译失败", failed_count))
     return StageSummary(
