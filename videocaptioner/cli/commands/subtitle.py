@@ -287,6 +287,8 @@ def run(args: Namespace, config: dict) -> int:
     stage_summaries: list[StageSummary] = []
     enhanced_usages = ()
     enhanced_artifact_paths: tuple[str, str] | None = None
+    recovery_glossary = False
+    recovery_segments = 0
     owned_gateway = None
 
     def callback(result):
@@ -453,6 +455,16 @@ def run(args: Namespace, config: dict) -> int:
                 enhanced_usages = tuple(
                     getattr(enhanced_run.result.audit_report, "usages", ())
                 )
+                recovery_summary = getattr(enhanced_run, "recovery_summary", None)
+                recovery_glossary = (
+                    recovery_summary is not None
+                    and recovery_summary.completed.get("glossary", 0) > 0
+                )
+                recovery_segments = (
+                    0
+                    if recovery_summary is None
+                    else recovery_summary.completed.get("translation_segments", 0)
+                )
                 enhanced_artifact_paths = (
                     args.glossary_path,
                     args.translation_audit_report_path,
@@ -500,6 +512,8 @@ def run(args: Namespace, config: dict) -> int:
                 build_translate_stage_summary(
                     len(asr_data.segments),
                     failed_count=failed,
+                    recovery_skipped_glossary=recovery_glossary,
+                    recovery_skipped_segments=recovery_segments,
                 )
             )
 

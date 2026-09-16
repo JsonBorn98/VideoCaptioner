@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.llm import LLMGateway
@@ -17,13 +18,24 @@ from videocaptioner.core.postprocess.translation import (
 )
 from videocaptioner.core.postprocess.workspace import (
     ASSET_FILENAMES,
+    normalize_task_name,
     publish_translation_workspace,
     resolve_output_workspace_root,
     resolve_translation_staging_dir,
 )
+from videocaptioner.core.recovery import (
+    RECOVERY_MANIFEST_SCHEMA,
+    RECOVERY_MANIFEST_VERSION,
+    RecoveryDecision,
+    RecoverySummary,
+    load_recovery_manifest,
+    now_utc,
+    software_version,
+    write_recovery_manifest,
+)
 from videocaptioner.core.utils.logger import setup_logger
 
-from .glossary import load_glossary, save_glossary
+from .glossary import load_glossary, save_glossary, subtitle_fingerprint
 from .models import (
     AuthoritativeGlossary,
     CancellationToken,
@@ -39,6 +51,9 @@ from .report import save_audit_markdown
 
 logger = setup_logger("enhanced_translation_runner")
 
+_RECOVERY_MANIFEST_FILENAME = "recovery-manifest.json"
+_RECOVERY_MODULE = "enhanced_translation"
+
 
 @dataclass(frozen=True)
 class EnhancedTranslationArtifacts:
@@ -52,6 +67,7 @@ class EnhancedTranslationRun:
     subtitle_data: ASRData
     result: EnhancedTranslationResult
     artifacts: EnhancedTranslationArtifacts
+    recovery_summary: RecoverySummary | None = None
 
 
 def _translated_copy(
@@ -96,6 +112,77 @@ def _save_checkpoint(path: Path, subtitle_data: ASRData) -> None:
             temporary_path.unlink()
 
 
+def _load_checkpoint_translations(
+    path: Path, subtitle_data: ASRData
+) -> tuple[dict[int, str], tuple[str, ...]]:
+    """Load valid checkpoint translations without ever trusting them over source text."""
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except InterruptedError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {}, (f"译文检查点不可读，已重新翻译未完成字幕段：{exc}",)
+    if not isinstance(document, dict):
+        return {}, ("译文检查点格式无效，已重新翻译未完成字幕段",)
+    translations: dict[int, str] = {}
+    warnings: list[str] = []
+    for index, segment in enumerate(subtitle_data.segments, 1):
+        item = document.get(str(index))
+        if not isinstance(item, dict) or item.get("original_subtitle") != segment.text:
+            if item is not None:
+                warnings.append(f"字幕段 {index} 的译文检查点不一致，已重新翻译")
+            continue
+        translation = item.get("translated_subtitle")
+        if isinstance(translation, str) and translation.strip():
+            translations[index] = translation.strip()
+    return translations, tuple(warnings)
+
+
+def _recovery_identity(
+    *, source_fingerprint: str, source_language: str, target_language: str
+) -> dict[str, str]:
+    return {
+        "source_fingerprint": source_fingerprint,
+        "source_language": source_language,
+        "target_language": target_language,
+        "translation_method": METHOD_ENHANCED_LLM,
+    }
+
+
+def _new_recovery_manifest(identity: Mapping[str, str], task_name: str) -> dict[str, Any]:
+    timestamp = now_utc()
+    return {
+        "schema": RECOVERY_MANIFEST_SCHEMA,
+        "version": RECOVERY_MANIFEST_VERSION,
+        "module": _RECOVERY_MODULE,
+        "identity": dict(identity),
+        "task_name": normalize_task_name(task_name),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "software_version": software_version(),
+        "completed": {"glossary": False, "translation_ids": []},
+        "interruption": None,
+    }
+
+
+def _matching_recovery_manifest(
+    path: Path, identity: Mapping[str, str]
+) -> dict[str, Any] | None:
+    manifest = load_recovery_manifest(path)
+    if manifest is None:
+        return None
+    if (
+        manifest.get("schema") != RECOVERY_MANIFEST_SCHEMA
+        or manifest.get("version") != RECOVERY_MANIFEST_VERSION
+        or manifest.get("module") != _RECOVERY_MODULE
+        or manifest.get("identity") != dict(identity)
+    ):
+        return None
+    completed = manifest.get("completed")
+    return manifest if isinstance(completed, dict) else None
+
+
 def run_enhanced_translation(
     subtitle_data: ASRData,
     config: EnhancedTranslationConfig,
@@ -110,6 +197,7 @@ def run_enhanced_translation(
         Callable[[tuple[TermCandidate, ...]], Sequence[TermCandidate]]
     ] = None,
     confirm_audit: Optional[Callable[[TranslationAuditReport], Sequence[int]]] = None,
+    recovery_decision: Optional[Callable[[RecoverySummary], RecoveryDecision | str]] = None,
 ) -> EnhancedTranslationRun:
     """Run enhanced translation and persist glossary/report at their safe boundaries."""
 
@@ -118,9 +206,19 @@ def run_enhanced_translation(
     source_language = str(getattr(config, "source_language", "") or "")
     target_language = str(getattr(config, "target_language", "") or "")
     workspace_root = resolve_output_workspace_root(destination)
+    cues = tuple(
+        SubtitleCue(cue_id=index, text=segment.text)
+        for index, segment in enumerate(subtitle_data.segments, 1)
+    )
+    identity = _recovery_identity(
+        source_fingerprint=subtitle_fingerprint(cues),
+        source_language=source_language,
+        target_language=target_language,
+    )
     staging_dir = resolve_translation_staging_dir(
         workspace_root,
         task_name=base_name,
+        source_fingerprint=identity["source_fingerprint"],
         source_language=source_language,
         target_language=target_language,
     )
@@ -128,13 +226,62 @@ def run_enhanced_translation(
     glossary_path = staging_dir / ASSET_FILENAMES["glossary"]
     audit_path = staging_dir / ASSET_FILENAMES["audit"]
     checkpoint_path = staging_dir / ASSET_FILENAMES["checkpoint"]
-    imported = (
+    recovery_manifest_path = staging_dir / _RECOVERY_MANIFEST_FILENAME
+    explicit_imported = (
         load_glossary(imported_glossary_path) if imported_glossary_path is not None else None
     )
-    cues = tuple(
-        SubtitleCue(cue_id=index, text=segment.text)
-        for index, segment in enumerate(subtitle_data.segments, 1)
-    )
+    manifest = _matching_recovery_manifest(recovery_manifest_path, identity)
+    resume_warnings: list[str] = []
+    resumed_translations: dict[int, str] = {}
+    checkpoint_glossary: AuthoritativeGlossary | None = None
+    recovery_summary: RecoverySummary | None = None
+    if manifest is not None:
+        completed = manifest["completed"]
+        completed_ids = completed.get("translation_ids", [])
+        if not isinstance(completed_ids, list) or not all(
+            type(item) is int and item > 0 for item in completed_ids
+        ):
+            completed_ids = []
+            resume_warnings.append("恢复 manifest 的译文进度无效，已重新翻译未完成字幕段")
+        if completed.get("glossary") is True and glossary_path.is_file():
+            try:
+                checkpoint_glossary = load_glossary(glossary_path)
+            except ValueError as exc:
+                resume_warnings.append(f"检查点术语表不可读，已重新生成：{exc}")
+        elif completed.get("glossary") is True:
+            resume_warnings.append("恢复 manifest 登记的术语表缺失，已重新生成")
+        if completed_ids:
+            loaded_translations, warnings = _load_checkpoint_translations(checkpoint_path, subtitle_data)
+            resumed_translations = {
+                cue_id: text for cue_id, text in loaded_translations.items() if cue_id in completed_ids
+            }
+            resume_warnings.extend(warnings)
+        resume_available = checkpoint_glossary is not None or bool(resumed_translations)
+        if resume_available:
+            recovery_summary = RecoverySummary(
+                module=_RECOVERY_MODULE,
+                identity=identity,
+                completed={
+                    "glossary": int(checkpoint_glossary is not None),
+                    "translation_segments": len(resumed_translations),
+                },
+                checkpoint_time=str(manifest.get("updated_at", "")),
+            )
+            decision = (
+                RecoveryDecision.CONTINUE
+                if recovery_decision is None
+                else RecoveryDecision(recovery_decision(recovery_summary))
+            )
+            if decision is RecoveryDecision.START_FRESH:
+                manifest = _new_recovery_manifest(identity, base_name)
+                write_recovery_manifest(recovery_manifest_path, manifest)
+                checkpoint_glossary = None
+                resumed_translations = {}
+                recovery_summary = None
+    if manifest is None:
+        manifest = _new_recovery_manifest(identity, base_name)
+        write_recovery_manifest(recovery_manifest_path, manifest)
+    imported = explicit_imported or checkpoint_glossary
     orchestrator = EnhancedTranslationOrchestrator(
         config,
         gateway=gateway,
@@ -143,10 +290,16 @@ def run_enhanced_translation(
     )
 
     def persist_glossary(glossary: AuthoritativeGlossary) -> None:
+        # The glossary file is atomically durable before the manifest declares it complete.
         save_glossary(glossary_path, glossary)
+        completed = dict(manifest["completed"])
+        completed["glossary"] = True
+        manifest["completed"] = completed
+        manifest["updated_at"] = now_utc()
+        write_recovery_manifest(recovery_manifest_path, manifest)
 
-    checkpoint_written = False
-    accumulated_translations: dict[int, str] = {}
+    checkpoint_written = bool(resumed_translations)
+    accumulated_translations: dict[int, str] = dict(resumed_translations)
 
     def persist_translations(translations: Mapping[int, str]) -> None:
         nonlocal checkpoint_written
@@ -164,17 +317,27 @@ def run_enhanced_translation(
             logger.warning("无法保存增强翻译检查点 %s: %s", checkpoint_path, exc)
             return
         checkpoint_written = True
+        # The checkpoint file is atomically durable before the manifest records its IDs.
+        completed = dict(manifest["completed"])
+        completed["translation_ids"] = sorted(accumulated_translations)
+        manifest["completed"] = completed
+        manifest["updated_at"] = now_utc()
+        write_recovery_manifest(recovery_manifest_path, manifest)
 
     try:
         result = orchestrator.run(
             cues,
             imported_glossary=imported,
+            resume_translations=resumed_translations,
             confirm_terms=confirm_terms,
             confirm_audit=confirm_audit,
             on_glossary=persist_glossary,
             on_translations=persist_translations,
         )
     except EnhancedTranslationError as exc:
+        manifest["interruption"] = "failure"
+        manifest["updated_at"] = now_utc()
+        write_recovery_manifest(recovery_manifest_path, manifest)
         if checkpoint_written:
             raise EnhancedTranslationError(
                 f"{exc}；主翻译结果已保存到检查点：{checkpoint_path}",
@@ -184,7 +347,15 @@ def run_enhanced_translation(
                 attempts=exc.attempts,
             ) from exc
         raise
+    except InterruptedError:
+        manifest["interruption"] = "stopped"
+        manifest["updated_at"] = now_utc()
+        write_recovery_manifest(recovery_manifest_path, manifest)
+        raise
     translated = _translated_copy(subtitle_data, result.translations)
+
+    if resume_warnings:
+        logger.warning("恢复检查点告警：%s", "；".join(resume_warnings))
     persist_translations(result.translations)
     save_audit_markdown(audit_path, result.audit_report)
     snapshot = TranslationExecutionSnapshot(
@@ -216,16 +387,21 @@ def run_enhanced_translation(
     published_glossary = task_dir / ASSET_FILENAMES["glossary"]
     published_audit = task_dir / ASSET_FILENAMES["audit"]
     published_checkpoint = task_dir / ASSET_FILENAMES["checkpoint"]
+    artifacts = EnhancedTranslationArtifacts(
+        glossary_path=published_glossary if published_glossary.is_file() else glossary_path,
+        audit_report_path=published_audit if published_audit.is_file() else audit_path,
+        translation_checkpoint_path=(
+            published_checkpoint
+            if checkpoint_written and published_checkpoint.is_file()
+            else (checkpoint_path if checkpoint_written else None)
+        ),
+    )
+    # Recovery data is never a deliverable. Only delete it after all publication
+    # work completed successfully, so a failing publish preserves the checkpoint.
+    shutil.rmtree(staging_dir, ignore_errors=True)
     return EnhancedTranslationRun(
         subtitle_data=translated,
         result=result,
-        artifacts=EnhancedTranslationArtifacts(
-            glossary_path=published_glossary if published_glossary.is_file() else glossary_path,
-            audit_report_path=published_audit if published_audit.is_file() else audit_path,
-            translation_checkpoint_path=(
-                published_checkpoint
-                if checkpoint_written and published_checkpoint.is_file()
-                else (checkpoint_path if checkpoint_written else None)
-            ),
-        ),
+        artifacts=artifacts,
+        recovery_summary=recovery_summary,
     )

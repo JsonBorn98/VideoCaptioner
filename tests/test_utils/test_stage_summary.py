@@ -20,6 +20,19 @@ def test_shared_subtitle_stage_summary_builders_report_degradation():
     )
 
 
+def test_translate_summary_records_resumed_work_once():
+    summary = build_translate_stage_summary(
+        12,
+        recovery_skipped_glossary=True,
+        recovery_skipped_segments=5,
+    )
+
+    assert format_stage_summary(summary) == (
+        "translate · 12 段 · 从恢复检查点继续，跳过术语阶段 · "
+        "从恢复检查点继续，跳过字幕段"
+    )
+
+
 def test_merge_summary_stays_clean_without_fallbacks():
     summary = build_split_stage_summary(8, use_llm=False)
 

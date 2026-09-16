@@ -229,14 +229,16 @@ def resolve_translation_staging_dir(
     workspace_root: Path,
     *,
     task_name: str,
+    source_fingerprint: str,
     source_language: str,
     target_language: str,
 ) -> Path:
-    """翻译进行中的暂存目录：指纹在译文齐备前还不稳定。"""
+    """Resolve an unfinished translation directory for one source-text identity."""
 
     name = normalize_task_name(task_name)
+    fingerprint_dir = source_fingerprint.removeprefix("sha256:") or "unknown"
     language_dir = f"{normalize_language(source_language)}_{normalize_language(target_language)}"
-    return workspace_root / name / ".in-progress" / language_dir
+    return workspace_root / name / ".in-progress" / fingerprint_dir / language_dir
 
 
 def publish_translation_workspace(

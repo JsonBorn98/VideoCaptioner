@@ -35,7 +35,10 @@ def format_stage_summary(summary: StageSummary) -> str:
     """
 
     parts = [summary.stage]
-    parts.extend(f"{value} {label}" for label, value in summary.counts)
+    parts.extend(
+        label if label.startswith("从恢复检查点继续") else f"{value} {label}"
+        for label, value in summary.counts
+    )
     line = _SEP.join(parts)
     if summary.warnings:
         line += f"{_SEP}⚠ {len(summary.warnings)}"
@@ -86,10 +89,16 @@ def build_translate_stage_summary(
     segment_count: int,
     *,
     failed_count: int = 0,
+    recovery_skipped_glossary: bool = False,
+    recovery_skipped_segments: int = 0,
 ) -> StageSummary:
     """Build the shared CLI/GUI subtitle translation summary."""
 
     counts: Counts = [("段", segment_count)]
+    if recovery_skipped_glossary:
+        counts.append(("从恢复检查点继续，跳过术语阶段", 0))
+    if recovery_skipped_segments:
+        counts.append(("从恢复检查点继续，跳过字幕段", recovery_skipped_segments))
     if failed_count:
         counts.append(("翻译失败", failed_count))
     return StageSummary(

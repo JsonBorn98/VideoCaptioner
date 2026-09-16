@@ -25,6 +25,7 @@ from qfluentwidgets import (
     CommandBar,
     InfoBar,
     InfoBarPosition,
+    MessageBox,
     MessageBoxBase,
     PrimaryPushButton,
     ProgressBar,
@@ -568,6 +569,10 @@ class SubtitleInterface(QWidget):
             self.subtitle_optimization_thread.audit_confirmation_required.connect(
                 self._show_audit_confirmation
             )
+        if hasattr(self.subtitle_optimization_thread, "recovery_decision_required"):
+            self.subtitle_optimization_thread.recovery_decision_required.connect(
+                self._show_recovery_decision
+            )
         self.subtitle_optimization_thread.set_custom_prompt_text(self.custom_prompt_text)
         self.subtitle_optimization_thread.start()
         InfoBar.info(
@@ -682,6 +687,32 @@ class SubtitleInterface(QWidget):
         )
         self.workspace_stack.setCurrentWidget(self.glossary_review_page)
         self.status_label.setText(self.tr("等待人工确认术语"))
+
+    def _show_recovery_decision(self, summary) -> None:
+        skipped: list[str] = []
+        if summary.completed.get("glossary", 0):
+            skipped.append(self.tr("术语阶段"))
+        translated = summary.completed.get("translation_segments", 0)
+        if translated:
+            skipped.append(self.tr("{count} 个已完成字幕段").format(count=translated))
+        skipped_text = self.tr("、").join(skipped) or self.tr("尚未验证的检查点数据")
+        dialog = MessageBox(
+            self.tr("发现翻译恢复检查点"),
+            self.tr("检查点时间：{time}\n继续将跳过：{skipped}").format(
+                time=summary.checkpoint_time or self.tr("未知"),
+                skipped=skipped_text,
+            ),
+            self,
+        )
+        dialog.yesButton.setText(self.tr("从恢复检查点继续"))
+        dialog.cancelButton.setText(self.tr("从头开始"))
+        decision = "continue" if dialog.exec() else "start_fresh"
+        thread = getattr(self, "subtitle_optimization_thread", None)
+        if thread is not None:
+            thread.submit_recovery_decision(decision)
+        self.status_label.setText(
+            self.tr("继续翻译") if decision == "continue" else self.tr("从头开始翻译")
+        )
 
     def _submit_term_confirmation(self, candidates) -> None:
         thread = getattr(self, "subtitle_optimization_thread", None)

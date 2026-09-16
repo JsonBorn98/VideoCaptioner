@@ -491,6 +491,7 @@ class EnhancedTranslationOrchestrator:
         cues: Sequence[SubtitleCue],
         *,
         imported_glossary: Optional[AuthoritativeGlossary] = None,
+        resume_translations: Optional[Mapping[int, str]] = None,
         confirm_terms: Optional[
             Callable[[tuple[TermCandidate, ...]], Sequence[TermCandidate]]
         ] = None,
@@ -565,10 +566,17 @@ class EnhancedTranslationOrchestrator:
             on_glossary(glossary)
 
         self.cancellation.raise_if_cancelled()
-        self._emit(40, "Translating subtitles")
-        translations = self._with_context_fallback(
-            self._translate, ordered, brief, glossary, on_translations
+        completed_translations = self._validated_resume_translations(
+            ordered, resume_translations or {}
         )
+        remaining_cues = tuple(
+            cue for cue in ordered if cue.cue_id not in completed_translations
+        )
+        self._emit(40, "Translating subtitles")
+        new_translations = self._with_context_fallback(
+            self._translate, remaining_cues, brief, glossary, on_translations
+        )
+        translations = {**completed_translations, **new_translations}
         if on_translations is not None:
             on_translations(dict(translations))
         self.cancellation.raise_if_cancelled()
@@ -626,6 +634,22 @@ class EnhancedTranslationOrchestrator:
         ids = [cue.cue_id for cue in cues]
         if ids != sorted(ids) or len(ids) != len(set(ids)):
             raise ValueError("subtitle cues must have unique ascending IDs")
+
+    @staticmethod
+    def _validated_resume_translations(
+        cues: Sequence[SubtitleCue], translations: Mapping[int, str]
+    ) -> dict[int, str]:
+        """Keep only valid checkpoint entries; damaged entries are translated again."""
+
+        valid_ids = {cue.cue_id for cue in cues}
+        return {
+            cue_id: text.strip()
+            for cue_id, text in translations.items()
+            if type(cue_id) is int
+            and cue_id in valid_ids
+            and isinstance(text, str)
+            and text.strip()
+        }
 
     def _emit(self, value: int, message: str) -> None:
         value = max(0, min(100, int(value)))

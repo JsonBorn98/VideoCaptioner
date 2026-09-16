@@ -32,6 +32,7 @@ from videocaptioner.core.llm.utility import (
 )
 from videocaptioner.core.optimize.optimize import SubtitleOptimizer
 from videocaptioner.core.postprocess.translation import snapshot_from_subtitle_config
+from videocaptioner.core.recovery import RecoveryDecision, RecoverySummary
 from videocaptioner.core.split.split import SubtitleSplitter
 from videocaptioner.core.subtitle import clone_subtitle_data
 from videocaptioner.core.translate.enhanced import (
@@ -122,6 +123,7 @@ class SubtitleThread(QThread):
     term_confirmation_required = pyqtSignal(object)
     audit_confirmation_required = pyqtSignal(object)
     audit_ready = pyqtSignal(object)
+    recovery_decision_required = pyqtSignal(object)
 
     def __init__(self, task: SubtitleTask, gateway: LLMGateway | None = None):
         super().__init__()
@@ -136,6 +138,9 @@ class SubtitleThread(QThread):
         self._confirmed_terms: Sequence[TermCandidate] | None = None
         self._audit_condition = threading.Condition()
         self._accepted_audit_ids: tuple[int, ...] | None = None
+        self._recovery_condition = threading.Condition()
+        self._recovery_decision: RecoveryDecision | None = None
+        self._enhanced_recovery_summary: RecoverySummary | None = None
         self._injected_gateway = gateway
 
     def set_custom_prompt_text(self, text: str):
@@ -196,6 +201,24 @@ class SubtitleThread(QThread):
                 raise InterruptedError("term confirmation cancelled")
             assert self._confirmed_terms is not None
             return self._confirmed_terms
+
+    def submit_recovery_decision(self, decision: RecoveryDecision | str) -> None:
+        """Resume a GUI enhanced task after the user chooses a recovery path."""
+
+        with self._recovery_condition:
+            self._recovery_decision = RecoveryDecision(decision)
+            self._recovery_condition.notify_all()
+
+    def _confirm_recovery(self, summary: RecoverySummary) -> RecoveryDecision:
+        with self._recovery_condition:
+            self._recovery_decision = None
+            self.recovery_decision_required.emit(summary)
+            while self._recovery_decision is None and not self.cancellation.cancelled:
+                self._recovery_condition.wait(timeout=0.2)
+            if self.cancellation.cancelled:
+                raise InterruptedError("recovery confirmation cancelled")
+            assert self._recovery_decision is not None
+            return self._recovery_decision
 
     def submit_audit_confirmation(self, accepted_ids: Sequence[int]) -> None:
         """Resume a standalone enhanced task with the user's audit choices."""
@@ -274,6 +297,14 @@ class SubtitleThread(QThread):
                 and config.execution_mode is TranslationExecutionMode.GUI_STANDALONE
                 else None
             ),
+            recovery_decision=(
+                self._confirm_recovery
+                if config.execution_mode in {
+                    TranslationExecutionMode.GUI_STANDALONE,
+                    TranslationExecutionMode.GUI_WORKFLOW,
+                }
+                else None
+            ),
         )
         self.task.glossary_path = str(run.artifacts.glossary_path)
         self.task.translation_audit_report_path = str(run.artifacts.audit_report_path)
@@ -283,6 +314,7 @@ class SubtitleThread(QThread):
             else None
         )
         self.task.translation_audit_report = run.result.audit_report
+        self._enhanced_recovery_summary = getattr(run, "recovery_summary", None)
         if config.execution_mode is TranslationExecutionMode.GUI_STANDALONE:
             self.audit_ready.emit(run.result.audit_report)
         return run.subtitle_data
@@ -447,6 +479,17 @@ class SubtitleThread(QThread):
                     build_translate_stage_summary(
                         len(asr_data.segments),
                         failed_count=translator.failed_count if translator else 0,
+                        recovery_skipped_glossary=(
+                            self._enhanced_recovery_summary is not None
+                            and self._enhanced_recovery_summary.completed.get("glossary", 0) > 0
+                        ),
+                        recovery_skipped_segments=(
+                            0
+                            if self._enhanced_recovery_summary is None
+                            else self._enhanced_recovery_summary.completed.get(
+                                "translation_segments", 0
+                            )
+                        ),
                     )
                 )
 

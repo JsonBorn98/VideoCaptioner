@@ -1184,6 +1184,33 @@ def test_exact_glossary_still_analyzes_but_skips_all_term_calls():
     assert '"translation":"水星"' in gateway.stage_calls["translation"][0].messages[1].content
 
 
+def test_resume_translations_skip_completed_subjects_but_keep_audit_complete():
+    cues = (
+        SubtitleCue(1, "Mercury is visible."),
+        SubtitleCue(2, "Mars is visible."),
+    )
+    glossary = AuthoritativeGlossary(
+        source_language="English",
+        target_language="简体中文",
+        subtitle_fingerprint=subtitle_fingerprint(cues),
+    )
+    gateway = ScriptedGateway(
+        analysis_window=[_analysis()],
+        translation=[_translations((2, "可以看到火星。"))],
+        audit=[{"issues": []}, {"issues": []}],
+    )
+
+    result = EnhancedTranslationOrchestrator(_config(batch_size=1), gateway=gateway).run(
+        cues,
+        imported_glossary=glossary,
+        resume_translations={1: "可以看到水星。"},
+    )
+
+    assert gateway.stages == ["analysis_window", "translation", "audit", "audit"]
+    assert _translation_subject_ids(gateway.stage_calls["translation"][0]) == (2,)
+    assert result.translations == {1: "可以看到水星。", 2: "可以看到火星。"}
+
+
 def test_translation_batch_splits_after_all_automatic_output_caps_are_exhausted():
     cues = tuple(SubtitleCue(cue_id, f"Source {cue_id}") for cue_id in range(1, 5))
     main_profile = _profile("main", work_context_tokens=300_000)
