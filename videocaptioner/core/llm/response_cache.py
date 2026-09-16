@@ -33,7 +33,11 @@ KEY_VERSION = "gateway-cache-v1"
 # reads if the key version was forgotten.
 VALUE_SCHEMA = "gateway-cache-v1"
 
-EXPIRE_SECONDS = 3600
+# Seven days (ADR-0022, resume checkpoints): within-round candidates never
+# hit disk, so an in-round or in-stage interruption relies on this cache
+# replaying identical requests the next day without re-billing. One hour
+# could not survive an overnight rerun; keys and value schema stay unchanged.
+EXPIRE_SECONDS = 7 * 24 * 60 * 60
 
 
 def _message_entries(request: LLMRequest) -> list[dict[str, str]]:

@@ -17,7 +17,7 @@ from videocaptioner.core.llm.models import (
     LLMUsage,
     ProviderDialect,
 )
-from videocaptioner.core.llm.response_cache import GatewayResponseCache
+from videocaptioner.core.llm.response_cache import EXPIRE_SECONDS, GatewayResponseCache
 from videocaptioner.core.utils import cache as cache_utils
 
 
@@ -275,6 +275,35 @@ def test_cache_lookup_failure_fails_open_as_miss(cache_enabled):
     assert gateway.complete(profile, REQUEST).text == "answer-1"
     assert gateway.complete(profile, REQUEST).text == "answer-2"
     assert adapter.calls == 2
+
+
+def test_stored_entries_expire_after_seven_days(cache_enabled):
+    """Ticket 01 (ADR-0022): in-round interruptions replay through this
+    cache the next day, so retention must survive an overnight rerun."""
+
+    class _RecordingCache:
+        def __init__(self):
+            self.set_calls = []
+
+        def get(self, key):
+            raise KeyError(key)
+
+        def set(self, key, value, expire=None):
+            self.set_calls.append((key, value, expire))
+
+    recording = _RecordingCache()
+    profile = _profile()
+    gateway = _gateway(_CountingAdapter(profile), recording)
+
+    gateway.complete(profile, REQUEST)
+
+    assert len(recording.set_calls) == 1
+    key, payload, expire = recording.set_calls[0]
+    assert expire == EXPIRE_SECONDS
+    assert expire == 7 * 24 * 60 * 60
+    # The payload schema is unchanged (KEY_VERSION / VALUE_SCHEMA stay put).
+    assert payload == {"schema": "gateway-cache-v1", "text": "answer-1"}
+    assert isinstance(key, str) and key != ""
 
 
 def test_key_version_bump_invalidates_old_entries(
