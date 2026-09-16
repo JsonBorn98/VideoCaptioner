@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -27,10 +27,14 @@ from videocaptioner.core.recovery import (
     RECOVERY_MANIFEST_SCHEMA,
     RECOVERY_MANIFEST_VERSION,
     RecoveryDecision,
+    RecoveryProvenance,
     RecoverySummary,
+    config_drift,
+    drifted_keys,
     load_recovery_manifest,
     now_utc,
     software_version,
+    text_digest,
     write_recovery_manifest,
 )
 from videocaptioner.core.utils.logger import setup_logger
@@ -54,6 +58,7 @@ from .models import (
     TranslationAuditIssue,
     TranslationAuditReport,
     TranslationContextBrief,
+    translation_config_drift_labels,
 )
 from .orchestrator import EnhancedTranslationOrchestrator
 from .report import save_audit_markdown
@@ -62,6 +67,33 @@ logger = setup_logger("enhanced_translation_runner")
 
 _RECOVERY_MANIFEST_FILENAME = "recovery-manifest.json"
 _RECOVERY_MODULE = "enhanced_translation"
+
+
+def _profile_fingerprint(profile: Any) -> dict[str, Any]:
+    """模型配置方案的冻结摘要：方案名、模型、接口类型；绝不含连接机密。"""
+
+    return {
+        "name": str(getattr(profile, "name", "") or ""),
+        "model": str(getattr(profile, "model", "") or ""),
+        "transport": str(getattr(getattr(profile, "transport", None), "value", "") or ""),
+    }
+
+
+def translation_config_fingerprint(config: Any) -> dict[str, Any]:
+    """冻结配置摘要（票 05）：提示词只存哈希，方案只存名/模型/接口类型。"""
+
+    main_role = getattr(config, "main_role", None)
+    review_role = getattr(config, "review_role", None)
+    return {
+        "main_prompt": text_digest(str(getattr(main_role, "user_prompt", "") or "")),
+        "review_prompt": text_digest(str(getattr(review_role, "user_prompt", "") or "")),
+        "main_profile": _profile_fingerprint(getattr(main_role, "profile", None)),
+        "review_profile": _profile_fingerprint(getattr(review_role, "profile", None)),
+        "batch_size": int(getattr(config, "batch_size", 0) or 0),
+        "boundary_context_radius": int(
+            getattr(config, "boundary_context_radius", 0) or 0
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -78,6 +110,8 @@ class EnhancedTranslationRun:
     result: EnhancedTranslationResult
     artifacts: EnhancedTranslationArtifacts
     recovery_summary: RecoverySummary | None = None
+    # 恢复来源（票 05）：恢复过的运行才带；不中断运行为 None。
+    recovery_provenance: RecoveryProvenance | None = None
 
 
 def _translated_copy(
@@ -160,7 +194,9 @@ def _recovery_identity(
     }
 
 
-def _new_recovery_manifest(identity: Mapping[str, str], task_name: str) -> dict[str, Any]:
+def _new_recovery_manifest(
+    identity: Mapping[str, str], task_name: str, config: Any
+) -> dict[str, Any]:
     timestamp = now_utc()
     return {
         "schema": RECOVERY_MANIFEST_SCHEMA,
@@ -171,6 +207,8 @@ def _new_recovery_manifest(identity: Mapping[str, str], task_name: str) -> dict[
         "created_at": timestamp,
         "updated_at": timestamp,
         "software_version": software_version(),
+        # 冻结配置摘要（票 05）：供恢复时逐项比对配置漂移；只存哈希与身份字段。
+        "config_fingerprint": translation_config_fingerprint(config),
         "completed": {
             "analysis": False,
             "glossary": False,
@@ -266,12 +304,14 @@ def run_enhanced_translation(
         load_glossary(imported_glossary_path) if imported_glossary_path is not None else None
     )
     manifest = _matching_recovery_manifest(recovery_manifest_path, identity)
+    current_fingerprint = translation_config_fingerprint(config)
     resume_warnings: list[str] = []
     resumed_translations: dict[int, str] = {}
     checkpoint_glossary: AuthoritativeGlossary | None = None
     resumed_analysis: tuple[TranslationContextBrief, tuple[TermCandidate, ...]] | None = None
     resumed_audit_batches: dict[tuple[int, ...], tuple[TranslationAuditIssue, ...]] = {}
     recovery_summary: RecoverySummary | None = None
+    recovery_provenance: RecoveryProvenance | None = None
     if manifest is not None:
         completed = manifest["completed"]
         if completed.get("analysis") is True:
@@ -327,6 +367,15 @@ def run_enhanced_translation(
             or bool(resumed_audit_batches)
         )
         if resume_available:
+            # 配置漂移（票 05）：逐项比对冻结摘要；任何漂移不作废检查点（ADR-0022）。
+            frozen_fingerprint = manifest.get("config_fingerprint")
+            frozen_fingerprint = (
+                frozen_fingerprint if isinstance(frozen_fingerprint, dict) else None
+            )
+            drift_items = config_drift(
+                frozen_fingerprint, current_fingerprint, translation_config_drift_labels()
+            )
+            drift_keys = drifted_keys(frozen_fingerprint, current_fingerprint)
             recovery_summary = RecoverySummary(
                 module=_RECOVERY_MODULE,
                 identity=identity,
@@ -337,6 +386,7 @@ def run_enhanced_translation(
                     "audit_batches": len(resumed_audit_batches),
                 },
                 checkpoint_time=str(manifest.get("updated_at", "")),
+                configuration_drift=drift_items,
             )
             decision = (
                 RecoveryDecision.CONTINUE
@@ -344,15 +394,25 @@ def run_enhanced_translation(
                 else RecoveryDecision(recovery_decision(recovery_summary))
             )
             if decision is RecoveryDecision.START_FRESH:
-                manifest = _new_recovery_manifest(identity, base_name)
+                manifest = _new_recovery_manifest(identity, base_name, config)
                 write_recovery_manifest(recovery_manifest_path, manifest)
                 resumed_analysis = None
                 checkpoint_glossary = None
                 resumed_translations = {}
                 resumed_audit_batches = {}
                 recovery_summary = None
+                drift_items = ()
+                drift_keys = ()
+            else:
+                # 恢复来源（票 05）：成果里的溯源标注——报告、快照与 manifest 各记一份。
+                recovery_provenance = RecoveryProvenance(
+                    checkpoint_time=recovery_summary.checkpoint_time,
+                    completed=dict(recovery_summary.completed),
+                    configuration_drift=drift_items,
+                    drifted_keys=drift_keys,
+                )
     if manifest is None:
-        manifest = _new_recovery_manifest(identity, base_name)
+        manifest = _new_recovery_manifest(identity, base_name, config)
         write_recovery_manifest(recovery_manifest_path, manifest)
     # 恢复告警在进入编排前输出：本次运行中途失败时告警也不丢失。
     if resume_warnings:
@@ -478,7 +538,13 @@ def run_enhanced_translation(
         raise
     translated = _translated_copy(subtitle_data, result.translations)
     persist_translations(result.translations)
-    save_audit_markdown(audit_path, result.audit_report)
+    # 恢复过的运行在审计报告带上恢复来源与漂移标注（票 05）；不中断运行为 None。
+    audit_report = (
+        replace(result.audit_report, recovery=recovery_provenance)
+        if recovery_provenance is not None
+        else result.audit_report
+    )
+    save_audit_markdown(audit_path, audit_report)
     snapshot = TranslationExecutionSnapshot(
         method=METHOD_ENHANCED_LLM,
         boundary_context_radius=int(getattr(config, "boundary_context_radius", 3) or 3),
@@ -488,6 +554,8 @@ def run_enhanced_translation(
         review_prompt=str(getattr(getattr(config, "review_role", None), "user_prompt", "") or ""),
         source_language=source_language,
         target_language=target_language,
+        # 恢复来源（票 05）：快照与 manifest 各带一份；不中断运行不带该字段。
+        recovery=recovery_provenance,
     )
     published_assets = {
         "glossary": glossary_path,
@@ -506,6 +574,9 @@ def run_enhanced_translation(
         translation_method=METHOD_ENHANCED_LLM,
         assets=published_assets,
         snapshot_payload=snapshot.to_persisted(),
+        recovery_payload=(
+            recovery_provenance.to_persisted() if recovery_provenance is not None else None
+        ),
     )
     published_glossary = task_dir / ASSET_FILENAMES["glossary"]
     published_audit = task_dir / ASSET_FILENAMES["audit"]
@@ -533,7 +604,8 @@ def run_enhanced_translation(
     _remove_empty_ancestors(staging_dir.parent, workspace_root)
     return EnhancedTranslationRun(
         subtitle_data=translated,
-        result=result,
+        result=replace(result, audit_report=audit_report),
         artifacts=artifacts,
         recovery_summary=recovery_summary,
+        recovery_provenance=recovery_provenance,
     )

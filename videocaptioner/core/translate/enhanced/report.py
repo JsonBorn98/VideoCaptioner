@@ -7,7 +7,15 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-from .models import TranslationAuditReport
+from videocaptioner.core.recovery import (
+    UNRECORDED_CONFIG_DIGEST_DRIFT,
+    RecoveryProvenance,
+)
+
+from .models import (
+    TRANSLATION_CONFIG_DRIFT_ANNOTATIONS,
+    TranslationAuditReport,
+)
 
 _CATEGORY_LABELS = {
     "empty_translation": "译文为空",
@@ -62,6 +70,55 @@ _STAGE_LABELS = {
     "audit": "质量审计",
 }
 
+# 受影响成果标注（票 05，ADR-0022）：显示名与效果句共用
+# ``models.TRANSLATION_CONFIG_DRIFT_ANNOTATIONS`` 这一张表，不另设第二份。
+_COMPLETED_LEVEL_LABELS = {
+    "analysis": "全文分析",
+    "glossary": "术语阶段",
+    "translation_segments": "字幕段",
+    "audit_batches": "审计批",
+}
+
+
+def _render_recovery_lines(recovery: RecoveryProvenance) -> list[str]:
+    """恢复来源一节（票 05）：恢复来源、复用级别与受漂移影响的成果标注。"""
+
+    lines = [
+        "## 恢复来源",
+        "",
+        f"- 检查点时间：{recovery.checkpoint_time or '未知'}",
+    ]
+    completed = [
+        f"{_COMPLETED_LEVEL_LABELS.get(key, key)} {value}"
+        for key, value in recovery.completed.items()
+        if value
+    ]
+    lines.append(
+        "- 恢复时已复用：" + ("、".join(completed) if completed else "无")
+    )
+    drift = list(recovery.configuration_drift)
+    lines.append(
+        "- 配置漂移："
+        + ("；".join(drift) if drift else "无")
+    )
+    if recovery.configuration_drift == (UNRECORDED_CONFIG_DIGEST_DRIFT,):
+        lines.append("- 受影响成果：检查点未记录配置摘要，无法追溯受影响部分")
+    elif not drift:
+        lines.append("- 受影响成果：无（无配置漂移）")
+    else:
+        # 有漂移项就绝不写「无」：逐项给效果句；比对项增删（无旧值可归属）
+        # 或未标注的项也给一句归属说明，不与上一行自相矛盾。
+        effects = [
+            TRANSLATION_CONFIG_DRIFT_ANNOTATIONS.get(key, (None, None))[1]
+            or f"部分成果受「{key}」漂移影响，无法进一步归属"
+            for key in recovery.drifted_keys
+        ]
+        if not effects:
+            effects = ["部分成果受配置漂移影响，无法逐项归属（比对项在检查点与当前配置间增删）"]
+        lines.append("- 受影响成果：" + "；".join(effects))
+    lines.append("")
+    return lines
+
 
 def render_audit_markdown(report: TranslationAuditReport) -> str:
     counts = Counter(issue.disposition.value for issue in report.issues)
@@ -76,12 +133,19 @@ def render_audit_markdown(report: TranslationAuditReport) -> str:
         f"- 用户保留原译文：{counts.get('user_rejected', 0)}",
         f"- 仅报告：{counts.get('reported', 0)}",
         f"- 修复校验失败：{counts.get('fix_validation_failed', 0)}",
-        "",
-        "## Usage",
-        "",
-        "| 角色 | 阶段 | 调用 | 墙钟 ms | 输入 token | 输出 token | 缓存读取 | 缓存写入 |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    # 恢复来源一节（票 05）：只给恢复过的运行，紧跟摘要。
+    if report.recovery is not None:
+        lines.extend(("", *_render_recovery_lines(report.recovery)))
+    lines.extend(
+        (
+            "",
+            "## Usage",
+            "",
+            "| 角色 | 阶段 | 调用 | 墙钟 ms | 输入 token | 输出 token | 缓存读取 | 缓存写入 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        )
+    )
 
     def display(value: object) -> str:
         return "不可用" if value is None else str(value)

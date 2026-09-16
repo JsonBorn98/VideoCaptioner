@@ -254,6 +254,7 @@ def publish_translation_workspace(
     translation_method: str,
     assets: Mapping[str, Path],
     snapshot_payload: Mapping[str, Any] | None = None,
+    recovery_payload: Mapping[str, Any] | None = None,
 ) -> Path:
     """把翻译过程资产复制进身份目录并写 manifest（D21/D23）。
 
@@ -304,6 +305,8 @@ def publish_translation_workspace(
             "generated_at": _now_utc(),
             "software_version": _software_version(),
             "assets": {kind: path.name for kind, path in verified.items()},
+            # 恢复来源（票 05，ADR-0022）：恢复过的运行才带；不中断运行不带该键。
+            **({"recovery": dict(recovery_payload)} if recovery_payload is not None else {}),
         },
     )
     return task_dir

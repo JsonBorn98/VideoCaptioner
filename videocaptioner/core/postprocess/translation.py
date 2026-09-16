@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from ..recovery import RecoveryProvenance
 from ..utils.logger import setup_logger
 from .planning import DEFAULT_BOUNDARY_CONTEXT_RADIUS
 
@@ -101,6 +102,9 @@ class TranslationExecutionSnapshot:
     review_identity: Optional[TranslationRoleIdentity] = None
     source_language: str = ""
     target_language: str = ""
+    # 恢复来源（票 05，ADR-0022）：恢复过的运行才带；不中断运行为 None。
+    # 持久化形状由 RecoveryProvenance.to_persisted 给出，模块无关。
+    recovery: Optional[RecoveryProvenance] = None
 
     def to_persisted(self) -> Dict[str, Any]:
         """可持久化载荷：方式、半径、语言与角色身份，无连接机密与提示词。"""
@@ -135,6 +139,8 @@ class TranslationExecutionSnapshot:
                 if review_identity is not None
                 else None
             ),
+            # 恢复来源（票 05）：恢复过的运行才写入；不中断运行不带该键。
+            **({"recovery": self.recovery.to_persisted()} if self.recovery is not None else {}),
         }
 
     @classmethod
@@ -178,6 +184,9 @@ class TranslationExecutionSnapshot:
             review_identity=_identity("review", payload.get("review_role")),
             source_language=source_language if isinstance(source_language, str) else "",
             target_language=target_language if isinstance(target_language, str) else "",
+            # 恢复来源（票 05）：重建快照时带回恢复来源，读写对称；
+            # 载荷缺失或格式无效时不猜测，照旧为 None。
+            recovery=RecoveryProvenance.from_persisted(payload.get("recovery")),
         )
 
 

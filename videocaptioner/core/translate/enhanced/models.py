@@ -8,6 +8,7 @@ from threading import Event
 from typing import Any, Mapping, Optional
 
 from videocaptioner.core.llm.models import LLMModelProfile
+from videocaptioner.core.recovery import RecoveryProvenance
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,35 @@ class TranslationAuditReport:
     authoritative_terms: tuple[GlossaryEntry, ...] = ()
     usages: tuple[StageUsage, ...] = ()
     warnings: tuple[str, ...] = ()
+    # 恢复来源（票 05，ADR-0022）：恢复过的运行才带；不中断运行为 None。
+    recovery: Optional[RecoveryProvenance] = None
+
+
+# 漂移比对项的唯一标注表（票 05）：每项一个显示名 + 一句受影响成果标注，
+# 新增比对项只改这一处；报告与摘要都从这里取。
+TRANSLATION_CONFIG_DRIFT_ANNOTATIONS: Mapping[str, tuple[str, str]] = {
+    "main_prompt": ("主翻译提示词", "部分译文与全文分析结果来自旧的主翻译提示词"),
+    "review_prompt": ("高级校对提示词", "部分术语裁决与审计结果来自旧的高级校对提示词"),
+    "main_profile": (
+        "主翻译模型配置方案",
+        "部分译文与全文分析结果来自旧的主翻译模型配置方案",
+    ),
+    "review_profile": (
+        "高级校对模型配置方案",
+        "部分术语裁决与审计结果来自旧的高级校对模型配置方案",
+    ),
+    "batch_size": ("翻译批处理上限", "已复用批的批规划基于旧的翻译批处理上限"),
+    "boundary_context_radius": (
+        "边界语境段范围",
+        "已复用批的边界语境取自旧的边界语境段范围",
+    ),
+}
+
+
+def translation_config_drift_labels() -> dict[str, str]:
+    """漂移比对项 → 显示名（喂给 ``config_drift`` 的 ``labels``）。"""
+
+    return {key: label for key, (label, _effect) in TRANSLATION_CONFIG_DRIFT_ANNOTATIONS.items()}
 
 
 class TermReviewDecision(str, Enum):
