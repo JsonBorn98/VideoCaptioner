@@ -499,6 +499,13 @@ class SubtitleThread(QThread):
                                 "translation_segments", 0
                             )
                         ),
+                        recovery_skipped_audit_batches=(
+                            0
+                            if self._enhanced_recovery_summary is None
+                            else self._enhanced_recovery_summary.completed.get(
+                                "audit_batches", 0
+                            )
+                        ),
                     )
                 )
 

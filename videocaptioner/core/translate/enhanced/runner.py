@@ -35,6 +35,12 @@ from videocaptioner.core.recovery import (
 )
 from videocaptioner.core.utils.logger import setup_logger
 
+from .audit_checkpoint import (
+    AUDIT_CHECKPOINT_FILENAME,
+    AuditCheckpointError,
+    load_audit_checkpoint,
+    save_audit_checkpoint,
+)
 from .brief import BriefFormatError, load_translation_brief, save_translation_brief
 from .glossary import load_glossary, save_glossary, subtitle_fingerprint
 from .models import (
@@ -164,7 +170,12 @@ def _new_recovery_manifest(identity: Mapping[str, str], task_name: str) -> dict[
         "created_at": timestamp,
         "updated_at": timestamp,
         "software_version": software_version(),
-        "completed": {"analysis": False, "glossary": False, "translation_ids": []},
+        "completed": {
+            "analysis": False,
+            "glossary": False,
+            "translation_ids": [],
+            "audit_batches": [],
+        },
         "interruption": None,
     }
 
@@ -247,6 +258,8 @@ def run_enhanced_translation(
     checkpoint_path = staging_dir / ASSET_FILENAMES["checkpoint"]
     # 翻译简报文件（级别①）：先原子写数据文件，manifest 才登记该级完成。
     context_path = staging_dir / ASSET_FILENAMES["context"]
+    # 审计检查点（级别④）：每审计批完成后先原子写数据文件再更新 manifest。
+    audit_checkpoint_path = staging_dir / AUDIT_CHECKPOINT_FILENAME
     recovery_manifest_path = staging_dir / _RECOVERY_MANIFEST_FILENAME
     explicit_imported = (
         load_glossary(imported_glossary_path) if imported_glossary_path is not None else None
@@ -256,6 +269,7 @@ def run_enhanced_translation(
     resumed_translations: dict[int, str] = {}
     checkpoint_glossary: AuthoritativeGlossary | None = None
     resumed_analysis: tuple[TranslationContextBrief, tuple[TermCandidate, ...]] | None = None
+    resumed_audit_batches: dict[tuple[int, ...], Any] = {}
     recovery_summary: RecoverySummary | None = None
     if manifest is not None:
         completed = manifest["completed"]
@@ -289,10 +303,28 @@ def run_enhanced_translation(
                 cue_id: text for cue_id, text in loaded_translations.items() if cue_id in completed_ids
             }
             resume_warnings.extend(warnings)
+        resumed_audit_batches = {}
+        audit_batch_keys = completed.get("audit_batches", [])
+        if audit_batch_keys:
+            # 恢复只信 manifest；文件缺失或损坏时该级视为未完成并告警。
+            if not audit_checkpoint_path.is_file():
+                resume_warnings.append("恢复 manifest 登记的审计检查点缺失，已重跑全部审计批")
+            else:
+                try:
+                    resumed_audit_batches = load_audit_checkpoint(
+                        audit_checkpoint_path,
+                        source_language=source_language,
+                        target_language=target_language,
+                        subtitle_fingerprint=identity["source_fingerprint"],
+                    )
+                except AuditCheckpointError as exc:
+                    resume_warnings.append(f"审计检查点不可读，已重跑全部审计批：{exc}")
+                    resumed_audit_batches = {}
         resume_available = (
             resumed_analysis is not None
             or checkpoint_glossary is not None
             or bool(resumed_translations)
+            or bool(resumed_audit_batches)
         )
         if resume_available:
             recovery_summary = RecoverySummary(
@@ -302,6 +334,7 @@ def run_enhanced_translation(
                     "analysis": int(resumed_analysis is not None),
                     "glossary": int(checkpoint_glossary is not None),
                     "translation_segments": len(resumed_translations),
+                    "audit_batches": len(resumed_audit_batches),
                 },
                 checkpoint_time=str(manifest.get("updated_at", "")),
             )
@@ -316,6 +349,7 @@ def run_enhanced_translation(
                 resumed_analysis = None
                 checkpoint_glossary = None
                 resumed_translations = {}
+                resumed_audit_batches = {}
                 recovery_summary = None
     if manifest is None:
         manifest = _new_recovery_manifest(identity, base_name)
@@ -386,17 +420,41 @@ def run_enhanced_translation(
         # The checkpoint file is atomically durable before the manifest records its IDs.
         _mark_completed(translation_ids=sorted(accumulated_translations))
 
+    # 审计检查点按批累积：恢复装载的批与新跑的批合并后全量原子重写，
+    # 采过的批重写内容不变（幂等），故无需区分恢复与新跑。
+    accumulated_audit_batches: dict[tuple[int, ...], Any] = dict(resumed_audit_batches)
+
+    def persist_audit_batch(
+        subtitle_ids: tuple[int, ...], issues: Any
+    ) -> None:
+        accumulated_audit_batches[subtitle_ids] = tuple(issues)
+        try:
+            save_audit_checkpoint(
+                audit_checkpoint_path,
+                source_language=source_language,
+                target_language=target_language,
+                subtitle_fingerprint=identity["source_fingerprint"],
+                batches=accumulated_audit_batches,
+            )
+        except OSError as exc:
+            logger.warning("无法保存审计检查点 %s: %s", audit_checkpoint_path, exc)
+            return
+        # The audit checkpoint file is atomically durable before the manifest records it.
+        _mark_completed(audit_batches=[list(key) for key in sorted(accumulated_audit_batches)])
+
     try:
         result = orchestrator.run(
             cues,
             imported_glossary=imported,
             resume_analysis=resumed_analysis,
             resume_translations=resumed_translations,
+            resume_audit_batches=resumed_audit_batches,
             confirm_terms=confirm_terms,
             confirm_audit=confirm_audit,
             on_analysis=None if analysis_durable else persist_analysis,
             on_glossary=persist_glossary,
             on_translations=persist_translations,
+            on_audit_batch=persist_audit_batch,
         )
     except EnhancedTranslationError as exc:
         manifest["interruption"] = "failure"

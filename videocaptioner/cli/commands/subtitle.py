@@ -290,6 +290,7 @@ def run(args: Namespace, config: dict) -> int:
     recovery_analysis = False
     recovery_glossary = False
     recovery_segments = 0
+    recovery_audit_batches = 0
     owned_gateway = None
 
     def callback(result):
@@ -474,6 +475,11 @@ def run(args: Namespace, config: dict) -> int:
                     if recovery_summary is None
                     else recovery_summary.completed.get("translation_segments", 0)
                 )
+                recovery_audit_batches = (
+                    0
+                    if recovery_summary is None
+                    else recovery_summary.completed.get("audit_batches", 0)
+                )
                 enhanced_artifact_paths = (
                     args.glossary_path,
                     args.translation_audit_report_path,
@@ -524,6 +530,7 @@ def run(args: Namespace, config: dict) -> int:
                     recovery_skipped_analysis=recovery_analysis,
                     recovery_skipped_glossary=recovery_glossary,
                     recovery_skipped_segments=recovery_segments,
+                    recovery_skipped_audit_batches=recovery_audit_batches,
                 )
             )
 

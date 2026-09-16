@@ -92,6 +92,7 @@ def build_translate_stage_summary(
     recovery_skipped_analysis: bool = False,
     recovery_skipped_glossary: bool = False,
     recovery_skipped_segments: int = 0,
+    recovery_skipped_audit_batches: int = 0,
 ) -> StageSummary:
     """Build the shared CLI/GUI subtitle translation summary."""
 
@@ -102,6 +103,8 @@ def build_translate_stage_summary(
         counts.append(("从恢复检查点继续，跳过术语阶段", 0))
     if recovery_skipped_segments:
         counts.append(("从恢复检查点继续，跳过字幕段", recovery_skipped_segments))
+    if recovery_skipped_audit_batches:
+        counts.append(("从恢复检查点继续，跳过审计批", recovery_skipped_audit_batches))
     if failed_count:
         counts.append(("翻译失败", failed_count))
     return StageSummary(

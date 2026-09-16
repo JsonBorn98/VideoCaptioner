@@ -11,6 +11,8 @@ from videocaptioner.core.translate.enhanced.models import (
     EnhancedTranslationError,
 )
 
+run_enhanced_translation_real = runner_module.run_enhanced_translation
+
 
 def _written_checkpoint(tmp_path: Path) -> Path:
     matches = list((tmp_path / "videocaptioner-workspace").rglob("translation-checkpoint.json"))
@@ -225,6 +227,7 @@ def test_resume_skips_completed_glossary_and_translates_only_missing_cues(
         "analysis": 0,
         "glossary": 1,
         "translation_segments": 1,
+        "audit_batches": 0,
     }
     assert not list((tmp_path / "videocaptioner-workspace").rglob("recovery-manifest.json"))
 
@@ -538,6 +541,7 @@ def test_resume_analysis_after_term_stage_interruption_skips_whole_analysis(
         "analysis": 1,
         "glossary": 0,
         "translation_segments": 0,
+        "audit_batches": 0,
     }
 
 
@@ -896,3 +900,436 @@ def test_resumed_brief_feeds_identical_prompts_to_uninterrupted_run(
     assert run.recovery_summary.completed["analysis"] == 1
     # 成果与不中断运行等价。
     assert run.subtitle_data.segments[0].translated_text == "可以看到水星。"
+
+
+# ---------------------------------------------------------------------------
+# 级别④：审计检查点与审计级恢复（票 04，ADR-0022）
+# ---------------------------------------------------------------------------
+
+
+def _four_cue_source():
+    return ASRData(
+        [
+            ASRDataSeg("First subtitle.", 0, 1000),
+            ASRDataSeg("Second subtitle.", 1000, 2000),
+            ASRDataSeg("Third subtitle.", 2000, 3000),
+            ASRDataSeg("Fourth subtitle.", 3000, 4000),
+        ]
+    )
+
+
+class _AuditScriptedGateway:
+    """假网关：按阶段脚本化响应，可注入审计阶段的中断异常。"""
+
+    def __init__(self, *, audit_fail_after: int | None = None):
+        import json as _json
+
+        from videocaptioner.core.llm.models import LLMResult, LLMUsage
+
+        self._json = _json
+        self._result_cls = LLMResult
+        self._usage_cls = LLMUsage
+        self.calls = []
+        self.audit_calls = 0
+        self.audit_fail_after = audit_fail_after
+        # 各字幕段返回独立的问题对象：段 2 有审计问题，其余干净。
+        self.audit_bodies: dict[int, dict] = {
+            2: {
+                "issues": [
+                    {
+                        "id": 2,
+                        "categories": ["semantic_accuracy"],
+                        "message": "译文语义偏差。",
+                        "suggested_translation": "修正的第二段。",
+                    }
+                ]
+            }
+        }
+
+    def complete(self, profile, request, *, cancelled=None):
+        stage = request.metadata["stage"]
+        self.calls.append(stage)
+        if stage == "analysis_window":
+            body = {
+                "brief": {
+                    "outline": "Lecture",
+                    "background": "",
+                    "themes": [],
+                    "style_notes": [],
+                    "translation_notes": [],
+                },
+                "candidates": [],
+            }
+        elif stage == "translation":
+            payload = _audit_payload_ids(request)
+            body = {
+                "translations": [
+                    {"id": cue_id, "text": f"译文{cue_id}"} for cue_id in payload
+                ]
+            }
+        elif stage == "audit":
+            self.audit_calls += 1
+            if (
+                self.audit_fail_after is not None
+                and self.audit_calls > self.audit_fail_after
+            ):
+                raise EnhancedTranslationError(
+                    "audit interrupted",
+                    stage="audit",
+                    category="transient",
+                    retryable=True,
+                )
+            payload = _audit_payload_ids(request)
+            # 只对字幕段 2 报告问题；该段所在批返回问题对象，其余批干净。
+            body = (
+                self.audit_bodies[2]
+                if 2 in payload
+                else {"issues": []}
+            )
+        else:
+            raise AssertionError(f"unexpected stage {stage!r}")
+        return self._result_cls(
+            text=self._json.dumps(body, ensure_ascii=False),
+            usage=self._usage_cls(input_tokens=10, output_tokens=2),
+        )
+
+
+def _audit_payload_ids(request) -> list[int]:
+    import json as _json
+
+    content = request.messages[1].content
+    start = content.find("<DYNAMIC_SUBTITLES>")
+    end = content.find("</DYNAMIC_SUBTITLES>")
+    payload = _json.loads(content[start + len("<DYNAMIC_SUBTITLES>") : end].strip())
+    subjects = payload.get("audit_subjects") or payload.get("translation_subjects")
+    return [item["id"] for item in subjects]
+
+
+def _audit_config(batch_size: int = 2, max_concurrency: int = 1):
+    from videocaptioner.core.llm.models import (
+        LLMModelProfile,
+        LLMTransport,
+        ProviderDialect,
+    )
+    from videocaptioner.core.translate.enhanced.models import (
+        EnhancedTranslationConfig,
+        TranslationRoleSnapshot,
+    )
+
+    def _profile(profile_id):
+        return LLMModelProfile(
+            profile_id=profile_id,
+            name=profile_id,
+            transport=LLMTransport.OPENAI_COMPATIBLE,
+            dialect=ProviderDialect.GENERIC,
+            base_url=f"https://{profile_id}.test/v1",
+            api_key="secret",
+            model=f"{profile_id}-model",
+            work_context_tokens=16_384,
+            max_concurrency=1,
+        )
+
+    return EnhancedTranslationConfig(
+        main_role=TranslationRoleSnapshot("main", _profile("main"), "MAIN USER PROMPT"),
+        review_role=TranslationRoleSnapshot(
+            "review", _profile("review"), "REVIEW USER PROMPT"
+        ),
+        source_language="English",
+        target_language="简体中文",
+        batch_size=batch_size,
+        max_concurrency=max_concurrency,
+    )
+
+
+def test_audit_interruption_resume_adopts_completed_batches_with_zero_requests(
+    tmp_path, monkeypatch
+):
+    """审计批中途中断后重跑：已完成审计批零请求、未完成批重跑，成果等价。"""
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2, max_concurrency=1)
+
+    interrupted_gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=interrupted_gateway,
+        )
+    assert interrupted_gateway.audit_calls == 2  # 第 1 批成功，第 2 批中断
+
+    # manifest 已登记第 1 批；审计检查点文件存在且只含该批的问题。
+    staging = _staging_dir(tmp_path)
+    manifest = json.loads(
+        (staging / "recovery-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["completed"]["audit_batches"] == [[1, 2]]
+    checkpoint = json.loads(
+        (staging / "audit-checkpoint.json").read_text(encoding="utf-8")
+    )
+    assert [batch["subtitle_ids"] for batch in checkpoint["batches"]] == [[1, 2]]
+    assert checkpoint["batches"][0]["issues"][0]["message"] == "译文语义偏差。"
+
+    # 恢复：同一输出目录重跑；第 1 批零请求，只有第 2 批重跑。
+    resumed_gateway = _AuditScriptedGateway()
+    run = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=resumed_gateway,
+    )
+    assert resumed_gateway.audit_calls == 1
+    assert resumed_gateway.calls.count("audit") == 1
+    assert run.recovery_summary is not None
+    assert run.recovery_summary.completed["audit_batches"] == 1
+    # 成果与不中断运行等价：段 2 的问题修复被采纳，其余照常。
+    assert run.subtitle_data.segments[1].translated_text == "修正的第二段。"
+    assert [issue.message for issue in run.result.audit_report.issues] == ["译文语义偏差。"]
+    # 成功发布后暂存目录整体删除（审计检查点不发布、不残留）。
+    assert not list((tmp_path / "videocaptioner-workspace").rglob("audit-checkpoint.json"))
+
+
+def test_audit_batch_keys_replan_without_partial_matching(tmp_path):
+    """批规划变化时键不匹配的批重跑，不做部分匹配推断。"""
+    source = _four_cue_source()
+    # 先完整跑一次并发布：暂存清理后无检查点残留。
+    gateway = _AuditScriptedGateway()
+    run_enhanced_translation_real(
+        source,
+        _audit_config(batch_size=2),
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=gateway,
+    )
+    assert not list((tmp_path / "videocaptioner-workspace").rglob("audit-checkpoint.json"))
+
+    # 重新制造一次中断：batch_size=2，审计第 1 批后失败。
+    gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            _audit_config(batch_size=2),
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=gateway,
+        )
+
+    # 恢复时改批处理上限：键不再匹配，全部审计批重跑（零采纳）。
+    resumed_gateway = _AuditScriptedGateway()
+    run = run_enhanced_translation_real(
+        source,
+        _audit_config(batch_size=4),
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=resumed_gateway,
+    )
+    assert resumed_gateway.audit_calls == 1  # batch_size=4 → 单批
+    assert run.recovery_summary is not None
+    assert run.recovery_summary.completed["audit_batches"] == 1
+    assert run.subtitle_data.segments[1].translated_text == "修正的第二段。"
+
+
+def test_audit_checkpoint_corruption_warns_and_reruns_all_batches(
+    tmp_path,
+):
+    """审计检查点损坏或缺失时该级视为未完成并告警，任务继续。"""
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2)
+
+    gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=gateway,
+        )
+
+    # 损坏审计检查点数据文件；manifest 仍登记第 1 批。
+    (_staging_dir(tmp_path) / "audit-checkpoint.json").write_text(
+        "not json", encoding="utf-8"
+    )
+    warnings_seen = []
+    original_warning = runner_module.logger.warning
+
+    def collect_warning(message, *args):
+        warnings_seen.append(message % args if args else message)
+        return original_warning(message, *args)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(runner_module.logger, "warning", collect_warning)
+    try:
+        resumed_gateway = _AuditScriptedGateway()
+        run = run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=resumed_gateway,
+        )
+    finally:
+        monkeypatch.undo()
+
+    # 全部审计批重跑（含原已完成的第 1 批）；审计级视为未完成。
+    assert resumed_gateway.audit_calls == 2
+    assert run.recovery_summary is not None
+    assert run.recovery_summary.completed["audit_batches"] == 0
+    assert any("审计检查点不可读" in message for message in warnings_seen)
+    assert run.subtitle_data.segments[1].translated_text == "修正的第二段。"
+
+
+def test_manual_audit_confirmation_fires_once_after_all_batches_resume(
+    tmp_path,
+):
+    """人工审计确认在全部审计批到齐后触发且只触发一次。"""
+    from videocaptioner.core.translate.enhanced.models import TranslationAuditMode
+
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2)
+    config = type(config)(
+        main_role=config.main_role,
+        review_role=config.review_role,
+        source_language=config.source_language,
+        target_language=config.target_language,
+        batch_size=config.batch_size,
+        max_concurrency=config.max_concurrency,
+        audit_mode=TranslationAuditMode.REVIEW_AND_CONFIRM,
+        execution_mode=__import__(
+            "videocaptioner.core.translate.enhanced.models", fromlist=["TranslationExecutionMode"]
+        ).TranslationExecutionMode.GUI_STANDALONE,
+    )
+
+    # 中断：第 1 批完成后失败。
+    gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=gateway,
+        )
+
+    confirm_calls = []
+
+    def confirm_audit(report):
+        confirm_calls.append(report)
+        return [issue.cue_id for issue in report.issues]
+
+    resumed_gateway = _AuditScriptedGateway()
+    run = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=resumed_gateway,
+        confirm_audit=confirm_audit,
+    )
+
+    # 全部审计批到齐后确认只触发一次，含恢复的第 1 批与新跑的第 2 批。
+    assert len(confirm_calls) == 1
+    assert [issue.message for issue in confirm_calls[0].issues] == ["译文语义偏差。"]
+    assert resumed_gateway.audit_calls == 1
+    # 用户确认修复后译文更新。
+    assert run.subtitle_data.segments[1].translated_text == "修正的第二段。"
+
+
+def test_stop_during_audit_preserves_completed_batches_in_manifest(tmp_path):
+    """主动停止发生在审计阶段时已完成审计批保留并登记在 manifest。"""
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2)
+
+    class StoppedRun:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, cues, **kwargs):
+            glossary = AuthoritativeGlossary(
+                source_language="英语",
+                target_language="简体中文",
+                subtitle_fingerprint=subtitle_fingerprint(cues),
+            )
+            kwargs["on_glossary"](glossary)
+            kwargs["on_translations"]({cue.cue_id: f"译文{cue.cue_id}" for cue in cues})
+            kwargs["on_audit_batch"]((1, 2), ())
+            raise InterruptedError("stopped during audit")
+
+    monkeypatch_local = pytest.MonkeyPatch()
+    monkeypatch_local.setattr(
+        runner_module, "EnhancedTranslationOrchestrator", StoppedRun
+    )
+    try:
+        with pytest.raises(InterruptedError, match="stopped during audit"):
+            run_enhanced_translation_real(
+                source,
+                config,
+                output_dir=tmp_path,
+                base_name="episode",
+            )
+    finally:
+        monkeypatch_local.undo()
+
+    staging = _staging_dir(tmp_path)
+    manifest = json.loads(
+        (staging / "recovery-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["interruption"] == "stopped"
+    assert manifest["completed"]["audit_batches"] == [[1, 2]]
+    checkpoint = json.loads(
+        (staging / "audit-checkpoint.json").read_text(encoding="utf-8")
+    )
+    assert [batch["subtitle_ids"] for batch in checkpoint["batches"]] == [[1, 2]]
+
+
+def test_resumed_audit_report_equivalent_to_uninterrupted_run(tmp_path):
+    """主 seam 等价性：恢复运行的审计报告与不中断运行逐项一致。"""
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2, max_concurrency=1)
+
+    # 不中断基线：同一输入与配置完整跑一遍。
+    baseline_gateway = _AuditScriptedGateway()
+    baseline = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path / "baseline",
+        base_name="episode",
+        gateway=baseline_gateway,
+    )
+
+    # 中断：审计第 1 批成功后第 2 批失败。
+    interrupted_gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=interrupted_gateway,
+        )
+
+    # 恢复：同一输出目录重跑，已完成的第 1 批零请求。
+    resumed_gateway = _AuditScriptedGateway()
+    resumed = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=resumed_gateway,
+    )
+
+    assert baseline_gateway.audit_calls == 2
+    assert resumed_gateway.audit_calls == 1
+    # 最终译文与审计报告与不中断运行等价。
+    assert [
+        segment.translated_text for segment in resumed.subtitle_data.segments
+    ] == [segment.translated_text for segment in baseline.subtitle_data.segments]
+    assert [
+        (issue.cue_id, issue.categories, issue.message, issue.suggested_translation)
+        for issue in resumed.result.audit_report.issues
+    ] == [
+        (issue.cue_id, issue.categories, issue.message, issue.suggested_translation)
+        for issue in baseline.result.audit_report.issues
+    ]

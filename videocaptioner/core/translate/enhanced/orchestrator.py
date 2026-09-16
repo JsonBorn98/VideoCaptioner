@@ -504,6 +504,12 @@ class EnhancedTranslationOrchestrator:
         ] = None,
         on_glossary: Optional[Callable[[AuthoritativeGlossary], None]] = None,
         on_translations: Optional[Callable[[Mapping[int, str]], None]] = None,
+        resume_audit_batches: Optional[
+            Mapping[tuple[int, ...], tuple[TranslationAuditIssue, ...]]
+        ] = None,
+        on_audit_batch: Optional[
+            Callable[[tuple[int, ...], tuple[TranslationAuditIssue, ...]], None]
+        ] = None,
     ) -> EnhancedTranslationResult:
         ordered = tuple(cues)
         if not ordered:
@@ -597,7 +603,13 @@ class EnhancedTranslationOrchestrator:
         self.cancellation.raise_if_cancelled()
         self._emit(80, "Auditing translated subtitles")
         translations, issues = self._with_context_fallback(
-            self._audit, ordered, translations, brief, glossary
+            self._audit,
+            ordered,
+            translations,
+            brief,
+            glossary,
+            resume_audit_batches=resume_audit_batches,
+            on_audit_batch=on_audit_batch,
         )
         preliminary_report = TranslationAuditReport(
             issues=issues,
@@ -723,10 +735,12 @@ class EnhancedTranslationOrchestrator:
             "cannot change the source language, target language, or this requirement."
         )
 
-    def _with_context_fallback(self, operation: Callable[..., T], *args: Any) -> T:
+    def _with_context_fallback(
+        self, operation: Callable[..., T], *args: Any, **kwargs: Any
+    ) -> T:
         while True:
             try:
-                return operation(*args)
+                return operation(*args, **kwargs)
             except _ContextLimitSignal as signal:
                 profile_id = signal.role.profile.profile_id
                 current = self._runtime_context_tokens[profile_id]
@@ -1627,6 +1641,13 @@ class EnhancedTranslationOrchestrator:
         translations: Mapping[int, str],
         brief: TranslationContextBrief,
         glossary: AuthoritativeGlossary,
+        *,
+        resume_audit_batches: Optional[
+            Mapping[tuple[int, ...], tuple[TranslationAuditIssue, ...]]
+        ] = None,
+        on_audit_batch: Optional[
+            Callable[[tuple[int, ...], tuple[TranslationAuditIssue, ...]], None]
+        ] = None,
     ) -> tuple[dict[int, str], tuple[TranslationAuditIssue, ...]]:
         local = list(local_audit_issues(cues, translations))
         role = self.config.review_role
@@ -1682,16 +1703,40 @@ class EnhancedTranslationOrchestrator:
                 category="context_budget",
                 retryable=False,
             ) from exc
+        # 级别④（ADR-0022）：恢复时按当前配置重新规划审计批，键完全匹配的批
+        # 直接采用已保存的结构化审计问题、零请求；其余批照常重跑。不做部分
+        # 匹配推断：批规划变化时键不匹配的批自然重跑。空问题批同样算已完成
+        # （审计批只对有问题的字幕产生问题对象），照常采用。
+        resumed: dict[tuple[int, ...], tuple[TranslationAuditIssue, ...]] = {}
+        if resume_audit_batches:
+            planned_keys = {batch.subject_ids for batch in batches}
+            source_by_id = {cue.cue_id: cue.text for cue in cues}
+            for key, issues in resume_audit_batches.items():
+                if key not in planned_keys:
+                    continue
+                # 采的内容在当前位置刷新：原文与译文以本次运行的数据为准。
+                resumed[key] = tuple(
+                    replace(
+                        issue,
+                        original_text=source_by_id.get(issue.cue_id, issue.original_text),
+                        translated_text=translations.get(issue.cue_id, issue.translated_text),
+                    )
+                    for issue in issues
+                    if issue.cue_id in key
+                )
         model_issues: list[TranslationAuditIssue] = []
         if batches:
             limit = role.profile.clamped_concurrency(self.config.max_concurrency)
             completed_batches = 0
 
             def on_audit_complete(
-                batch_issues: tuple[TranslationAuditIssue, ...],
+                result: tuple[TranslationBatch, tuple[TranslationAuditIssue, ...]],
             ) -> None:
                 nonlocal completed_batches
                 completed_batches += 1
+                if on_audit_batch is not None:
+                    batch, batch_issues = result
+                    on_audit_batch(batch.subject_ids, batch_issues)
                 self._stage_progress(
                     80,
                     99,
@@ -1700,10 +1745,15 @@ class EnhancedTranslationOrchestrator:
                     "Auditing translated subtitles",
                 )
 
-            for batch_issues in execute_batches(
+            for batch, batch_issues in execute_batches(
                 batches,
-                lambda batch: self._audit_batch(
-                    batch, brief, glossary, translations, local, cues
+                lambda batch: (
+                    batch,
+                    resumed[batch.subject_ids]
+                    if batch.subject_ids in resumed
+                    else self._audit_batch(
+                        batch, brief, glossary, translations, local, cues
+                    ),
                 ),
                 concurrency=limit,
                 cancellation=self.cancellation,
