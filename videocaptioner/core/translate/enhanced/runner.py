@@ -35,6 +35,7 @@ from videocaptioner.core.recovery import (
 )
 from videocaptioner.core.utils.logger import setup_logger
 
+from .brief import BriefFormatError, load_translation_brief, save_translation_brief
 from .glossary import load_glossary, save_glossary, subtitle_fingerprint
 from .models import (
     AuthoritativeGlossary,
@@ -45,6 +46,7 @@ from .models import (
     SubtitleCue,
     TermCandidate,
     TranslationAuditReport,
+    TranslationContextBrief,
 )
 from .orchestrator import EnhancedTranslationOrchestrator
 from .report import save_audit_markdown
@@ -60,6 +62,7 @@ class EnhancedTranslationArtifacts:
     glossary_path: Path
     audit_report_path: Path
     translation_checkpoint_path: Optional[Path] = None
+    context_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -161,7 +164,7 @@ def _new_recovery_manifest(identity: Mapping[str, str], task_name: str) -> dict[
         "created_at": timestamp,
         "updated_at": timestamp,
         "software_version": software_version(),
-        "completed": {"glossary": False, "translation_ids": []},
+        "completed": {"analysis": False, "glossary": False, "translation_ids": []},
         "interruption": None,
     }
 
@@ -181,6 +184,22 @@ def _matching_recovery_manifest(
         return None
     completed = manifest.get("completed")
     return manifest if isinstance(completed, dict) else None
+
+
+def _remove_empty_ancestors(directory: Path, stop: Path) -> None:
+    """Delete now-empty staging ancestors up to (excluding) the workspace root."""
+
+    try:
+        current = directory.resolve()
+        boundary = stop.resolve()
+    except OSError:
+        return
+    while current != boundary and boundary in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
 
 
 def run_enhanced_translation(
@@ -226,6 +245,8 @@ def run_enhanced_translation(
     glossary_path = staging_dir / ASSET_FILENAMES["glossary"]
     audit_path = staging_dir / ASSET_FILENAMES["audit"]
     checkpoint_path = staging_dir / ASSET_FILENAMES["checkpoint"]
+    # 翻译简报文件（级别①）：先原子写数据文件，manifest 才登记该级完成。
+    context_path = staging_dir / ASSET_FILENAMES["context"]
     recovery_manifest_path = staging_dir / _RECOVERY_MANIFEST_FILENAME
     explicit_imported = (
         load_glossary(imported_glossary_path) if imported_glossary_path is not None else None
@@ -234,9 +255,21 @@ def run_enhanced_translation(
     resume_warnings: list[str] = []
     resumed_translations: dict[int, str] = {}
     checkpoint_glossary: AuthoritativeGlossary | None = None
+    resumed_analysis: tuple[TranslationContextBrief, tuple[TermCandidate, ...]] | None = None
     recovery_summary: RecoverySummary | None = None
     if manifest is not None:
         completed = manifest["completed"]
+        if completed.get("analysis") is True:
+            # 恢复只信 manifest；文件缺失、损坏或身份不符时该级视为未完成并告警。
+            try:
+                resumed_analysis = load_translation_brief(
+                    context_path,
+                    source_language=source_language,
+                    target_language=target_language,
+                    subtitle_fingerprint=identity["source_fingerprint"],
+                )
+            except BriefFormatError as exc:
+                resume_warnings.append(f"翻译简报文件不可用，已重跑全文分析：{exc}")
         completed_ids = completed.get("translation_ids", [])
         if not isinstance(completed_ids, list) or not all(
             type(item) is int and item > 0 for item in completed_ids
@@ -256,12 +289,17 @@ def run_enhanced_translation(
                 cue_id: text for cue_id, text in loaded_translations.items() if cue_id in completed_ids
             }
             resume_warnings.extend(warnings)
-        resume_available = checkpoint_glossary is not None or bool(resumed_translations)
+        resume_available = (
+            resumed_analysis is not None
+            or checkpoint_glossary is not None
+            or bool(resumed_translations)
+        )
         if resume_available:
             recovery_summary = RecoverySummary(
                 module=_RECOVERY_MODULE,
                 identity=identity,
                 completed={
+                    "analysis": int(resumed_analysis is not None),
                     "glossary": int(checkpoint_glossary is not None),
                     "translation_segments": len(resumed_translations),
                 },
@@ -275,6 +313,7 @@ def run_enhanced_translation(
             if decision is RecoveryDecision.START_FRESH:
                 manifest = _new_recovery_manifest(identity, base_name)
                 write_recovery_manifest(recovery_manifest_path, manifest)
+                resumed_analysis = None
                 checkpoint_glossary = None
                 resumed_translations = {}
                 recovery_summary = None
@@ -297,6 +336,28 @@ def run_enhanced_translation(
         manifest["completed"] = completed
         manifest["updated_at"] = now_utc()
         write_recovery_manifest(recovery_manifest_path, manifest)
+
+    analysis_written = resumed_analysis is not None
+
+    def persist_analysis(
+        brief: TranslationContextBrief, candidates: tuple[TermCandidate, ...]
+    ) -> None:
+        nonlocal analysis_written
+        # The brief file is atomically durable before the manifest declares level ① complete.
+        save_translation_brief(
+            context_path,
+            source_language=source_language,
+            target_language=target_language,
+            subtitle_fingerprint=identity["source_fingerprint"],
+            brief=brief,
+            candidates=candidates,
+        )
+        completed = dict(manifest["completed"])
+        completed["analysis"] = True
+        manifest["completed"] = completed
+        manifest["updated_at"] = now_utc()
+        write_recovery_manifest(recovery_manifest_path, manifest)
+        analysis_written = True
 
     checkpoint_written = bool(resumed_translations)
     accumulated_translations: dict[int, str] = dict(resumed_translations)
@@ -328,9 +389,11 @@ def run_enhanced_translation(
         result = orchestrator.run(
             cues,
             imported_glossary=imported,
+            resume_analysis=resumed_analysis,
             resume_translations=resumed_translations,
             confirm_terms=confirm_terms,
             confirm_audit=confirm_audit,
+            on_analysis=None if analysis_written else persist_analysis,
             on_glossary=persist_glossary,
             on_translations=persist_translations,
         )
@@ -374,6 +437,8 @@ def run_enhanced_translation(
     }
     if checkpoint_written:
         published_assets["checkpoint"] = checkpoint_path
+    if analysis_written:
+        published_assets["context"] = context_path
     task_dir = publish_translation_workspace(
         output_dir=destination,
         task_name=base_name,
@@ -387,6 +452,7 @@ def run_enhanced_translation(
     published_glossary = task_dir / ASSET_FILENAMES["glossary"]
     published_audit = task_dir / ASSET_FILENAMES["audit"]
     published_checkpoint = task_dir / ASSET_FILENAMES["checkpoint"]
+    published_context = task_dir / ASSET_FILENAMES["context"]
     artifacts = EnhancedTranslationArtifacts(
         glossary_path=published_glossary if published_glossary.is_file() else glossary_path,
         audit_report_path=published_audit if published_audit.is_file() else audit_path,
@@ -395,10 +461,18 @@ def run_enhanced_translation(
             if checkpoint_written and published_checkpoint.is_file()
             else (checkpoint_path if checkpoint_written else None)
         ),
+        context_path=(
+            published_context
+            if analysis_written and published_context.is_file()
+            else (context_path if analysis_written else None)
+        ),
     )
     # Recovery data is never a deliverable. Only delete it after all publication
     # work completed successfully, so a failing publish preserves the checkpoint.
     shutil.rmtree(staging_dir, ignore_errors=True)
+    # 暂存目录整体删除（票 03）：连同只剩空壳的 .in-progress 祖先一起清掉，
+    # 否则成功发布后会残留空目录、让同一目录可被误认作可恢复。
+    _remove_empty_ancestors(staging_dir.parent, workspace_root)
     return EnhancedTranslationRun(
         subtitle_data=translated,
         result=result,

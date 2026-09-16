@@ -56,6 +56,21 @@ class _SuccessfulOrchestrator:
             target_language="zh",
             subtitle_fingerprint="sha256:" + "0" * 64,
         )
+        on_analysis = kwargs.get("on_analysis")
+        if on_analysis is not None:
+            from videocaptioner.core.translate.enhanced.models import TermCandidate
+
+            on_analysis(
+                TranslationContextBrief(outline="A demo lecture"),
+                (
+                    TermCandidate(
+                        candidate_id="demo-term",
+                        source_term="demo",
+                        sense="the demonstration",
+                        occurrence_ids=(1,),
+                    ),
+                ),
+            )
         kwargs["on_glossary"](glossary)
         translations = {cue.cue_id: f"译文{cue.cue_id}" for cue in cues}
         kwargs["on_translations"](translations)
@@ -187,3 +202,54 @@ def test_standalone_postprocess_finds_assets_when_languages_do_not_match(tmp_pat
     assert not any(
         "过程资产缺失" in warning and "checkpoint" in warning for warning in result.warnings
     )
+
+
+def test_standalone_postprocess_discovers_context_asset(tmp_path):
+    """翻译简报文件（context）：发布进任务过程目录后由后处理验证并复制。
+
+    票 03：后处理过程资产发现把 context 作为上游资产按 JSON 可读性验证
+    并复制；其余种类行为不变；本轮不新增消费者（D07 简报复用未确认）。
+    """
+
+    run = enhanced_runner_module.run_enhanced_translation(
+        ASRData([ASRDataSeg("Hello world.", 0, 2000)]),
+        EnhancedTranslationConfig(
+            main_role=TranslationRoleSnapshot("main", _profile()),
+            review_role=TranslationRoleSnapshot("review", _profile()),
+            source_language="en",
+            target_language="zh",
+            execution_mode=TranslationExecutionMode.CLI,
+        ),
+        output_dir=tmp_path,
+        base_name="clip",
+    )
+    initial = _save_initial(run, tmp_path)
+
+    result = run_postprocess_task(
+        PostprocessTask(
+            str(initial),
+            postprocessed_subtitle_path=str(tmp_path / "【后处理字幕】clip.srt"),
+            workflow_base_name="clip",
+            source_language="en",
+            target_language="zh",
+            translation_method="enhanced",
+            layout_mode=PostprocessLayoutMode.ORIGINAL_ON_TOP,
+            config_snapshot=PostprocessConfig(
+                trim_trailing_punct=False, speed_semantic_repair=False
+            ),
+        )
+    )
+
+    assert result.succeeded
+    discovery = result.task.asset_discovery
+    assert discovery is not None
+    context_path = discovery.asset_path("context")
+    assert context_path is not None
+    assert context_path.is_relative_to(discovery.task_dir)
+    assert "context" not in discovery.missing
+    assert "glossary" not in discovery.missing
+    assert "checkpoint" not in discovery.missing
+    import json as _json
+
+    document = _json.loads(context_path.read_text(encoding="utf-8"))
+    assert document["schema"] == "videocaptioner.translation_brief"

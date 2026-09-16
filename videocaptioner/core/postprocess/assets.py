@@ -14,6 +14,7 @@ _UPSTREAM_ASSET_ATTRS = (
     ("glossary", "glossary_path"),
     ("audit", "translation_audit_report_path"),
     ("checkpoint", "translation_checkpoint_path"),
+    ("context", "translation_context_path"),
 )
 
 

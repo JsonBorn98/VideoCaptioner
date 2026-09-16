@@ -89,12 +89,15 @@ def build_translate_stage_summary(
     segment_count: int,
     *,
     failed_count: int = 0,
+    recovery_skipped_analysis: bool = False,
     recovery_skipped_glossary: bool = False,
     recovery_skipped_segments: int = 0,
 ) -> StageSummary:
     """Build the shared CLI/GUI subtitle translation summary."""
 
     counts: Counts = [("段", segment_count)]
+    if recovery_skipped_analysis:
+        counts.append(("从恢复检查点继续，跳过全文分析", 0))
     if recovery_skipped_glossary:
         counts.append(("从恢复检查点继续，跳过术语阶段", 0))
     if recovery_skipped_segments:

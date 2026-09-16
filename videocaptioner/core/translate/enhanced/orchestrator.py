@@ -491,11 +491,17 @@ class EnhancedTranslationOrchestrator:
         cues: Sequence[SubtitleCue],
         *,
         imported_glossary: Optional[AuthoritativeGlossary] = None,
+        resume_analysis: Optional[
+            tuple[TranslationContextBrief, tuple[TermCandidate, ...]]
+        ] = None,
         resume_translations: Optional[Mapping[int, str]] = None,
         confirm_terms: Optional[
             Callable[[tuple[TermCandidate, ...]], Sequence[TermCandidate]]
         ] = None,
         confirm_audit: Optional[Callable[[TranslationAuditReport], Sequence[int]]] = None,
+        on_analysis: Optional[
+            Callable[[TranslationContextBrief, tuple[TermCandidate, ...]], None]
+        ] = None,
         on_glossary: Optional[Callable[[AuthoritativeGlossary], None]] = None,
         on_translations: Optional[Callable[[Mapping[int, str]], None]] = None,
     ) -> EnhancedTranslationResult:
@@ -504,7 +510,16 @@ class EnhancedTranslationOrchestrator:
             raise ValueError("enhanced translation requires at least one subtitle cue")
         self._ensure_ordered_unique(ordered)
         self._emit(1, "Analyzing complete source subtitles")
-        brief, extracted_candidates = self._with_context_fallback(self._analyze, ordered)
+        if resume_analysis is not None:
+            # Level ① recovery (ADR-0022): a completed whole-subtitle analysis
+            # replays its brief and deduplicated candidates verbatim, so the
+            # term stage and every prompt downstream stay byte-identical to an
+            # uninterrupted run. No analysis request is re-sent.
+            brief, extracted_candidates = resume_analysis
+        else:
+            brief, extracted_candidates = self._with_context_fallback(self._analyze, ordered)
+        if on_analysis is not None:
+            on_analysis(brief, extracted_candidates)
 
         imported_mode = GlossaryImportMode.INCOMPATIBLE
         imported: Optional[AuthoritativeGlossary] = None

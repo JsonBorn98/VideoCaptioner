@@ -313,6 +313,11 @@ class SubtitleThread(QThread):
             if run.artifacts.translation_checkpoint_path is not None
             else None
         )
+        self.task.translation_context_path = (
+            str(run.artifacts.context_path)
+            if run.artifacts.context_path is not None
+            else None
+        )
         self.task.translation_audit_report = run.result.audit_report
         self._enhanced_recovery_summary = getattr(run, "recovery_summary", None)
         if config.execution_mode is TranslationExecutionMode.GUI_STANDALONE:
@@ -482,6 +487,10 @@ class SubtitleThread(QThread):
                         recovery_skipped_glossary=(
                             self._enhanced_recovery_summary is not None
                             and self._enhanced_recovery_summary.completed.get("glossary", 0) > 0
+                        ),
+                        recovery_skipped_analysis=(
+                            self._enhanced_recovery_summary is not None
+                            and self._enhanced_recovery_summary.completed.get("analysis", 0) > 0
                         ),
                         recovery_skipped_segments=(
                             0

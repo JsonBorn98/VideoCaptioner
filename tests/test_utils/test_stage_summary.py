@@ -37,3 +37,18 @@ def test_merge_summary_stays_clean_without_fallbacks():
     summary = build_split_stage_summary(8, use_llm=False)
 
     assert format_stage_summary(summary) == "merge · 8 段"
+
+
+def test_translate_summary_records_resumed_analysis():
+    summary = build_translate_stage_summary(
+        12,
+        recovery_skipped_analysis=True,
+        recovery_skipped_glossary=True,
+        recovery_skipped_segments=5,
+    )
+
+    assert format_stage_summary(summary) == (
+        "translate · 12 段 · 从恢复检查点继续，跳过全文分析 · "
+        "从恢复检查点继续，跳过术语阶段 · "
+        "从恢复检查点继续，跳过字幕段"
+    )

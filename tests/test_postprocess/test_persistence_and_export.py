@@ -334,6 +334,28 @@ def test_collect_upstream_assets_picks_readable_kinds_only(tmp_path):
     }
 
 
+def test_collect_upstream_assets_picks_context_kind(tmp_path):
+    from types import SimpleNamespace
+
+    from videocaptioner.core.postprocess.assets import collect_upstream_assets
+
+    context = tmp_path / "context.json"
+    context.write_text(
+        '{"schema": "videocaptioner.translation_brief"}\n', encoding="utf-8"
+    )
+    source = SimpleNamespace(
+        glossary_path=None,
+        translation_audit_report_path=None,
+        translation_checkpoint_path=None,
+        translation_context_path=str(context),
+    )
+
+    assets = collect_upstream_assets(source)
+
+    # 翻译简报文件（票 03）随其他上游资产一起进入 explicit_assets。
+    assert assets == {"context": str(context)}
+
+
 def test_collect_upstream_assets_skips_absent_attributes(tmp_path):
     from types import SimpleNamespace
 

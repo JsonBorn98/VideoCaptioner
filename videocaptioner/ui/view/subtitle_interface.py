@@ -690,6 +690,8 @@ class SubtitleInterface(QWidget):
 
     def _show_recovery_decision(self, summary) -> None:
         skipped: list[str] = []
+        if summary.completed.get("analysis", 0):
+            skipped.append(self.tr("全文分析"))
         if summary.completed.get("glossary", 0):
             skipped.append(self.tr("术语阶段"))
         translated = summary.completed.get("translation_segments", 0)

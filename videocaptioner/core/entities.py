@@ -972,6 +972,9 @@ class SubtitleTask:
     glossary_path: Optional[str] = None
     translation_audit_report_path: Optional[str] = None
     translation_checkpoint_path: Optional[str] = None
+    # 翻译简报文件（ADR-0022 级别①）：成功发布后随其他翻译资产一起
+    # 复制进任务过程目录，供 workflow 后处理经 explicit_assets 复用。
+    translation_context_path: Optional[str] = None
     # 任务开始时冻结的翻译执行快照（票 06，D15）：由字幕线程从本任务的
     # SubtitleConfig 生成，供下游后处理把修复方式与原任务对齐。
     # 运行期对象（角色连接 / 提示词）只随 workflow 在内存传递，不落盘。
