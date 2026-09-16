@@ -104,15 +104,24 @@ def test_saved_brief_contains_no_prompts_keys_or_model_responses(tmp_path):
         assert key not in {"prompt", "response", "api_key"}
 
 
+def _load(path: Path):
+    return load_translation_brief(
+        path,
+        source_language="English",
+        target_language="简体中文",
+        subtitle_fingerprint=subtitle_fingerprint(_CUES),
+    )
+
+
 def test_load_rejects_corrupted_or_non_object_files(tmp_path):
     path = tmp_path / "context.json"
     path.write_text("not json", encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
     path.write_text('["array"]', encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
 
 def test_load_rejects_unknown_schema_or_version(tmp_path):
@@ -122,13 +131,13 @@ def test_load_rejects_unknown_schema_or_version(tmp_path):
     document["version"] = BRIEF_VERSION + 1
     path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
     document["version"] = BRIEF_VERSION
     document["schema"] = "some.other.schema"
     path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
 
 def test_load_rejects_mismatched_identity(tmp_path):
@@ -137,14 +146,14 @@ def test_load_rejects_mismatched_identity(tmp_path):
     document["subtitle_fingerprint"] = "sha256:" + "0" * 64
     path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
     path = _save(tmp_path)
     document = json.loads(path.read_text(encoding="utf-8"))
     document["target_language"] = "日本語"
     path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
 
 def test_load_rejects_invalid_candidate_shapes(tmp_path):
@@ -154,14 +163,14 @@ def test_load_rejects_invalid_candidate_shapes(tmp_path):
     document["candidates"][0]["occurrence_ids"] = [0, -1]
     path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
     path = _save(tmp_path)
     document = json.loads(path.read_text(encoding="utf-8"))
     document["candidates"][0]["source_term"] = "  "
     path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(BriefFormatError):
-        load_translation_brief(path, source_language='English', target_language='简体中文', subtitle_fingerprint=subtitle_fingerprint(_CUES))
+        _load(path)
 
 
 def test_save_is_atomic_and_replaces_previous_content(tmp_path):

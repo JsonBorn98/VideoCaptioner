@@ -9,10 +9,10 @@ API key 或模型原始响应；不随项目术语表文件导出。遵守 ADR-0
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from videocaptioner.core.recovery import atomic_write_json
 
 from .glossary import normalize_term
 from .models import TermCandidate, TranslationContextBrief
@@ -130,33 +130,16 @@ def save_translation_brief(
 ) -> Path:
     """Atomically persist a canonical, versioned translation-brief file."""
 
-    payload = translation_brief_to_dict(
-        source_language=source_language,
-        target_language=target_language,
-        subtitle_fingerprint=subtitle_fingerprint,
-        brief=brief,
-        candidates=candidates,
+    return atomic_write_json(
+        path,
+        translation_brief_to_dict(
+            source_language=source_language,
+            target_language=target_language,
+            subtitle_fingerprint=subtitle_fingerprint,
+            brief=brief,
+            candidates=candidates,
+        ),
     )
-    content = (
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    ).encode("utf-8")
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", dir=destination.parent, delete=False
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-        temporary = None
-    finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
-    return destination
 
 
 def load_translation_brief(

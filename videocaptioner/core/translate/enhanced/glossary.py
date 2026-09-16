@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 import unicodedata
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+from videocaptioner.core.recovery import atomic_write_json
 
 from .models import (
     AuthoritativeGlossary,
@@ -145,31 +145,7 @@ def glossary_from_dict(data: Any) -> AuthoritativeGlossary:
 def save_glossary(path: str | Path, glossary: AuthoritativeGlossary) -> Path:
     """Atomically persist a canonical, versioned ``.vcglossary.json`` file."""
 
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    content = (
-        json.dumps(
-            glossary_to_dict(glossary),
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-        )
-        + "\n"
-    ).encode("utf-8")
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", dir=destination.parent, delete=False
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-    finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
-    return destination
+    return atomic_write_json(path, glossary_to_dict(glossary))
 
 
 def load_glossary(path: str | Path) -> AuthoritativeGlossary:

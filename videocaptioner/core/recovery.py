@@ -54,19 +54,25 @@ def software_version() -> str:
     return str(version or "unknown")
 
 
-def write_recovery_manifest(path: str | Path, manifest: Mapping[str, Any]) -> Path:
-    """Atomically replace a manifest after its corresponding data file is durable."""
+def atomic_write_json(path: str | Path, payload: Mapping[str, Any]) -> Path:
+    """Atomically replace a canonical JSON document via a sibling temp file.
+
+    This is the one atomic-write shape shared by recovery-adjacent persisted
+    files (recovery manifest, project glossary, translation brief): fsync the
+    temporary file before ``os.replace`` so a reader never sees a half-written
+    document, and never trust a temp file that survived an error.
+    """
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(dict(manifest), ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
-        "utf-8"
-    )
+    content = (
+        json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(mode="wb", dir=destination.parent, delete=False) as stream:
             temporary = Path(stream.name)
-            stream.write(payload)
+            stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
@@ -75,6 +81,12 @@ def write_recovery_manifest(path: str | Path, manifest: Mapping[str, Any]) -> Pa
         if temporary is not None and temporary.exists():
             temporary.unlink()
     return destination
+
+
+def write_recovery_manifest(path: str | Path, manifest: Mapping[str, Any]) -> Path:
+    """Atomically replace a manifest after its corresponding data file is durable."""
+
+    return atomic_write_json(path, manifest)
 
 
 def load_recovery_manifest(path: str | Path) -> dict[str, Any] | None:

@@ -320,6 +320,9 @@ def run_enhanced_translation(
     if manifest is None:
         manifest = _new_recovery_manifest(identity, base_name)
         write_recovery_manifest(recovery_manifest_path, manifest)
+    # 恢复告警在进入编排前输出：本次运行中途失败时告警也不丢失。
+    if resume_warnings:
+        logger.warning("恢复检查点告警：%s", "；".join(resume_warnings))
     imported = explicit_imported or checkpoint_glossary
     orchestrator = EnhancedTranslationOrchestrator(
         config,
@@ -328,21 +331,27 @@ def run_enhanced_translation(
         progress=progress,
     )
 
-    def persist_glossary(glossary: AuthoritativeGlossary) -> None:
-        # The glossary file is atomically durable before the manifest declares it complete.
-        save_glossary(glossary_path, glossary)
+    def _mark_completed(**fields: Any) -> None:
+        """Record completed recovery levels after their data files are durable."""
+
         completed = dict(manifest["completed"])
-        completed["glossary"] = True
+        completed.update(fields)
         manifest["completed"] = completed
         manifest["updated_at"] = now_utc()
         write_recovery_manifest(recovery_manifest_path, manifest)
 
-    analysis_written = resumed_analysis is not None
+    def persist_glossary(glossary: AuthoritativeGlossary) -> None:
+        # The glossary file is atomically durable before the manifest declares it complete.
+        save_glossary(glossary_path, glossary)
+        _mark_completed(glossary=True)
+
+    # 简报已落盘（恢复装载或本次写入）时不再重写检查点，发布时带 context 资产。
+    analysis_durable = resumed_analysis is not None
 
     def persist_analysis(
         brief: TranslationContextBrief, candidates: tuple[TermCandidate, ...]
     ) -> None:
-        nonlocal analysis_written
+        nonlocal analysis_durable
         # The brief file is atomically durable before the manifest declares level ① complete.
         save_translation_brief(
             context_path,
@@ -352,12 +361,8 @@ def run_enhanced_translation(
             brief=brief,
             candidates=candidates,
         )
-        completed = dict(manifest["completed"])
-        completed["analysis"] = True
-        manifest["completed"] = completed
-        manifest["updated_at"] = now_utc()
-        write_recovery_manifest(recovery_manifest_path, manifest)
-        analysis_written = True
+        _mark_completed(analysis=True)
+        analysis_durable = True
 
     checkpoint_written = bool(resumed_translations)
     accumulated_translations: dict[int, str] = dict(resumed_translations)
@@ -379,11 +384,7 @@ def run_enhanced_translation(
             return
         checkpoint_written = True
         # The checkpoint file is atomically durable before the manifest records its IDs.
-        completed = dict(manifest["completed"])
-        completed["translation_ids"] = sorted(accumulated_translations)
-        manifest["completed"] = completed
-        manifest["updated_at"] = now_utc()
-        write_recovery_manifest(recovery_manifest_path, manifest)
+        _mark_completed(translation_ids=sorted(accumulated_translations))
 
     try:
         result = orchestrator.run(
@@ -393,7 +394,7 @@ def run_enhanced_translation(
             resume_translations=resumed_translations,
             confirm_terms=confirm_terms,
             confirm_audit=confirm_audit,
-            on_analysis=None if analysis_written else persist_analysis,
+            on_analysis=None if analysis_durable else persist_analysis,
             on_glossary=persist_glossary,
             on_translations=persist_translations,
         )
@@ -416,9 +417,6 @@ def run_enhanced_translation(
         write_recovery_manifest(recovery_manifest_path, manifest)
         raise
     translated = _translated_copy(subtitle_data, result.translations)
-
-    if resume_warnings:
-        logger.warning("恢复检查点告警：%s", "；".join(resume_warnings))
     persist_translations(result.translations)
     save_audit_markdown(audit_path, result.audit_report)
     snapshot = TranslationExecutionSnapshot(
@@ -437,7 +435,7 @@ def run_enhanced_translation(
     }
     if checkpoint_written:
         published_assets["checkpoint"] = checkpoint_path
-    if analysis_written:
+    if analysis_durable:
         published_assets["context"] = context_path
     task_dir = publish_translation_workspace(
         output_dir=destination,
@@ -463,8 +461,8 @@ def run_enhanced_translation(
         ),
         context_path=(
             published_context
-            if analysis_written and published_context.is_file()
-            else (context_path if analysis_written else None)
+            if analysis_durable and published_context.is_file()
+            else (context_path if analysis_durable else None)
         ),
     )
     # Recovery data is never a deliverable. Only delete it after all publication
