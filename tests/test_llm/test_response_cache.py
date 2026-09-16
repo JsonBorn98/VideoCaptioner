@@ -285,6 +285,11 @@ def test_stored_entries_expire_after_seven_days(cache_enabled):
         def __init__(self):
             self.set_calls = []
 
+        # Empty real caches are falsy (__len__); a recording cache with no
+        # writes yet must reproduce that trap for the `is None` check.
+        def __len__(self):
+            return len(self.set_calls)
+
         def get(self, key):
             raise KeyError(key)
 

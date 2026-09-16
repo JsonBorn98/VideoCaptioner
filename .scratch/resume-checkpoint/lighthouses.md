@@ -1,0 +1,3 @@
+## Lighthouses
+- [译文检查点已按批原子增量写入，但全仓库没有读者](videocaptioner/core/translate/enhanced/runner.py:151-166) — 现有 on_translations 回调在每个翻译批完成时把累计译文合并写入 translation-checkpoint.json（tempfile + os.replace + fsync），失败时只在错误信息里附路径。恢复实现应复用这条写路径并补读回，同一机制可扩展到审计批（审计已走 execute_batches 的 on_complete），不要另起一套检查点写入。
+- [网关响应缓存键排除 metadata/task_id，是轮内回放的既有依据](videocaptioner/core/llm/response_cache.py:60-90) — 缓存键只含 profile 成形字段与 request 的 messages/max_output_tokens/response_schema/request_options_override/cacheable_system_prefix，新任务重发相同请求也命中；唯一限制是 EXPIRE_SECONDS = 3600。R04 决定轮内候选不落盘、TTL 延长到 7 天，正是建立在这条键设计之上；后处理同轮请求读取统一修复轮次快照（ADR-0021），重跑当前轮的 payload 与中断前一致。
