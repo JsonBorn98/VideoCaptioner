@@ -239,6 +239,12 @@ page._show_recovery_decision(RecoverySummary(
     configuration_drift=('后处理配置方案：检查点 sha256:old，当前 sha256:new',),
 ))
 assert page._thread.decisions == ['continue']
+# 枚举化护栏（票 09 修复回审）：页面必须提交 RecoveryDecision 枚举，
+# 不是裸串——裸串实现下此断言失败（str 枚举 == 裸串恒真，故上一行
+# 无区分性；类型断言才有）。
+from videocaptioner.core.recovery import RecoveryDecision
+assert type(page._thread.decisions[0]) is RecoveryDecision
+assert page._thread.decisions[0] is RecoveryDecision.CONTINUE
 # 标签表对齐 core 侧 _RECOVERY_COMPLETED_LEVEL_LABELS（report.py）：
 # phase / rounds 在恢复提示与 QA 报告不出现两个名字。
 labels = dialogs[0].kwargs['completed_labels']

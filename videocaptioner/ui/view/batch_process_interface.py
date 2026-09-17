@@ -421,7 +421,7 @@ class BatchProcessInterface(QWidget):
                 status_item.setToolTip(error)
                 break
 
-    def on_task_completed(self, file_path: str, resumed_from_checkpoint: bool = False):
+    def on_task_completed(self, file_path: str, resumed_from_checkpoint: bool):
         """完成行渲染（票 09）：批量默认继续，续跑行带「已从恢复检查点继续」。"""
         status = str(BatchTaskStatus.COMPLETED)
         if resumed_from_checkpoint:
