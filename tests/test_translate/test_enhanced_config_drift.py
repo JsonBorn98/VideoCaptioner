@@ -29,15 +29,6 @@ def _two_cues() -> ASRData:
     )
 
 
-def _staging_dir(tmp_path: Path) -> Path:
-    """暂存目录：源字幕指纹 + 语言对身份目录（含恢复 manifest 与检查点）。"""
-    matches = list(
-        (tmp_path / "videocaptioner-workspace").rglob("recovery-manifest.json")
-    )
-    assert matches, "expected recovery manifest in staging directory"
-    return matches[0].parent
-
-
 def _recovery_manifest(tmp_path: Path) -> Path:
     matches = list(
         (tmp_path / "videocaptioner-workspace").rglob("recovery-manifest.json")
@@ -314,6 +305,61 @@ def test_unrecorded_fingerprint_reports_single_drift_item(tmp_path, monkeypatch)
     assert run.recovery_summary.configuration_drift == (
         UNRECORDED_CONFIG_DIGEST_DRIFT,
     )
+    assert run.recovery_provenance is not None
+    assert run.recovery_provenance.drifted_keys == ()
+
+
+def test_unusable_manifest_refreshes_fingerprint_before_next_resume(
+    tmp_path, monkeypatch
+):
+    """无可复用级别的重跑先刷新冻结摘要：下次恢复不报幻影漂移。
+
+    第一次运行在任何检查点落盘前失败（manifest 无可复用级别）；第二次
+    换配置重跑落盘检查点后中断；第三次恢复时冻结摘要已是第二次的配置，
+    不把第二次的新检查点算成第一次旧配置的产物。
+    """
+    config = _enhanced_config_with_profiles()
+
+    class FailingBeforeCheckpointsRun:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, cues, **kwargs):
+            raise EnhancedTranslationError(
+                "analysis failed",
+                stage="analysis",
+                category="transient",
+                retryable=True,
+            )
+
+    monkeypatch.setattr(
+        runner_module, "EnhancedTranslationOrchestrator", FailingBeforeCheckpointsRun
+    )
+    with pytest.raises(EnhancedTranslationError, match="analysis failed"):
+        runner_module.run_enhanced_translation(
+            _two_cues(),
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+        )
+
+    changed = replace(
+        config, main_role=replace(config.main_role, user_prompt="NEW PROMPT")
+    )
+    _interrupt_with_checkpoint(tmp_path, monkeypatch, changed)
+
+    captured = {}
+    _install_completing_orchestrator(monkeypatch, captured)
+    run = runner_module.run_enhanced_translation(
+        _two_cues(),
+        changed,
+        output_dir=tmp_path,
+        base_name="episode",
+    )
+
+    assert captured["resume_translations"] != {}
+    assert run.recovery_summary is not None
+    assert run.recovery_summary.configuration_drift == ()
     assert run.recovery_provenance is not None
     assert run.recovery_provenance.drifted_keys == ()
 

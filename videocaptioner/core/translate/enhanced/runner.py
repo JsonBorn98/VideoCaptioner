@@ -411,6 +411,13 @@ def run_enhanced_translation(
                     configuration_drift=drift_items,
                     drifted_keys=drift_keys,
                 )
+        else:
+            # 无可复用级别（上次运行在任何检查点落盘前中断）时，本次运行以
+            # 当前配置重产全部级别：冻结摘要必须同步刷新，否则下次恢复会把
+            # 本次新检查点算成旧配置的产物，凭空多出漂移项（票 05）。
+            manifest["config_fingerprint"] = dict(current_fingerprint)
+            manifest["updated_at"] = now_utc()
+            write_recovery_manifest(recovery_manifest_path, manifest)
     if manifest is None:
         manifest = _new_recovery_manifest(identity, base_name, config)
         write_recovery_manifest(recovery_manifest_path, manifest)
