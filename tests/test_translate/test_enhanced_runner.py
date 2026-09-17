@@ -1152,6 +1152,48 @@ def test_audit_checkpoint_corruption_warns_and_reruns_all_batches(
     assert run.subtitle_data.segments[1].translated_text == "修正的第二段。"
 
 
+def test_audit_checkpoint_missing_warns_and_reruns_all_batches(tmp_path, monkeypatch):
+    """审计检查点文件缺失时该级视为未完成并告警，任务继续。"""
+    source = _four_cue_source()
+    config = _audit_config(batch_size=2)
+
+    gateway = _AuditScriptedGateway(audit_fail_after=1)
+    with pytest.raises(EnhancedTranslationError, match="audit interrupted"):
+        run_enhanced_translation_real(
+            source,
+            config,
+            output_dir=tmp_path,
+            base_name="episode",
+            gateway=gateway,
+        )
+
+    # 删除审计检查点数据文件；manifest 仍登记第 1 批。
+    (_staging_dir(tmp_path) / "audit-checkpoint.json").unlink()
+    warnings_seen = []
+    original_warning = runner_module.logger.warning
+
+    def collect_warning(message, *args):
+        warnings_seen.append(message % args if args else message)
+        return original_warning(message, *args)
+
+    monkeypatch.setattr(runner_module.logger, "warning", collect_warning)
+    resumed_gateway = _AuditScriptedGateway()
+    run = run_enhanced_translation_real(
+        source,
+        config,
+        output_dir=tmp_path,
+        base_name="episode",
+        gateway=resumed_gateway,
+    )
+
+    # 全部审计批重跑（含原已完成的第 1 批）；审计级视为未完成。
+    assert resumed_gateway.audit_calls == 2
+    assert run.recovery_summary is not None
+    assert run.recovery_summary.completed["audit_batches"] == 0
+    assert any("审计检查点缺失" in message for message in warnings_seen)
+    assert run.subtitle_data.segments[1].translated_text == "修正的第二段。"
+
+
 def test_manual_audit_confirmation_fires_once_after_all_batches_resume(
     tmp_path,
 ):

@@ -1731,7 +1731,7 @@ class EnhancedTranslationOrchestrator:
                     "Auditing translated subtitles",
                 )
 
-            for batch, batch_issues in execute_batches(
+            for _, batch_issues in execute_batches(
                 batches,
                 lambda batch: (
                     batch,
