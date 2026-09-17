@@ -65,7 +65,11 @@ def _summary(**overrides) -> RecoverySummary:
 
     values = {
         "module": "enhanced_translation",
-        "identity": {"source_fingerprint": "abc", "source_language": "en", "target_language": "zh"},
+        "identity": {
+            "source_fingerprint": "abc",
+            "source_language": "en",
+            "target_language": "zh",
+        },
         "completed": {
             "analysis": 1,
             "glossary": 1,
@@ -84,7 +88,11 @@ def _postprocess_summary(**overrides) -> RecoverySummary:
 
     values = {
         "module": "subtitle_postprocess",
-        "identity": {"subtitle_fingerprint": "abc", "source_language": "en", "target_language": "zh"},
+        "identity": {
+            "subtitle_fingerprint": "abc",
+            "source_language": "en",
+            "target_language": "zh",
+        },
         "completed": {"phase": 1, "rounds": 2},
         "checkpoint_time": "2026-09-17T03:00:00Z",
         "configuration_drift": (),
@@ -146,7 +154,9 @@ class TestSubtitleFreshFlag:
             monkeypatch, tmp_path, _summary(checkpoint_time="2026-09-17T02:00:00Z")
         )
 
-        result = subtitle_command.run(_subtitle_args(source, destination, quiet=False), _enhanced_config())
+        result = subtitle_command.run(
+            _subtitle_args(source, destination, quiet=False), _enhanced_config()
+        )
 
         assert result == EXIT.SUCCESS
         decision = captured["kwargs"]["recovery_decision"]
@@ -179,7 +189,9 @@ class TestSubtitleFreshFlag:
         destination = tmp_path / "initial.srt"
         _install_fake_enhanced(monkeypatch, tmp_path, summary=None)
 
-        result = subtitle_command.run(_subtitle_args(source, destination, quiet=False), _enhanced_config())
+        result = subtitle_command.run(
+            _subtitle_args(source, destination, quiet=False), _enhanced_config()
+        )
 
         assert result == EXIT.SUCCESS
         err = capsys.readouterr().err
@@ -195,7 +207,9 @@ class TestSubtitleFreshFlag:
         destination = tmp_path / "initial.srt"
         captured = _install_fake_enhanced(monkeypatch, tmp_path, _summary())
 
-        result = subtitle_command.run(_subtitle_args(source, destination, quiet=True), _enhanced_config())
+        result = subtitle_command.run(
+            _subtitle_args(source, destination, quiet=True), _enhanced_config()
+        )
 
         assert result == EXIT.SUCCESS
         assert captured["kwargs"]["recovery_decision"] is not None
@@ -221,10 +235,12 @@ class TestPostprocessFreshFlag:
         return Namespace(**values)
 
     def _install_fake_postprocess(self, monkeypatch, tmp_path: Path, summary: RecoverySummary | None):
-        """后处理模块入口替身：同翻译侧，只在有检查点时调恢复决定回调。"""
+        """后处理模块入口 + 方案库替身：同翻译侧，只在有检查点时调恢复决定回调。"""
 
         import videocaptioner.core.postprocess as postprocess_package
 
+        store = postprocess_package.PostprocessProfileStore(tmp_path / "profiles.json")
+        monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
         captured = {}
 
         def fake_run(task, **kwargs):
@@ -266,20 +282,19 @@ class TestPostprocessFreshFlag:
         monkeypatch.setattr(postprocess_package, "run_postprocess_task", fake_run)
         return captured
 
+    def _config(self):
+        return build_config({"llm": {"profile_id": "main-profile"}})
+
     def test_no_flag_prints_resume_summary_and_continues(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
-        import videocaptioner.core.postprocess as postprocess_package
-
         source = tmp_path / "sample.srt"
         source.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
-        store = postprocess_package.PostprocessProfileStore(tmp_path / "profiles.json")
-        monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
         captured = self._install_fake_postprocess(
             monkeypatch, tmp_path, _postprocess_summary()
         )
 
-        result = postprocess_command.run(self._args(source), build_config({"llm": {"profile_id": "main-profile"}}))
+        result = postprocess_command.run(self._args(source), self._config())
 
         assert result == EXIT.SUCCESS
         err = capsys.readouterr().err
@@ -289,32 +304,28 @@ class TestPostprocessFreshFlag:
         assert callable(captured["kwargs"]["recovery_decision"])
 
     def test_fresh_flag_returns_start_fresh(self, tmp_path: Path, monkeypatch) -> None:
-        import videocaptioner.core.postprocess as postprocess_package
-
         source = tmp_path / "sample.srt"
         source.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
-        store = postprocess_package.PostprocessProfileStore(tmp_path / "profiles.json")
-        monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
-        captured = self._install_fake_postprocess(monkeypatch, tmp_path, _postprocess_summary())
+        captured = self._install_fake_postprocess(
+            monkeypatch, tmp_path, _postprocess_summary()
+        )
 
         result = postprocess_command.run(
-            self._args(source, fresh=True), build_config({"llm": {"profile_id": "main-profile"}})
+            self._args(source, fresh=True), self._config()
         )
 
         assert result == EXIT.SUCCESS
         decision = captured["kwargs"]["recovery_decision"]
         assert decision(_postprocess_summary()) is RecoveryDecision.START_FRESH
 
-    def test_no_checkpoint_prints_no_resume_summary(self, tmp_path: Path, monkeypatch, capsys) -> None:
-        import videocaptioner.core.postprocess as postprocess_package
-
+    def test_no_checkpoint_prints_no_resume_summary(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
         source = tmp_path / "sample.srt"
         source.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
-        store = postprocess_package.PostprocessProfileStore(tmp_path / "profiles.json")
-        monkeypatch.setattr(postprocess_package, "PostprocessProfileStore", lambda: store)
         self._install_fake_postprocess(monkeypatch, tmp_path, summary=None)
 
-        result = postprocess_command.run(self._args(source), build_config({"llm": {"profile_id": "main-profile"}}))
+        result = postprocess_command.run(self._args(source), self._config())
 
         assert result == EXIT.SUCCESS
         err = capsys.readouterr().err
