@@ -740,12 +740,9 @@ def postprocess_config_drift_labels() -> dict[str, str]:
     return {key: label for key, (label, _effect) in POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS.items()}
 
 
-def _role_fingerprint(snapshot: Any, role: str) -> dict[str, str]:
-    """快照角色的冻结身份：持久化身份优先，运行期对象兜底；无则空。"""
+def _role_fingerprint(source: Any) -> dict[str, str]:
+    """快照角色身份的冻结摘要（身份 / 运行期对象均可；无则空）。"""
 
-    source = getattr(snapshot, f"{role}_identity", None) or getattr(
-        snapshot, f"{role}_profile", None
-    )
     if source is None:
         return {"profile_id": "", "name": "", "model": ""}
     return {
@@ -753,6 +750,17 @@ def _role_fingerprint(snapshot: Any, role: str) -> dict[str, str]:
         "name": str(getattr(source, "name", "") or ""),
         "model": str(getattr(source, "model", "") or ""),
     }
+
+
+def _prompt_digest(snapshot: Optional["TranslationExecutionSnapshot"], role: str) -> str:
+    """快照提示词哈希：原文优先（内存快照），随行哈希兜底（持久化重建）。"""
+
+    if snapshot is None:
+        return text_digest("")
+    text = str(getattr(snapshot, f"{role}_prompt", "") or "")
+    if text:
+        return text_digest(text)
+    return str(getattr(snapshot, f"{role}_prompt_digest", "") or "") or text_digest("")
 
 
 def postprocess_config_fingerprint(
@@ -766,10 +774,21 @@ def postprocess_config_fingerprint(
     """冻结配置摘要（票 07）：供恢复时逐项比对配置漂移。
 
     后处理配置方案记冻结值哈希与方案身份（方案名与来源模板）；翻译侧
-    四项全部取自任务冻结的翻译执行快照。只存哈希与身份字段——不存
-    prompt 文本、方案完整值或连接机密；并发请求数不参与。
+    四项全部取自任务冻结的翻译执行快照（角色身份与 ``role_label``
+    同一优先级：运行期对象优先、持久化身份兜底）。提示词取原文哈希，
+    持久化重建快照无原文时取随行哈希——两侧同为空不产生假漂移。
+    只存哈希与身份字段——不存 prompt 文本、方案完整值或连接机密；
+    并发请求数不参与。
     """
 
+    main_source = (
+        snapshot.main_profile if snapshot is not None and snapshot.main_profile is not None
+        else (snapshot.main_identity if snapshot is not None else None)
+    )
+    review_source = (
+        snapshot.review_profile if snapshot is not None and snapshot.review_profile is not None
+        else (snapshot.review_identity if snapshot is not None else None)
+    )
     return {
         "postprocess_profile": {
             "profile_id": str(profile_id or ""),
@@ -779,11 +798,11 @@ def postprocess_config_fingerprint(
                 json.dumps(config_payload(config), ensure_ascii=False, sort_keys=True)
             ),
         },
-        "translation_method": str(getattr(snapshot, "method", "") or ""),
-        "main_profile": _role_fingerprint(snapshot, "main"),
-        "review_profile": _role_fingerprint(snapshot, "review"),
-        "main_prompt": text_digest(str(getattr(snapshot, "main_prompt", "") or "")),
-        "review_prompt": text_digest(str(getattr(snapshot, "review_prompt", "") or "")),
+        "translation_method": str(getattr(snapshot, "method", "") if snapshot else ""),
+        "main_profile": _role_fingerprint(main_source),
+        "review_profile": _role_fingerprint(review_source),
+        "main_prompt": _prompt_digest(snapshot, "main"),
+        "review_prompt": _prompt_digest(snapshot, "review"),
     }
 
 
@@ -797,6 +816,13 @@ def recovery_identity(
         "source_language": normalize_language(source_language),
         "target_language": normalize_language(target_language),
     }
+
+
+def frozen_fingerprint(manifest: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """manifest 冻结摘要的归一化读取：非 dict（含未记录）一律 ``None``。"""
+
+    frozen = manifest.get("config_fingerprint")
+    return frozen if isinstance(frozen, dict) else None
 
 
 def new_recovery_manifest(
@@ -885,8 +911,7 @@ def build_recovery_summary(
     （票 07，``config_drift`` 共享实现）。
     """
 
-    frozen = manifest.get("config_fingerprint")
-    frozen = frozen if isinstance(frozen, dict) else None
+    frozen = frozen_fingerprint(manifest)
     drift = (
         ()
         if current_fingerprint is None
@@ -917,6 +942,7 @@ __all__ = [
     "phase_checkpoint_payload",
     "postprocess_config_drift_labels",
     "postprocess_config_fingerprint",
+    "frozen_fingerprint",
     "recovery_identity",
     "round_checkpoint_from_payload",
     "round_checkpoint_payload",

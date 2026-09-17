@@ -159,44 +159,20 @@ _RECOVERY_COMPLETED_LEVEL_LABELS = {
 
 
 def _render_recovery_lines(recovery: "RecoveryProvenance") -> List[str]:
-    """恢复来源一节（票 07）：恢复来源、复用级别与受漂移影响的成果标注。
+    """恢复来源一节（票 07）：共享渲染器 + 后处理侧的两张标注表。
 
-    行风格与 ``build_qa_report`` 一致（每行带 ``\\n`` 后缀、
-    ``"".join`` 拼接），对齐翻译侧 ``report._render_recovery_lines``。
+    行风格由共享渲染器的 ``line_suffix="\n"`` 给出（与 ``build_qa_report``
+    的 ``"".join`` 拼接一致）；completed / drift 标签表是后处理侧唯一差异。
     """
 
-    from ..recovery import UNRECORDED_CONFIG_DIGEST_DRIFT
+    from ..recovery import render_recovery_provenance_lines
     from .checkpoint import POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS
 
-    lines = [
-        "## 恢复来源\n\n",
-        f"- 检查点时间：{recovery.checkpoint_time or '未知'}\n",
-    ]
-    completed = [
-        f"{_RECOVERY_COMPLETED_LEVEL_LABELS.get(key, key)} {value}"
-        for key, value in recovery.completed.items()
-        if value
-    ]
-    lines.append("- 恢复时已复用：" + ("、".join(completed) if completed else "无") + "\n")
-    drift = list(recovery.configuration_drift)
-    lines.append("- 配置漂移：" + ("；".join(drift) if drift else "无") + "\n")
-    if recovery.configuration_drift == (UNRECORDED_CONFIG_DIGEST_DRIFT,):
-        lines.append("- 受影响成果：检查点未记录配置摘要，无法追溯受影响部分\n")
-    elif not drift:
-        lines.append("- 受影响成果：无（无配置漂移）\n")
-    else:
-        # 有漂移项就绝不写「无」：逐项给效果句；比对项增删（无旧值可归属）
-        # 或未标注的项也给一句归属说明，不与上一行自相矛盾。
-        effects = [
-            POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS.get(key, (None, None))[1]
-            or f"部分成果受「{key}」漂移影响，无法进一步归属"
-            for key in recovery.drifted_keys
-        ]
-        if not effects:
-            effects = ["部分成果受配置漂移影响，无法逐项归属（比对项在检查点与当前配置间增删）"]
-        lines.append("- 受影响成果：" + "；".join(effects) + "\n")
-    lines.append("\n")
-    return lines
+    return render_recovery_provenance_lines(
+        recovery,
+        completed_labels=_RECOVERY_COMPLETED_LEVEL_LABELS,
+        drift_annotations=POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS,
+    )
 
 
 def build_qa_report(report: QualityReport) -> str:

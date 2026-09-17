@@ -88,6 +88,8 @@ class TranslationExecutionSnapshot:
     ``main_profile`` / ``review_profile`` / 提示词是运行期注入对象，
     只随完整 workflow 在内存中传递，绝不进入持久化载荷；
     ``*_identity`` 是可持久化的角色身份（无连接机密）。
+    ``*_prompt_digest``（票 07）是提示词的随行哈希：持久化快照不含
+    prompt 原文，重建侧据此取哈希——只存哈希，不存文本。
     """
 
     method: str = ""
@@ -102,12 +104,18 @@ class TranslationExecutionSnapshot:
     review_identity: Optional[TranslationRoleIdentity] = None
     source_language: str = ""
     target_language: str = ""
+    # 提示词随行哈希（票 07）：to_persisted 写入、from_persisted 读回；
+    # 内存快照（prompt 非空）不需要它，重建快照靠它参与漂移比对。
+    main_prompt_digest: str = ""
+    review_prompt_digest: str = ""
     # 恢复来源（票 05，ADR-0022）：恢复过的运行才带；不中断运行为 None。
     # 持久化形状由 RecoveryProvenance.to_persisted 给出，模块无关。
     recovery: Optional[RecoveryProvenance] = None
 
     def to_persisted(self) -> Dict[str, Any]:
         """可持久化载荷：方式、半径、语言与角色身份，无连接机密与提示词。"""
+        from ..recovery import text_digest
+
         main_identity = self.main_identity or _identity_from_profile("main", self.main_profile)
         review_identity = self.review_identity or _identity_from_profile(
             "review", self.review_profile
@@ -139,6 +147,10 @@ class TranslationExecutionSnapshot:
                 if review_identity is not None
                 else None
             ),
+            # 提示词随行哈希（票 07）：只存哈希不存原文；旧档无该键时
+            # from_persisted 按空串读回（读写对称、向后兼容）。
+            "main_prompt_digest": text_digest(self.main_prompt),
+            "review_prompt_digest": text_digest(self.review_prompt),
             # 恢复来源（票 05）：恢复过的运行才写入；不中断运行不带该键。
             **({"recovery": self.recovery.to_persisted()} if self.recovery is not None else {}),
         }
@@ -177,6 +189,11 @@ class TranslationExecutionSnapshot:
 
         source_language = payload.get("source_language")
         target_language = payload.get("target_language")
+
+        def _digest(raw: Any) -> str:
+            # 提示词随行哈希（票 07）：旧档无该键时按空串读回（向后兼容）。
+            return str(raw) if isinstance(raw, str) else ""
+
         return cls(
             method=method,
             boundary_context_radius=radius,
@@ -184,6 +201,8 @@ class TranslationExecutionSnapshot:
             review_identity=_identity("review", payload.get("review_role")),
             source_language=source_language if isinstance(source_language, str) else "",
             target_language=target_language if isinstance(target_language, str) else "",
+            main_prompt_digest=_digest(payload.get("main_prompt_digest")),
+            review_prompt_digest=_digest(payload.get("review_prompt_digest")),
             # 恢复来源（票 05）：重建快照时带回恢复来源，读写对称；
             # 载荷缺失或格式无效时不猜测，照旧为 None。
             recovery=RecoveryProvenance.from_persisted(payload.get("recovery")),

@@ -113,6 +113,52 @@ def text_digest(text: str) -> str:
 UNRECORDED_CONFIG_DIGEST_DRIFT = "检查点未记录配置摘要，无法比对配置漂移"
 
 
+def render_recovery_provenance_lines(
+    recovery: "RecoveryProvenance",
+    *,
+    completed_labels: Mapping[str, str],
+    drift_annotations: Mapping[str, tuple[str, str]],
+    line_suffix: str = "\n",
+) -> list[str]:
+    """恢复来源一节的共享渲染（票 07 审查：两模块同形渲染收编）。
+
+    ``completed_labels`` 是已完成级别 → 显示名；``drift_annotations``
+    是漂移比对项 → (显示名, 受影响成果句)——两侧各自的唯一标注表。
+    ``line_suffix`` 适配两种拼接风格：翻译侧 ``"\\n".join``（空后缀）、
+    后处理 QA 报告 ``"".join``（行带 ``\\n`` 后缀）。
+    """
+
+    lines = [
+        f"## 恢复来源{line_suffix * 2}",
+        f"- 检查点时间：{recovery.checkpoint_time or '未知'}{line_suffix}",
+    ]
+    completed = [
+        f"{completed_labels.get(key, key)} {value}"
+        for key, value in recovery.completed.items()
+        if value
+    ]
+    lines.append(f"- 恢复时已复用：{'、'.join(completed) if completed else '无'}{line_suffix}")
+    drift = list(recovery.configuration_drift)
+    lines.append(f"- 配置漂移：{'；'.join(drift) if drift else '无'}{line_suffix}")
+    if recovery.configuration_drift == (UNRECORDED_CONFIG_DIGEST_DRIFT,):
+        lines.append(f"- 受影响成果：检查点未记录配置摘要，无法追溯受影响部分{line_suffix}")
+    elif not drift:
+        lines.append(f"- 受影响成果：无（无配置漂移）{line_suffix}")
+    else:
+        # 有漂移项就绝不写「无」：逐项给效果句；比对项增删（无旧值可归属）
+        # 或未标注的项也给一句归属说明，不与上一行自相矛盾。
+        effects = [
+            drift_annotations.get(key, (None, None))[1]
+            or f"部分成果受「{key}」漂移影响，无法进一步归属"
+            for key in recovery.drifted_keys
+        ]
+        if not effects:
+            effects = ["部分成果受配置漂移影响，无法逐项归属（比对项在检查点与当前配置间增删）"]
+        lines.append(f"- 受影响成果：{'；'.join(effects)}{line_suffix}")
+    lines.append(line_suffix)
+    return lines
+
+
 def _canonical(value: Any) -> Any:
     """Freeze one fingerprint value into a comparable, hash-stable form."""
 

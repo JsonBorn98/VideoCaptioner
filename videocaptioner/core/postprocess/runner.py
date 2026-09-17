@@ -33,6 +33,7 @@ from .checkpoint import (
     PhaseResumeState,
     RoundResumeState,
     build_recovery_summary,
+    frozen_fingerprint,
     mark_manifest_completed,
     matching_recovery_manifest,
     new_recovery_manifest,
@@ -332,13 +333,16 @@ def _resolve_profile_identity(
     统一走方案库（注入 store 优先，缺省默认库）：GUI / CLI / 恢复重跑
     都走同一解析路径，不因入口是否传 store 产生假漂移。不猜测配置
     （D15）：解析不到就空串——冻结摘要是可比对值，两侧同为空不产生
-    假漂移；方案确已删除是真实漂移（下次恢复会列出），不静默吞掉。
+    假漂移；方案确已删除是真实漂移（下次恢复会列出）。
     """
 
     try:
         store = profile_store if profile_store is not None else PostprocessProfileStore()
         profile = store.get(task.profile_id)
-    except Exception:  # noqa: BLE001 —— 摘要比对不因方案库缺失而阻断任务
+    except InterruptedError:
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 摘要比对不因方案库缺失而阻断任务
+        logger.warning("后处理方案身份解析失败，冻结摘要按无名源记录: %s", exc)
         return "", ""
     return str(profile.name), str(profile.base_template_id)
 
@@ -559,29 +563,18 @@ def run_postprocess_task(
                     warnings.extend(
                         warning for warning in resume_warnings if warning not in warnings
                     )
-                    # 恢复来源（票 07）：QA 报告、后处理状态与 manifest 各记一份。
-                    frozen = recovery_manifest.get("config_fingerprint")
-                    frozen = frozen if isinstance(frozen, dict) else None
+                    # 恢复来源（票 07）：QA 报告、后处理状态与 manifest 各记一份；
+                    # 恢复继续时冻结摘要沿用检查点原值（ADR-0022 宽松口径）。
+                    frozen = frozen_fingerprint(recovery_manifest)
                     recovery_provenance = RecoveryProvenance(
                         checkpoint_time=recovery_summary.checkpoint_time,
                         completed=dict(recovery_summary.completed),
                         configuration_drift=recovery_summary.configuration_drift,
                         drifted_keys=drifted_keys(frozen, current_fingerprint),
                     )
-                    # 恢复继续时冻结摘要沿用检查点原值：本次运行以旧配置
-                    # 复用已完成的阶段；漂移已记录进摘要与溯源（ADR-0022
-                    # 宽松口径），重写摘要会让下次恢复少掉漂移项。
             else:
                 warnings.extend(warning for warning in resume_warnings if warning not in warnings)
-                # 无可复用级别（登记而文件缺失 / 不可读）：本次运行以当前
-                # 配置重产全部级别——冻结摘要同步刷新，否则下次恢复会把
-                # 本次新检查点算成旧配置产物，凭空多出漂移项（票 07）。
-                recovery_manifest["config_fingerprint"] = dict(current_fingerprint)
-                recovery_manifest["updated_at"] = now_utc()
-                write_recovery_manifest(recovery_manifest_path, recovery_manifest)
-        else:
-            # manifest 匹配但无任何完成级别（上次运行在任何检查点落盘前
-            # 中断）：同上刷新冻结摘要——manifest 里的旧摘要属于上次配置。
+            # 无可复用级别：刷新冻结摘要（票 07，防下次恢复幻影漂移）。
             if recovery_manifest_path is not None:
                 recovery_manifest["config_fingerprint"] = dict(current_fingerprint)
                 recovery_manifest["updated_at"] = now_utc()

@@ -8,7 +8,6 @@ from collections import Counter
 from pathlib import Path
 
 from videocaptioner.core.recovery import (
-    UNRECORDED_CONFIG_DIGEST_DRIFT,
     RecoveryProvenance,
 )
 
@@ -81,43 +80,16 @@ _COMPLETED_LEVEL_LABELS = {
 
 
 def _render_recovery_lines(recovery: RecoveryProvenance) -> list[str]:
-    """恢复来源一节（票 05）：恢复来源、复用级别与受漂移影响的成果标注。"""
+    """恢复来源一节（票 05）：共享渲染器 + 翻译侧的两张标注表。"""
 
-    lines = [
-        "## 恢复来源",
-        "",
-        f"- 检查点时间：{recovery.checkpoint_time or '未知'}",
-    ]
-    completed = [
-        f"{_COMPLETED_LEVEL_LABELS.get(key, key)} {value}"
-        for key, value in recovery.completed.items()
-        if value
-    ]
-    lines.append(
-        "- 恢复时已复用：" + ("、".join(completed) if completed else "无")
+    from videocaptioner.core.recovery import render_recovery_provenance_lines
+
+    return render_recovery_provenance_lines(
+        recovery,
+        completed_labels=_COMPLETED_LEVEL_LABELS,
+        drift_annotations=TRANSLATION_CONFIG_DRIFT_ANNOTATIONS,
+        line_suffix="",
     )
-    drift = list(recovery.configuration_drift)
-    lines.append(
-        "- 配置漂移："
-        + ("；".join(drift) if drift else "无")
-    )
-    if recovery.configuration_drift == (UNRECORDED_CONFIG_DIGEST_DRIFT,):
-        lines.append("- 受影响成果：检查点未记录配置摘要，无法追溯受影响部分")
-    elif not drift:
-        lines.append("- 受影响成果：无（无配置漂移）")
-    else:
-        # 有漂移项就绝不写「无」：逐项给效果句；比对项增删（无旧值可归属）
-        # 或未标注的项也给一句归属说明，不与上一行自相矛盾。
-        effects = [
-            TRANSLATION_CONFIG_DRIFT_ANNOTATIONS.get(key, (None, None))[1]
-            or f"部分成果受「{key}」漂移影响，无法进一步归属"
-            for key in recovery.drifted_keys
-        ]
-        if not effects:
-            effects = ["部分成果受配置漂移影响，无法逐项归属（比对项在检查点与当前配置间增删）"]
-        lines.append("- 受影响成果：" + "；".join(effects))
-    lines.append("")
-    return lines
 
 
 def render_audit_markdown(report: TranslationAuditReport) -> str:

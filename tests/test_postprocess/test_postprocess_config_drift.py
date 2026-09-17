@@ -443,39 +443,86 @@ def test_phase_checkpoint_continues_under_config_drift_with_annotation(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# 验收 5：复用 05 的漂移比对与恢复摘要类型，不出现第二套漂移实现。
+# 验收 5：复用 05 的漂移比对与恢复摘要类型（黑盒行为验证）。
 # ---------------------------------------------------------------------------
 
 
-def test_drift_implementation_is_shared_not_duplicated():
-    """漂移比对与恢复摘要走共享实现：checkpoint 模块引用 recovery.config_drift。"""
-    import inspect
+def test_rebuilt_snapshot_prompt_no_phantom_drift(tmp_path):
+    """持久化快照重建路径：提示词未改时无幻影漂移（审查修复回归）。
 
-    from videocaptioner.core.postprocess import checkpoint as checkpoint_module
-    from videocaptioner.core.postprocess.report import QualityReport
-    from videocaptioner.core.recovery import (
-        RecoveryProvenance,
-        RecoverySummary,
-        config_drift,
-        drifted_keys,
+    完整 workflow 带内存快照（含提示词）写检查点；独立任务重跑时从
+    过程目录 translation-snapshot.json 重建快照（无提示词原文，只有
+    随行哈希）。提示词没改就不列提示词漂移。
+    """
+    from videocaptioner.core.postprocess.translation import (
+        TranslationExecutionSnapshot,
+        load_translation_snapshot_file,
     )
 
-    source = inspect.getsource(checkpoint_module)
-    # 共享实现被引用（而非本地重写比对逻辑）。
-    assert "config_drift(" in source
-    assert "def _config_drift" not in source
-    # 恢复摘要 / 溯源类型来自共享模块：build_recovery_summary 产出共享
-    # RecoverySummary；QualityReport.recovery 消费共享 RecoveryProvenance。
-    summary = checkpoint_module.build_recovery_summary(
-        manifest={"updated_at": "2026-09-17T00:00:00Z", "config_fingerprint": None},
-        identity={"input_fingerprint": "x"},
-        rounds=2,
-        phase_completed=True,
+    # 第一段：带内存快照（提示词非空）中断——检查点冻结摘要含提示词哈希。
+    source, task_dir = _interrupt_once(tmp_path, "phantom")
+    first_task = _make_task(source, source.parent / "out.srt", _repair_config())
+    first_task.bind_translation_snapshot(
+        TranslationExecutionSnapshot(
+            method="enhanced_llm",
+            main_prompt="主翻译提示词甲",
+            review_prompt="高级校对提示词甲",
+            source_language="zh",
+            target_language="en",
+        )
     )
-    assert isinstance(summary, RecoverySummary)
+    stopped = run_postprocess_task(
+        first_task,
+        gateway=None,
+        assets=FilesystemAssetStore(),
+        cancelled=_CancelAfterEarly(),
+    )
+    assert stopped.task.status == "cancelled"
+    manifest = json.loads(
+        (stopped.task.asset_discovery.task_dir / "recovery-manifest.json").read_text(encoding="utf-8")
+    )
+    frozen_prompt_hash = manifest["config_fingerprint"]["main_prompt"]
+    assert frozen_prompt_hash.startswith("sha256:")
+
+    # 第二段：持久化快照重建（from_persisted 无提示词原文）+ 提示词哈希随行。
+    snapshot_path = stopped.task.asset_discovery.asset_path("translation_snapshot")
+    rebuilt = load_translation_snapshot_file(snapshot_path)
+    assert rebuilt is not None
+    assert rebuilt.main_prompt == ""  # 重建快照不含提示词原文
+    assert rebuilt.main_prompt_digest == frozen_prompt_hash  # 随行哈希读回
+
+    second_task = _make_task(source, source.parent / "out2.srt", _repair_config())
+    second_task.bind_translation_snapshot(rebuilt)
+    resumed = run_postprocess_task(
+        second_task,
+        gateway=_ScriptedGateway([_split_script()]),
+        assets=FilesystemAssetStore(),
+    )
+    assert resumed.succeeded
+    assert resumed.recovery_summary is not None
+    # 关键断言：提示词未改——重建路径取随行哈希，不列提示词漂移。
+    assert all("提示词" not in item for item in resumed.recovery_summary.configuration_drift)
+
+
+def test_drift_comparison_reuses_shared_recovery_implementation(tmp_path):
+    """复用 05 的共享形状（黑盒）：同一漂移在翻译侧与后处理侧得到同构清单。
+
+    不做源码文本断言：从主 seam 验证后处理恢复摘要消费共享
+    ``RecoverySummary``（module 字段区分两侧）、漂移清单逐项来自
+    共享 ``config_drift`` 的渲染口径（「检查点 X，当前 Y」句式）。
+    """
+    source, task_dir = _interrupt_once(tmp_path, "shared")
+    resumed = run_postprocess_task(
+        _make_task(source, source.parent / "out2.srt", _repair_config(qa_report=True)),
+        gateway=_ScriptedGateway([_split_script()]),
+        assets=FilesystemAssetStore(),
+    )
+    assert resumed.succeeded
+    assert resumed.recovery_summary is not None
+    summary = resumed.recovery_summary
+    # 模块标识：后处理侧是 subtitle_postprocess（与翻译侧 enhanced_translation 区分）。
     assert summary.module == "subtitle_postprocess"
-    provenance = RecoveryProvenance(checkpoint_time="t", completed={"phase": 1})
-    report = QualityReport()
-    report.recovery = provenance
-    assert isinstance(report.recovery, RecoveryProvenance)
-    assert callable(config_drift) and callable(drifted_keys)
+    # 共享渲染口径：changed 类漂移项带「检查点 …，当前 …」句式。
+    assert any("检查点" in item and "当前" in item for item in summary.configuration_drift)
+    # 完成级别计数沿用共享形状（phase / rounds）。
+    assert summary.completed == {"phase": 1, "rounds": 0}
