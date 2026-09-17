@@ -25,7 +25,6 @@ from qfluentwidgets import (
     CommandBar,
     InfoBar,
     InfoBarPosition,
-    MessageBox,
     MessageBoxBase,
     PrimaryPushButton,
     ProgressBar,
@@ -64,6 +63,7 @@ from videocaptioner.core.utils.platform_utils import open_folder, reveal_in_expl
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.components.GlossaryReviewPage import GlossaryReviewPage
+from videocaptioner.ui.components.RecoveryPromptDialog import RecoveryPromptDialog
 from videocaptioner.ui.components.SubtitleSettingDialog import SubtitleSettingDialog
 from videocaptioner.ui.components.TranslationAuditPage import TranslationAuditPage
 from videocaptioner.ui.components.TranslationModeSelector import TranslationModeSelector
@@ -689,25 +689,22 @@ class SubtitleInterface(QWidget):
         self.status_label.setText(self.tr("等待人工确认术语"))
 
     def _show_recovery_decision(self, summary) -> None:
-        skipped: list[str] = []
-        if summary.completed.get("analysis", 0):
-            skipped.append(self.tr("全文分析"))
-        if summary.completed.get("glossary", 0):
-            skipped.append(self.tr("术语阶段"))
-        translated = summary.completed.get("translation_segments", 0)
-        if translated:
-            skipped.append(self.tr("{count} 个已完成字幕段").format(count=translated))
-        skipped_text = self.tr("、").join(skipped) or self.tr("尚未验证的检查点数据")
-        dialog = MessageBox(
-            self.tr("发现翻译恢复检查点"),
-            self.tr("检查点时间：{time}\n继续将跳过：{skipped}").format(
-                time=summary.checkpoint_time or self.tr("未知"),
-                skipped=skipped_text,
-            ),
-            self,
+        # 恢复提示（票 08）：对话框组件模块无关，标签由本页提供——
+        # 后处理票（09）以自己的 completed_labels 复用同一组件。
+        dialog = RecoveryPromptDialog(
+            summary,
+            completed_labels={
+                # 与 core 侧权威标注表（report.py _COMPLETED_LEVEL_LABELS）
+                # 同名：同一级别在恢复提示与审计报告「恢复来源」节不出现两个名字。
+                # translation_segments 计数是字幕段数（非批数），单位「个」。
+                "analysis": (self.tr("全文分析"), None),
+                "glossary": (self.tr("术语阶段"), None),
+                "translation_segments": (self.tr("字幕段"), self.tr("个")),
+                "audit_batches": (self.tr("审计批"), self.tr("批")),
+            },
+            title=self.tr("发现翻译恢复检查点"),
+            parent=self,
         )
-        dialog.yesButton.setText(self.tr("从恢复检查点继续"))
-        dialog.cancelButton.setText(self.tr("从头开始"))
         decision = "continue" if dialog.exec() else "start_fresh"
         thread = getattr(self, "subtitle_optimization_thread", None)
         if thread is not None:

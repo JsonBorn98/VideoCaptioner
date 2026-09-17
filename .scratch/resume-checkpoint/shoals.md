@@ -1,0 +1,2 @@
+## Shoals
+- [test_ui 的 _run_qt_script 子进程 helper 已五处逐字重复，第六份前先抽共享](C:\Users\runzhe.li\Software\VideoCaptioner\tests\test_ui\test_recovery_prompt_dialog.py) — tests/test_ui/ 下每个新 Qt 测试文件都手写同一份 _run_qt_script（env 拷 + QT_QPA_PLATFORM=offscreen + subprocess.run + timeout=30 + assert），现已有 test_postprocess_interface / test_run_log_interface / test_translation_task_modes / test_video_synthesis_interface / test_recovery_prompt_dialog 五份逐字副本。下一份落笔前先抽到 tests/test_ui/conftest.py 共享 helper，别再复制第六份；抽共享要一并动前四份存量文件，超出单票 diff，留待专门小票处理。

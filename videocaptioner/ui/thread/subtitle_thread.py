@@ -594,6 +594,10 @@ class SubtitleThread(QThread):
                 self._term_condition.notify_all()
             with self._audit_condition:
                 self._audit_condition.notify_all()
+            # 恢复提示阻塞等待也要被停止唤醒：用户停在恢复对话框时点停止，
+            # 与术语/审计确认同一模式退出等待循环（票 08）。
+            with self._recovery_condition:
+                self._recovery_condition.notify_all()
             # 先停止优化器
             if hasattr(self, "splitter") and self.splitter:
                 try:
