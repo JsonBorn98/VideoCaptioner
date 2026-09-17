@@ -438,6 +438,11 @@ def _build_subtitle_parser(subparsers) -> None:
         action="store_true",
         help="Use fast local word merging instead of LLM semantic re-segmentation",
     )
+    proc.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Ignore any resumable recovery checkpoint and start from scratch (default: resume and print a summary)",
+    )
 
     trans = p.add_argument_group("Translation options")
     trans.add_argument(
@@ -538,6 +543,11 @@ def _build_postprocess_parser(subparsers) -> None:
             "After a successful run, copy the workspace process assets listed in the "
             "manifest into DIR (stable filenames, manifest included)"
         ),
+    )
+    p.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Ignore any resumable recovery checkpoint and start from scratch (default: resume and print a summary)",
     )
     _add_llm_options(p)
     _add_postprocess_options(p)
@@ -776,6 +786,15 @@ def _build_process_parser(subparsers) -> None:
         "--dub-only",
         action="store_true",
         help="Output only the dubbed result, skipping subtitle burn/embedding",
+    )
+    pipe.add_argument(
+        "--fresh",
+        action="store_true",
+        help=(
+            "Ignore any resumable recovery checkpoint and start from scratch "
+            "(applies to both the translation and postprocess stages; "
+            "default: resume and print a summary)"
+        ),
     )
 
     pipe.add_argument("--asr", choices=ASR_ENGINE_CHOICES, help="ASR engine (default: bijian)")

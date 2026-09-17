@@ -9,6 +9,10 @@ from pathlib import Path
 from videocaptioner.cli import exit_codes as EXIT
 from videocaptioner.cli import output
 from videocaptioner.cli.config import get
+from videocaptioner.cli.recovery_summary import (
+    POSTPROCESS_COMPLETED_LABELS,
+    recovery_decision_callback,
+)
 
 _LAYOUT_MODES = {
     "auto": "auto",
@@ -307,6 +311,11 @@ def run(args: Namespace, config: dict) -> int:
             timing_resolver=_timing_resolver,
             gateway=getattr(args, "gateway", None),
             on_event=on_event,
+            # CLI 恢复决定（票 10）：无 --fresh 打印摘要并继续，--fresh 从头开始。
+            recovery_decision=recovery_decision_callback(
+                getattr(args, "fresh", False),
+                completed_labels=POSTPROCESS_COMPLETED_LABELS,
+            ),
         )
     except Exception as exc:  # invalid initial subtitles cannot safely fall back
         if progress:

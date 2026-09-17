@@ -168,6 +168,8 @@ def run(args: Namespace, config: dict) -> int:
                 layout=getattr(args, "layout", None),
                 input_data=active_data,
                 gateway=owned_gateway,
+                # CLI 恢复决定（票 10）：--fresh 同时作用于翻译与后处理两个阶段。
+                fresh=getattr(args, "fresh", False),
             )
             from videocaptioner.cli.commands.subtitle import run as subtitle_run
 
@@ -217,6 +219,8 @@ def run(args: Namespace, config: dict) -> int:
                 input_data=active_data,
                 gateway=owned_gateway,
                 thread_num=getattr(args, "thread_num", None),
+                # CLI 恢复决定（票 10）：--fresh 同时作用于翻译与后处理两个阶段。
+                fresh=getattr(args, "fresh", False),
             )
             # 翻译执行快照（票 06，D15）：后处理修复方式与字幕阶段冻结的任务对齐。
             if translation_snapshot is not None:
