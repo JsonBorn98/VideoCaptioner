@@ -19,27 +19,33 @@ manifest 不含 API key、完整 prompt 文本和模型原始响应。
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from ..recovery import (
     RECOVERY_MANIFEST_SCHEMA,
     RECOVERY_MANIFEST_VERSION,
     RecoverySummary,
+    config_drift,
     now_utc,
     software_version,
+    text_digest,
     write_recovery_manifest,
 )
 from ..recovery import (
     matching_recovery_manifest as shared_matching_recovery_manifest,
 )
+from .config import config_payload
 from .workspace import normalize_language, normalize_task_name
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from ..asr.asr_data import ASRData
+    from .config import PostprocessConfig
     from .repair import RegionRollback, RepairSummary
     from .report import QualityReport, SpeedWarning
+    from .translation import TranslationExecutionSnapshot
     from .viewing import ViewingProblem
 
 # 后处理恢复模块名：manifest ``module`` 字段与恢复摘要共用。
@@ -713,6 +719,73 @@ class RoundResumeState:
 # 恢复 manifest：唯一进度真相。
 # ---------------------------------------------------------------------------
 
+# 漂移比对项的唯一标注表（票 07，对齐翻译侧 models.TRANSLATION_CONFIG_DRIFT_ANNOTATIONS）：
+# 每项一个显示名 + 一句受影响成果标注，报告与摘要都从这里取；新增比对项只改这一处。
+POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS: Mapping[str, tuple[str, str]] = {
+    "postprocess_profile": (
+        "后处理配置方案",
+        "阶段末结果（工作字幕与质量报告累积状态）来自旧的后处理配置方案",
+    ),
+    "translation_method": ("翻译方式", "修复方式选择基于旧的翻译方式"),
+    "main_profile": ("主翻译模型配置方案", "部分修复请求基于旧的主翻译模型配置方案"),
+    "review_profile": ("高级校对模型配置方案", "部分修复校对基于旧的高级校对模型配置方案"),
+    "main_prompt": ("主翻译提示词", "部分修复请求的补充指引来自旧的主翻译提示词"),
+    "review_prompt": ("高级校对提示词", "部分修复校对的补充指引来自旧的高级校对提示词"),
+}
+
+
+def postprocess_config_drift_labels() -> dict[str, str]:
+    """漂移比对项 → 显示名（喂给 ``config_drift`` 的 ``labels``）。"""
+
+    return {key: label for key, (label, _effect) in POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS.items()}
+
+
+def _role_fingerprint(snapshot: Any, role: str) -> dict[str, str]:
+    """快照角色的冻结身份：持久化身份优先，运行期对象兜底；无则空。"""
+
+    source = getattr(snapshot, f"{role}_identity", None) or getattr(
+        snapshot, f"{role}_profile", None
+    )
+    if source is None:
+        return {"profile_id": "", "name": "", "model": ""}
+    return {
+        "profile_id": str(getattr(source, "profile_id", "") or ""),
+        "name": str(getattr(source, "name", "") or ""),
+        "model": str(getattr(source, "model", "") or ""),
+    }
+
+
+def postprocess_config_fingerprint(
+    config: "PostprocessConfig",
+    *,
+    profile_id: str,
+    profile_name: str,
+    base_template: str,
+    snapshot: Optional["TranslationExecutionSnapshot"],
+) -> dict[str, Any]:
+    """冻结配置摘要（票 07）：供恢复时逐项比对配置漂移。
+
+    后处理配置方案记冻结值哈希与方案身份（方案名与来源模板）；翻译侧
+    四项全部取自任务冻结的翻译执行快照。只存哈希与身份字段——不存
+    prompt 文本、方案完整值或连接机密；并发请求数不参与。
+    """
+
+    return {
+        "postprocess_profile": {
+            "profile_id": str(profile_id or ""),
+            "name": str(profile_name or ""),
+            "base_template": str(base_template or ""),
+            "config_hash": text_digest(
+                json.dumps(config_payload(config), ensure_ascii=False, sort_keys=True)
+            ),
+        },
+        "translation_method": str(getattr(snapshot, "method", "") or ""),
+        "main_profile": _role_fingerprint(snapshot, "main"),
+        "review_profile": _role_fingerprint(snapshot, "review"),
+        "main_prompt": text_digest(str(getattr(snapshot, "main_prompt", "") or "")),
+        "review_prompt": text_digest(str(getattr(snapshot, "review_prompt", "") or "")),
+    }
+
 
 def recovery_identity(
     *, fingerprint: str, source_language: str, target_language: str
@@ -730,8 +803,14 @@ def new_recovery_manifest(
     *,
     identity: Mapping[str, str],
     task_name: str,
+    config_fingerprint: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    """新 manifest：全部未完成（「从头开始」重置也走这一形状）。"""
+    """新 manifest：全部未完成（「从头开始」重置也走这一形状）。
+
+    ``config_fingerprint`` 是冻结配置摘要（票 07）：manifest 创建时冻结
+    本次运行配置；缺省 ``None`` 只发生在无可复用级别重置时——同一次
+    调用会立刻以当前配置刷新，否则下次恢复会把新检查点算成旧配置产物。
+    """
 
     timestamp = now_utc()
     return {
@@ -743,8 +822,10 @@ def new_recovery_manifest(
         "created_at": timestamp,
         "updated_at": timestamp,
         "software_version": software_version(),
-        # 冻结配置摘要（票 07 交付）：本轮先占位，恢复侧未记录即单漂移项。
-        "config_fingerprint": None,
+        # 冻结配置摘要（票 07）：恢复时逐项比对生成漂移清单。
+        "config_fingerprint": (
+            dict(config_fingerprint) if config_fingerprint is not None else None
+        ),
         "completed": {
             "phase": False,
             "rounds": 0,
@@ -795,20 +876,28 @@ def build_recovery_summary(
     identity: Mapping[str, str],
     rounds: int,
     phase_completed: bool,
-    configuration_drift: "tuple[str, ...]" = (),
+    current_fingerprint: Optional[Mapping[str, Any]] = None,
 ) -> RecoverySummary:
     """恢复摘要：模块、身份、已完成级别与计数、检查点时间、漂移清单。
 
-    ``configuration_drift`` 是票 07 的接线点：本轮（票 06）无调用方
-    传值、恒为空清单；票 07 接入 ``config_drift`` 比对后由 runner 传入。
+    ``current_fingerprint`` 缺省 ``None`` 沿用旧 manifest 未记录口径
+    （票 07 前的调用方）；传入时逐项比对冻结摘要生成漂移清单
+    （票 07，``config_drift`` 共享实现）。
     """
 
+    frozen = manifest.get("config_fingerprint")
+    frozen = frozen if isinstance(frozen, dict) else None
+    drift = (
+        ()
+        if current_fingerprint is None
+        else config_drift(frozen, current_fingerprint, postprocess_config_drift_labels())
+    )
     return RecoverySummary(
         module=RECOVERY_MODULE,
         identity=dict(identity),
         completed={"phase": int(phase_completed), "rounds": int(rounds)},
         checkpoint_time=str(manifest.get("updated_at", "")),
-        configuration_drift=configuration_drift,
+        configuration_drift=drift,
     )
 
 
@@ -816,6 +905,7 @@ __all__ = [
     "RECOVERY_MANIFEST_FILENAME",
     "RECOVERY_MODULE",
     "PHASE_CHECKPOINT_FILENAME",
+    "POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS",
     "ROUND_CHECKPOINT_FILENAME",
     "PhaseResumeState",
     "RoundResumeState",
@@ -825,6 +915,8 @@ __all__ = [
     "new_recovery_manifest",
     "phase_checkpoint_from_payload",
     "phase_checkpoint_payload",
+    "postprocess_config_drift_labels",
+    "postprocess_config_fingerprint",
     "recovery_identity",
     "round_checkpoint_from_payload",
     "round_checkpoint_payload",

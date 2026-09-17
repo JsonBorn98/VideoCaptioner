@@ -15,8 +15,10 @@ from ..entities import SubtitleLayoutEnum
 from ..llm.utility import borrow_utility_gateway
 from ..recovery import (
     RecoveryDecision,
+    RecoveryProvenance,
     RecoverySummary,
     atomic_write_json,
+    drifted_keys,
     load_recovery_manifest,
     now_utc,
     write_recovery_manifest,
@@ -36,6 +38,7 @@ from .checkpoint import (
     new_recovery_manifest,
     phase_checkpoint_from_payload,
     phase_checkpoint_payload,
+    postprocess_config_fingerprint,
     recovery_identity,
     round_checkpoint_from_payload,
     round_checkpoint_payload,
@@ -258,6 +261,8 @@ def _module_outputs(
     if config.qa_report:
         report.source_path = task.source_subtitle_path
         report.output_path = task.postprocessed_subtitle_path or delivery.active_subtitle_path or ""
+        # QA 报告恢复来源一节（票 07）：恢复运行才带（与 source_path 同一赋值模式）。
+        report.recovery = delivery.recovery_provenance
         outputs["qa_report"] = build_qa_report(report).encode("utf-8")
     if report.speed is not None:
         from ..speed.models import canonical_json_bytes
@@ -272,6 +277,7 @@ def _module_outputs(
                 active_subtitle_path=delivery.active_subtitle_path,
                 precise_timing_outcome=delivery.precise_timing_outcome,
                 precise_timing_grades=delivery.precise_timing_grades,
+                recovery_provenance=delivery.recovery_provenance,
             ),
             ensure_ascii=False,
             sort_keys=True,
@@ -294,17 +300,47 @@ def _publish_module_outputs(
     """把下游产物写入过程目录；失败只警告，不改变已完成的核心结果（D28）。
 
     ``clear_recovery=False`` 供分析模式：干跑不写检查点，也不删别的
-    运行留下的检查点（票 06）。
+    运行留下的检查点（票 06）。``delivery.recovery_provenance``（票 07）
+    是恢复运行的溯源：QA 报告与状态载荷由 ``_module_outputs`` 组装，
+    manifest 登记经 ``recovery_payload`` 传给适配层。
     """
 
     try:
         outputs = _module_outputs(task, report, config, delivery)
-        adapter.publish_downstream_outputs(task, outputs, clear_recovery=clear_recovery)
+        adapter.publish_downstream_outputs(
+            task,
+            outputs,
+            clear_recovery=clear_recovery,
+            recovery_payload=(
+                delivery.recovery_provenance.to_persisted()
+                if delivery.recovery_provenance is not None
+                else None
+            ),
+        )
     except InterruptedError:
         raise
     except Exception as exc:  # noqa: BLE001 —— 过程产物落盘不得阻断交付
         task.warnings.append(f"过程产物写入失败: {exc}")
         logger.warning("过程产物写入失败，继续交付: %s", exc)
+
+
+def _resolve_profile_identity(
+    task: PostprocessTask, profile_store: PostprocessProfileStore | None
+) -> tuple[str, str]:
+    """方案名与来源模板（票 07 冻结摘要用）；解析失败或方案缺失时留空。
+
+    统一走方案库（注入 store 优先，缺省默认库）：GUI / CLI / 恢复重跑
+    都走同一解析路径，不因入口是否传 store 产生假漂移。不猜测配置
+    （D15）：解析不到就空串——冻结摘要是可比对值，两侧同为空不产生
+    假漂移；方案确已删除是真实漂移（下次恢复会列出），不静默吞掉。
+    """
+
+    try:
+        store = profile_store if profile_store is not None else PostprocessProfileStore()
+        profile = store.get(task.profile_id)
+    except Exception:  # noqa: BLE001 —— 摘要比对不因方案库缺失而阻断任务
+        return "", ""
+    return str(profile.name), str(profile.base_template_id)
 
 
 def run_postprocess_task(
@@ -445,9 +481,20 @@ def run_postprocess_task(
         if recovery_manifest is None and recovery_manifest_path.is_file():
             # manifest 存在但不匹配 / 损坏：告警并从头（R06：验不过不提示）。
             warnings.append("恢复 manifest 不可用（身份不符或损坏），已从头开始")
+    # 冻结配置摘要（票 07）：后处理配置方案冻结值哈希 + 翻译执行快照侧五项。
+    # 方案名与来源模板按方案库解析（同一解析路径，无入口差异假漂移）。
+    profile_name, base_template = _resolve_profile_identity(task, profile_store)
+    current_fingerprint = postprocess_config_fingerprint(
+        config,
+        profile_id=task.profile_id,
+        profile_name=profile_name,
+        base_template=base_template,
+        snapshot=snapshot,
+    )
     resume_phase: PhaseResumeState | None = None
     round_resume: RoundResumeState | None = None
     recovery_summary: RecoverySummary | None = None
+    recovery_provenance: RecoveryProvenance | None = None
     if config.speed_mode != "analyze" and recovery_manifest is not None:
         completed = recovery_manifest.get("completed", {})
         phase_completed = completed.get("phase") is True
@@ -482,12 +529,13 @@ def run_postprocess_task(
                 else:
                     round_resume = round_state
             if round_resume is not None or resume_phase is not None:
-                # 恢复摘要（漂移比对由票 07 交付，本轮清单为空）。
+                # 恢复摘要（票 07）：逐项比对冻结摘要生成漂移清单。
                 recovery_summary = build_recovery_summary(
                     manifest=recovery_manifest,
                     identity=identity,
                     rounds=completed_rounds,
                     phase_completed=resume_phase is not None,
+                    current_fingerprint=current_fingerprint,
                 )
                 decision = (
                     RecoveryDecision.CONTINUE
@@ -499,7 +547,9 @@ def run_postprocess_task(
                     # 内存引用同步换成新 manifest（后续完成标记写新进度）。
                     if recovery_manifest_path is not None:
                         recovery_manifest = new_recovery_manifest(
-                            identity=identity, task_name=task.workflow_base_name
+                            identity=identity,
+                            task_name=task.workflow_base_name,
+                            config_fingerprint=current_fingerprint,
                         )
                         write_recovery_manifest(recovery_manifest_path, recovery_manifest)
                     resume_phase = None
@@ -509,8 +559,33 @@ def run_postprocess_task(
                     warnings.extend(
                         warning for warning in resume_warnings if warning not in warnings
                     )
+                    # 恢复来源（票 07）：QA 报告、后处理状态与 manifest 各记一份。
+                    frozen = recovery_manifest.get("config_fingerprint")
+                    frozen = frozen if isinstance(frozen, dict) else None
+                    recovery_provenance = RecoveryProvenance(
+                        checkpoint_time=recovery_summary.checkpoint_time,
+                        completed=dict(recovery_summary.completed),
+                        configuration_drift=recovery_summary.configuration_drift,
+                        drifted_keys=drifted_keys(frozen, current_fingerprint),
+                    )
+                    # 恢复继续时冻结摘要沿用检查点原值：本次运行以旧配置
+                    # 复用已完成的阶段；漂移已记录进摘要与溯源（ADR-0022
+                    # 宽松口径），重写摘要会让下次恢复少掉漂移项。
             else:
                 warnings.extend(warning for warning in resume_warnings if warning not in warnings)
+                # 无可复用级别（登记而文件缺失 / 不可读）：本次运行以当前
+                # 配置重产全部级别——冻结摘要同步刷新，否则下次恢复会把
+                # 本次新检查点算成旧配置产物，凭空多出漂移项（票 07）。
+                recovery_manifest["config_fingerprint"] = dict(current_fingerprint)
+                recovery_manifest["updated_at"] = now_utc()
+                write_recovery_manifest(recovery_manifest_path, recovery_manifest)
+        else:
+            # manifest 匹配但无任何完成级别（上次运行在任何检查点落盘前
+            # 中断）：同上刷新冻结摘要——manifest 里的旧摘要属于上次配置。
+            if recovery_manifest_path is not None:
+                recovery_manifest["config_fingerprint"] = dict(current_fingerprint)
+                recovery_manifest["updated_at"] = now_utc()
+                write_recovery_manifest(recovery_manifest_path, recovery_manifest)
     if (
         config.speed_mode != "analyze"
         and recovery_manifest is None
@@ -519,7 +594,9 @@ def run_postprocess_task(
         # 无匹配检查点：新建 manifest（唯一进度真相），中断类型清空；
         # 运行中的完成标记 / 中断类型都写这份内存引用。
         recovery_manifest = new_recovery_manifest(
-            identity=identity, task_name=task.workflow_base_name
+            identity=identity,
+            task_name=task.workflow_base_name,
+            config_fingerprint=current_fingerprint,
         )
         write_recovery_manifest(recovery_manifest_path, recovery_manifest)
     evidence = tuple(timing_windows) if config.precise_timing else ()
@@ -878,6 +955,9 @@ def run_postprocess_task(
             active_subtitle_path=str(output),
             precise_timing_outcome=precise_timing_outcome,
             precise_timing_grades=precise_timing_grades,
+            # 恢复来源（票 07）：QA 报告、后处理状态与 manifest 各记一份；
+            # 不中断运行为 None（不带该键 / 不渲染该节）。
+            recovery_provenance=recovery_provenance,
         ),
     )
     logger.info("后处理完成：%d 段 -> %s", len(working.segments), output.name)

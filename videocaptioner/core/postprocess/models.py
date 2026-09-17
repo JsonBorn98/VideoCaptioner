@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Mapping, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, Protocol
 
 from ..entities import SubtitleLayoutEnum
 from ..subtitle.io import canonical_stage_path
@@ -15,7 +15,7 @@ from .config import PostprocessConfig
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
     from ..entities import SubtitleExportPolicy
-    from ..recovery import RecoverySummary
+    from ..recovery import RecoveryProvenance, RecoverySummary
     from ..speed.timing_evidence import TimingEvidenceBundle
     from .report import QualityReport
     from .translation import TranslationExecutionSnapshot
@@ -119,12 +119,14 @@ class PostprocessAssetAdapter(Protocol):
         outputs: Mapping[str, bytes],
         *,
         clear_recovery: bool = True,
+        recovery_payload: Mapping[str, Any] | None = None,
     ) -> None:
         """Register module-success outputs as manifest assets (D21/D28).
 
         独立测试用 fake 覆盖同一接缝：下游产物在模块成功后进入过程目录，
         未重新产生的种类从清单中移除。``clear_recovery=False``（分析模式
-        干跑）不清理恢复检查点，见 workspace 实现（票 06）。
+        干跑）不清理恢复检查点；``recovery_payload``（票 07）是恢复运行
+        才带的 manifest 恢复来源登记，见 workspace 实现。
         """
 
 
@@ -161,9 +163,11 @@ class PostprocessDeliveryContext:
 
     活动字幕位置与对齐时间轴可见结果总是一同穿过
     ``_publish_module_outputs`` → ``build_postprocess_state_payload``；
-    捆成一个对象，避免三参数数据泥团。
+    捆成一个对象，避免三参数数据泥团。``recovery_provenance``（票 07）
+    是恢复运行才带的溯源：QA 报告与后处理状态各记一份。
     """
 
     active_subtitle_path: Optional[str] = None
     precise_timing_outcome: Optional[str] = None
     precise_timing_grades: Optional[tuple[tuple[str, int], ...]] = None
+    recovery_provenance: Optional["RecoveryProvenance"] = None

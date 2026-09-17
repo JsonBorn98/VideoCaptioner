@@ -14,6 +14,7 @@ from ..utils.text_utils import is_mainly_cjk
 from .translation import flow_mode_label
 
 if TYPE_CHECKING:
+    from ..recovery import RecoveryProvenance
     from ..speed.pipeline import SpeedOptimizationResult
     from .repair import RepairSummary
     from .viewing import ViewingProblem
@@ -117,6 +118,9 @@ class QualityReport:
     viewing_problems: List["ViewingProblem"] = field(default_factory=list)
     #  批量观看问题修复的可见结果状态（repair.py RepairSummary；None = 未运行修复）。
     viewing_repair: Optional["RepairSummary"] = None
+    #  恢复来源（票 07，ADR-0022）：恢复过的运行才带；不中断运行为 None。
+    #  QA 报告据此渲染「恢复来源」一节；轮末检查点重建的 report 不带。
+    recovery: Optional["RecoveryProvenance"] = None
 
     def unresolved_viewing_problems(self) -> List["ViewingProblem"]:
         """未解决的观看长度问题（修复回退区域保持未解决，不记为通过）。"""
@@ -147,6 +151,53 @@ _STAGE_LABELS = {
     "compress": "快速字幕压缩",
 }
 
+# 恢复来源一节的已完成级别显示名（票 07，对齐翻译侧 report._COMPLETED_LEVEL_LABELS）。
+_RECOVERY_COMPLETED_LEVEL_LABELS = {
+    "phase": "阶段末检查点",
+    "rounds": "修复轮次",
+}
+
+
+def _render_recovery_lines(recovery: "RecoveryProvenance") -> List[str]:
+    """恢复来源一节（票 07）：恢复来源、复用级别与受漂移影响的成果标注。
+
+    行风格与 ``build_qa_report`` 一致（每行带 ``\\n`` 后缀、
+    ``"".join`` 拼接），对齐翻译侧 ``report._render_recovery_lines``。
+    """
+
+    from ..recovery import UNRECORDED_CONFIG_DIGEST_DRIFT
+    from .checkpoint import POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS
+
+    lines = [
+        "## 恢复来源\n\n",
+        f"- 检查点时间：{recovery.checkpoint_time or '未知'}\n",
+    ]
+    completed = [
+        f"{_RECOVERY_COMPLETED_LEVEL_LABELS.get(key, key)} {value}"
+        for key, value in recovery.completed.items()
+        if value
+    ]
+    lines.append("- 恢复时已复用：" + ("、".join(completed) if completed else "无") + "\n")
+    drift = list(recovery.configuration_drift)
+    lines.append("- 配置漂移：" + ("；".join(drift) if drift else "无") + "\n")
+    if recovery.configuration_drift == (UNRECORDED_CONFIG_DIGEST_DRIFT,):
+        lines.append("- 受影响成果：检查点未记录配置摘要，无法追溯受影响部分\n")
+    elif not drift:
+        lines.append("- 受影响成果：无（无配置漂移）\n")
+    else:
+        # 有漂移项就绝不写「无」：逐项给效果句；比对项增删（无旧值可归属）
+        # 或未标注的项也给一句归属说明，不与上一行自相矛盾。
+        effects = [
+            POSTPROCESS_CONFIG_DRIFT_ANNOTATIONS.get(key, (None, None))[1]
+            or f"部分成果受「{key}」漂移影响，无法进一步归属"
+            for key in recovery.drifted_keys
+        ]
+        if not effects:
+            effects = ["部分成果受配置漂移影响，无法逐项归属（比对项在检查点与当前配置间增删）"]
+        lines.append("- 受影响成果：" + "；".join(effects) + "\n")
+    lines.append("\n")
+    return lines
+
 
 def build_qa_report(report: QualityReport) -> str:
     """将 QualityReport 渲染为 Markdown QA 报告。"""
@@ -165,6 +216,9 @@ def build_qa_report(report: QualityReport) -> str:
     lines.append(f"- 输入: `{report.source_path}`\n")
     lines.append(f"- 输出: `{report.output_path}`\n")
     lines.append(f"- 段数: {report.segment_count}\n\n")
+    # 恢复来源一节（票 07）：只给恢复过的运行，紧跟文件信息。
+    if report.recovery is not None:
+        lines.extend(_render_recovery_lines(report.recovery))
 
     # 2. 处理摘要
     lines.append("## 处理摘要\n\n")

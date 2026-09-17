@@ -23,6 +23,7 @@ from ..utils.logger import setup_logger
 
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
+    from ..recovery import RecoveryProvenance
     from .models import PostprocessTask
     from .report import QualityReport
 
@@ -442,6 +443,7 @@ class FilesystemAssetStore:
         outputs: Mapping[str, bytes],
         *,
         clear_recovery: bool = True,
+        recovery_payload: Mapping[str, Any] | None = None,
     ) -> None:
         """把模块成功后的下游产物写入过程目录并登记进 manifest（D21/D28）。
 
@@ -454,6 +456,12 @@ class FilesystemAssetStore:
         种类除名并删除」规则整体清理，不为清理新写一条规则。失败 /
         停止 / 崩溃不进本方法，检查点保留；分析模式是干跑（不写检查
         点，也不能删既有检查点），显式传 ``False`` 跳过清理。
+        ``recovery_payload``（票 07）：恢复过的运行才带——manifest 的
+        下游产物登记随带恢复来源，写在 ``postprocess_recovery`` 键下
+        （与翻译侧 ``recovery`` 同一 ``RecoveryProvenance`` 持久化形状；
+        manifest 是两模块共享的任务清单，平铺 ``recovery`` 归翻译侧，
+        各记各的不互相覆盖）。不中断运行不带该键，且会摘除上次恢复
+        运行留下的陈旧来源（不累积）。
         """
 
         discovery = task.asset_discovery
@@ -505,6 +513,12 @@ class FilesystemAssetStore:
                 task.warnings.append(f"过程产物 {kind} 写入后不可读，未列入资产")
         listed.update({kind: path.name for kind, path in verified.items()})
         manifest["assets"] = listed
+        # 恢复来源（票 07）：本次运行的 manifest 登记——恢复运行带入，
+        # 不中断运行摘除陈旧来源（每次运行的清单只反映当前结果）。
+        if recovery_payload is not None:
+            manifest["postprocess_recovery"] = dict(recovery_payload)
+        else:
+            manifest.pop("postprocess_recovery", None)
         _write_json(discovery.manifest_path, manifest)
         # 按清理后的清单重建已验证资产快照（陈旧种类一并消失）。
         assets: dict[str, Path] = {}
@@ -566,8 +580,12 @@ def build_postprocess_state_payload(
     active_subtitle_path: str | None,
     precise_timing_outcome: str | None,
     precise_timing_grades: tuple[tuple[str, int], ...] | None,
+    recovery_provenance: "RecoveryProvenance | None" = None,
 ) -> dict[str, Any]:
-    """``postprocess-state.json`` 载荷：状态、警告与过程产物位置（无连接机密）。"""
+    """``postprocess-state.json`` 载荷：状态、警告与过程产物位置（无连接机密）。
+
+    ``recovery_provenance``（票 07）：恢复过的运行才带；不中断运行不带该键。
+    """
 
     repair = report.viewing_repair
     return {
@@ -616,6 +634,12 @@ def build_postprocess_state_payload(
             [[name, count] for name, count in precise_timing_grades]
             if precise_timing_grades
             else None
+        ),
+        # 恢复来源（票 07，ADR-0022）：恢复过的运行才带；不中断运行不带该键。
+        **(
+            {"recovery": recovery_provenance.to_persisted()}
+            if recovery_provenance is not None
+            else {}
         ),
         "segment_count": report.segment_count,
     }
