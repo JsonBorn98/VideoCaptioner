@@ -96,6 +96,8 @@ from .viewing import (
 if TYPE_CHECKING:
     from ..entities import SubtitleLayoutEnum
     from ..llm import LLMModelProfile
+    from .checkpoint import RoundResumeState
+    from .viewing import ViewingProblem
 
 logger = setup_logger("postprocess.repair")
 
@@ -210,6 +212,30 @@ class RegionRollback:
 
 
 @dataclass
+class RoundCheckpointState:
+    """轮末检查点状态（票 06，ADR-0022）：修复循环经完成回调交给运行器。
+
+    修复循环自身零磁盘 I/O：轮次归并验收后把这一份全量状态发出，
+    由运行器落盘。``viewing_problems`` 是本轮扫描出的当前问题清单
+    （终态重扫在循环外，恢复侧据此重建 ``report.viewing_problems``）。
+    """
+
+    working: ASRData
+    snapshot: ASRData
+    origin: List[int]
+    summary: "RepairSummary"
+    closed_regions: Set[int]
+    attempts: Dict[ProblemIdentity, int]
+    last_error: Dict[ProblemIdentity, str]
+    last_subject: Dict[ProblemIdentity, Tuple[int, ...]]
+    accepted: Set[ProblemIdentity]
+    candidate_fps: Dict[int, Set[str]]
+    state_fps: Dict[int, Set[str]]
+    transport_streak: int
+    viewing_problems: List["ViewingProblem"]
+
+
+@dataclass
 class RepairSummary:
     """修复循环的可见结果状态（报告 / 警告 / 下游状态消费）。"""
 
@@ -297,6 +323,27 @@ class _WorkingState:
         self.snapshot = snapshot
         self.segments: List[ASRDataSeg] = [_clone_seg(seg) for seg in snapshot.segments]
         self.origin: List[int] = list(range(len(snapshot.segments)))
+
+    @classmethod
+    def restore(
+        cls,
+        snapshot: ASRData,
+        segments: List[ASRDataSeg],
+        origin: List[int],
+    ) -> "_WorkingState":
+        """从轮末检查点重建（票 06）：快照 / 现役段 / 初版段序追踪全量装载。
+
+        回退与问题身份语义与不中断运行等价：``origin`` 延续中断前的
+        初版段序（``snapshot`` 是同一份初版快照），恢复后 ``_identity``
+        的键与 ``_rollback`` 的恢复目标不变。
+        """
+
+        assert len(segments) == len(origin)
+        state = cls.__new__(cls)
+        state.snapshot = snapshot
+        state.segments = [_clone_seg(seg) for seg in segments]
+        state.origin = list(origin)
+        return state
 
     def as_data(self) -> ASRData:
         return ASRData([_clone_seg(seg) for seg in self.segments])
@@ -1232,6 +1279,8 @@ def execute_viewing_repair(
     cancelled: Optional[Callable[[], bool]] = None,
     on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
     task_id: str = "",
+    resume: "Optional[RoundResumeState]" = None,
+    on_round_complete: Optional[Callable[["RoundCheckpointState"], None]] = None,
 ) -> Tuple[ASRData, QualityReport]:
     """执行批量观看问题修复循环（票 05/06 核心入口，供任务入口调用）。
 
@@ -1297,17 +1346,58 @@ def execute_viewing_repair(
     # 不替换修复系统提示词；非快照路径（显式备用角色）为空。
     main_guidance = snapshot.main_prompt if snapshot is not None else ""
     review_guidance = snapshot.review_prompt if snapshot is not None else ""
-    state = _WorkingState(clone_subtitle_data(working))
+    # 轮末恢复装载（票 06，ADR-0022）：从轮末检查点继续时延续尝试计数、
+    # 已关闭区域、回退记录与请求计数——业务重试上限、轮次上界、连续
+    # 传输失败上界以恢复的计数继续，不重置。
+    if resume is not None:
+        summary.rounds = resume.summary.rounds
+        summary.requests = resume.summary.requests
+        summary.spliced_fragments = resume.summary.spliced_fragments
+        summary.resolved_problem_count = resume.summary.resolved_problem_count
+        summary.rollbacks = list(resume.summary.rollbacks)
+        summary.unplannable_subjects = resume.summary.unplannable_subjects
+        summary.review_corrections = resume.summary.review_corrections
+        summary.review_requests = resume.summary.review_requests
+        summary.warnings.extend(
+            warning for warning in resume.summary.warnings if warning not in summary.warnings
+        )
+        summary.review_planned_requests = resume.summary.review_planned_requests
+        summary.review_planned_subjects = resume.summary.review_planned_subjects
+        summary.review_planned_input_tokens = resume.summary.review_planned_input_tokens
+        summary.review_planned_output_reserve_tokens = (
+            resume.summary.review_planned_output_reserve_tokens
+        )
+        summary.review_unplannable_subjects = resume.summary.review_unplannable_subjects
+        summary.review_shrunk_subject_groups = resume.summary.review_shrunk_subject_groups
+        summary.review_shrunk_context_groups = resume.summary.review_shrunk_context_groups
+        summary.max_inflight = resume.summary.max_inflight
+        summary.concurrent_rounds = resume.summary.concurrent_rounds
+        summary.effective_concurrency = resume.summary.effective_concurrency
+        state = _WorkingState.restore(
+            clone_subtitle_data(resume.snapshot),
+            resume.working.segments,
+            resume.origin,
+        )
+    else:
+        state = _WorkingState(clone_subtitle_data(working))
     # 区域封闭表（初版段序）：回退 / 容量不足的区域不再进入后续请求。
-    closed_regions: Set[int] = set()
+    closed_regions: Set[int] = set(resume.closed_regions) if resume is not None else set()
     # 业务重试计数（D09）：每个问题身份至多 1 + DEFAULT_BUSINESS_RETRIES 次请求。
-    attempts: Dict[ProblemIdentity, int] = {}
-    last_subject: Dict[ProblemIdentity, Tuple[int, ...]] = {}
-    last_error: Dict[ProblemIdentity, str] = {}
-    accepted: Set[ProblemIdentity] = set()
-    candidate_fps: Dict[int, Set[str]] = {}
-    state_fps: Dict[int, Set[str]] = {}
-    transport_streak = 0
+    attempts: Dict[ProblemIdentity, int] = dict(resume.attempts) if resume is not None else {}
+    last_subject: Dict[ProblemIdentity, Tuple[int, ...]] = (
+        dict(resume.last_subject) if resume is not None else {}
+    )
+    last_error: Dict[ProblemIdentity, str] = dict(resume.last_error) if resume is not None else {}
+    accepted: Set[ProblemIdentity] = set(resume.accepted) if resume is not None else set()
+    candidate_fps: Dict[int, Set[str]] = (
+        {key: set(value) for key, value in resume.candidate_fps.items()}
+        if resume is not None
+        else {}
+    )
+    state_fps: Dict[int, Set[str]] = (
+        {key: set(value) for key, value in resume.state_fps.items()} if resume is not None else {}
+    )
+    transport_streak = resume.transport_streak if resume is not None else 0
 
     def _identity(problem: PlanProblem) -> ProblemIdentity:
         return (state.origin[problem.segment_index], problem.side, problem.kind)
@@ -1334,8 +1424,10 @@ def execute_viewing_repair(
                 summary.rounds += 1
                 data = state.as_data()
                 # 扫描结果统一适配为 PlanProblem（票 04 的身份契约），
-                # 循环内不再混用 ViewingProblem 形状。
-                scanned = problems_from_viewing(scan_viewing_lengths(data, cfg, layout))
+                # 循环内不再混用 ViewingProblem 形状；原始 ViewingProblem
+                # 清单保留给轮末检查点（票 06：恢复侧重建报告问题清单）。
+                round_scanned = scan_viewing_lengths(data, cfg, layout)
+                scanned = problems_from_viewing(round_scanned)
                 open_problems = [
                     problem
                     for problem in scanned
@@ -1877,8 +1969,7 @@ def execute_viewing_repair(
                                         for subject_entry in group.subjects
                                         for index in range(
                                             subject_entry.region_start,
-                                            subject_entry.region_start
-                                            + subject_entry.region_span,
+                                            subject_entry.region_start + subject_entry.region_span,
                                         )
                                         for problem in segment_problems.get(index, [])
                                     ]
@@ -1958,6 +2049,34 @@ def execute_viewing_repair(
                     if transport_streak >= MAX_TRANSPORT_FAILURE_ROUNDS:
                         summary.warnings.append("观看问题修复连续传输失败，已停止修复循环")
                         break
+                # 轮末检查点（票 06，R04）：修复轮次归并验收后把全量状态交给
+                # 调用方落盘——修复循环零磁盘 I/O；回调失败只告警不阻断修复
+                # （检查点是瞬时资产，缺一轮不破坏等价性：下一轮末补写）。
+                if on_round_complete is not None:
+                    try:
+                        on_round_complete(
+                            RoundCheckpointState(
+                                working=state.as_data(),
+                                snapshot=state.snapshot,
+                                origin=list(state.origin),
+                                summary=summary,
+                                closed_regions=set(closed_regions),
+                                attempts=dict(attempts),
+                                last_error=dict(last_error),
+                                last_subject=dict(last_subject),
+                                accepted=set(accepted),
+                                candidate_fps={
+                                    key: set(value) for key, value in candidate_fps.items()
+                                },
+                                state_fps={key: set(value) for key, value in state_fps.items()},
+                                transport_streak=transport_streak,
+                                viewing_problems=list(round_scanned),
+                            )
+                        )
+                    except InterruptedError:
+                        raise
+                    except Exception:  # noqa: BLE001 —— 检查点落盘失败不阻断修复
+                        logger.warning("轮末恢复检查点写入失败，继续修复", exc_info=True)
 
         except InterruptedError:
             # 取消终态事件由调用方（runner）统一发射（票 07 审查修复）：
@@ -2028,6 +2147,7 @@ __all__ = [
     "MAX_TRANSPORT_FAILURE_ROUNDS",
     "RegionRollback",
     "RepairSummary",
+    "RoundCheckpointState",
     "execute_viewing_repair",
     "select_repair_flow",
 ]

@@ -398,6 +398,8 @@ def fake_run(task, **kwargs):
         input_data = None
         precise_timing_outcome = None
         precise_timing_grades = None
+        # 恢复摘要（票 06）：不中断运行的 CLI 渲染不带恢复行。
+        recovery_summary = None
         def __init__(self, task):
             self._task = task
         @property

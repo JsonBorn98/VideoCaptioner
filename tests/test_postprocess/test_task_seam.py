@@ -57,9 +57,7 @@ def test_invalid_initial_subtitle_blocks_downstream_without_fallback(tmp_path):
     source = tmp_path / "empty.srt"
     source.write_text("", encoding="utf-8")
 
-    result = run_postprocess_task(
-        PostprocessTask(str(source), config_snapshot=PostprocessConfig())
-    )
+    result = run_postprocess_task(PostprocessTask(str(source), config_snapshot=PostprocessConfig()))
 
     assert not result.succeeded
     assert not result.used_fallback
@@ -171,7 +169,7 @@ class _FakeAssetAdapter:
     def discover(self, task: PostprocessTask) -> None:
         self.tasks.append(task)
 
-    def publish_downstream_outputs(self, task: PostprocessTask, outputs) -> None:
+    def publish_downstream_outputs(self, task: PostprocessTask, outputs, **_kwargs) -> None:
         self.published.append((task, dict(outputs)))
 
 

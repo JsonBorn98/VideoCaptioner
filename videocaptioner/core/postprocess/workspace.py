@@ -50,6 +50,15 @@ DOWNSTREAM_OUTPUT_KINDS = (
     "speed_changes",
     "postprocess_state",
 )
+# 瞬时恢复资产（票 06，ADR-0022）：恢复检查点作为过程目录内的资产种类
+# 登记（R04：后处理检查点放在任务过程目录）；模块成功时按「未再产生
+# 的种类除名并删除」规则清理，失败 / 停止 / 崩溃保留。不进上游种类
+# （后处理自身不消费它们），不进 EXPORTABLE_KINDS（导出不含恢复数据）。
+TRANSIENT_RECOVERY_KINDS = (
+    "recovery_manifest",
+    "recovery_phase",
+    "recovery_round",
+)
 EXPORTABLE_KINDS = UPSTREAM_ASSET_KINDS + DOWNSTREAM_OUTPUT_KINDS
 ASSET_FILENAMES = {
     "glossary": "glossary.vcglossary.json",
@@ -60,7 +69,22 @@ ASSET_FILENAMES = {
     "qa_report": "qa-report.md",
     "speed_changes": "speed-changes.json",
     "postprocess_state": "postprocess-state.json",
+    "recovery_manifest": "recovery-manifest.json",
+    "recovery_phase": "recovery-phase.json",
+    "recovery_round": "recovery-round.json",
 }
+# 恢复资产按 JSON 可读性验证（与 _JSON_ASSET_KINDS 同一规则，票 06）。
+# 基集 + 恢复集合派生：加一种恢复 kind 只改 TRANSIENT_RECOVERY_KINDS 一处。
+_JSON_BASE_KINDS = frozenset(
+    {
+        "glossary",
+        "checkpoint",
+        "translation_snapshot",
+        "context",
+        "postprocess_state",
+    }
+)
+_JSON_ASSET_KINDS = _JSON_BASE_KINDS | frozenset(TRANSIENT_RECOVERY_KINDS)
 # 导出允许复制的 manifest 本身（D28「可同时复制 manifest」）。
 EXPORT_MANIFEST_KIND = "manifest"
 
@@ -72,15 +96,6 @@ class ProcessAssetExportError(Exception):
 # 过程状态载荷 schema（postprocess-state.json）。
 POSTPROCESS_STATE_SCHEMA = "videocaptioner.postprocess_state"
 POSTPROCESS_STATE_VERSION = 1
-_JSON_ASSET_KINDS = frozenset(
-    {
-        "glossary",
-        "checkpoint",
-        "translation_snapshot",
-        "context",
-        "postprocess_state",
-    }
-)
 _STAGE_PREFIXES = (
     "【转录字幕】",
     "【初版字幕】",
@@ -422,13 +437,23 @@ class FilesystemAssetStore:
         )
 
     def publish_downstream_outputs(
-        self, task: "PostprocessTask", outputs: Mapping[str, bytes]
+        self,
+        task: "PostprocessTask",
+        outputs: Mapping[str, bytes],
+        *,
+        clear_recovery: bool = True,
     ) -> None:
         """把模块成功后的下游产物写入过程目录并登记进 manifest（D21/D28）。
 
         先移除上次运行留下的、本次未重新产生的下游产物文件与清单项，
         再按稳定文件名原子写入本次产物，并按清理后的清单重建已验证
         资产快照——每次运行的清单只反映当前结果，不累积陈旧条目。
+
+        恢复检查点是瞬时资产（票 06）：``clear_recovery=True``（默认，
+        正常模块成功路径）时三种恢复文件与清单项按同一「未再产生的
+        种类除名并删除」规则整体清理，不为清理新写一条规则。失败 /
+        停止 / 崩溃不进本方法，检查点保留；分析模式是干跑（不写检查
+        点，也不能删既有检查点），显式传 ``False`` 跳过清理。
         """
 
         discovery = task.asset_discovery
@@ -450,6 +475,16 @@ class FilesystemAssetStore:
                 stale_path = _resolve_listed_asset(discovery.task_dir, stale)
                 if stale_path is not None and stale_path.is_file():
                     _unlink_quiet(stale_path)
+        # 模块成功 = 恢复资产不再产生：除名并删除（票 06；同一清理规则）。
+        # 分析模式（clear_recovery=False）不进这条清理：它不写检查点，
+        # 也不该删掉别的运行留下的检查点（干跑不留残留、不动进度）。
+        if clear_recovery:
+            for kind in TRANSIENT_RECOVERY_KINDS:
+                stale = listed.pop(kind, None)
+                if stale:
+                    stale_path = _resolve_listed_asset(discovery.task_dir, stale)
+                    if stale_path is not None and stale_path.is_file():
+                        _unlink_quiet(stale_path)
         # 再按稳定文件名原子写入本次产物；写入或读取失败只警告，不改变核心结果。
         verified: dict[str, Path] = {}
         for kind, payload in outputs.items():
@@ -480,6 +515,48 @@ class FilesystemAssetStore:
         task.asset_discovery = replace(discovery, verified_assets=tuple(assets.items()))
         # 任务上的持久化位置只记录本次下游产物（报告位置展示用）。
         task.persisted_outputs = {kind: str(path) for kind, path in verified.items()}
+
+
+def register_transient_recovery_assets(
+    task: "PostprocessTask",
+) -> bool:
+    """把固定文件名的恢复检查点登记进过程资产 manifest（票 06）。
+
+    恢复检查点按 R04 放在任务过程目录：``recovery-manifest.json`` 与
+    阶段末 / 轮末数据文件。本函数在每次检查点数据文件原子落盘后调用，
+    把存在的文件按稳定文件名登记进 manifest 的 ``assets``——discover
+    的既有规则（清单内可读即验证）即可在重跑时保留它们，模块成功时
+    ``publish_downstream_outputs`` 按「未再产生的种类除名并删除」清理。
+    登记失败只返回 ``False``（恢复数据不是交付物，不阻断任务）。
+    """
+
+    discovery = task.asset_discovery
+    if discovery is None:
+        return False
+    manifest = _load_manifest(discovery.manifest_path) or {}
+    listed = {
+        str(kind): str(filename)
+        for kind, filename in (manifest.get("assets") or {}).items()
+        if isinstance(kind, str) and isinstance(filename, str)
+    }
+    changed = False
+    for kind in TRANSIENT_RECOVERY_KINDS:
+        path = discovery.task_dir / ASSET_FILENAMES[kind]
+        if listed.get(kind) == path.name:
+            continue
+        if path.is_file() and _asset_readable(path, kind):
+            listed[kind] = path.name
+            changed = True
+    if not changed and manifest:
+        return True
+    manifest["assets"] = listed
+    try:
+        _write_json(discovery.manifest_path, manifest)
+    except InterruptedError:
+        raise
+    except OSError:
+        return False
+    return True
 
 
 def build_postprocess_state_payload(

@@ -6,6 +6,7 @@ import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, Mapping
 
 from .models import canonical_json_bytes
 from .pipeline import SpeedOptimizationResult
@@ -28,6 +29,142 @@ def result_to_dict(result: SpeedOptimizationResult) -> dict:
         "reference_before": asdict(result.reference_before) if result.reference_before else None,
         "reference_after": asdict(result.reference_after) if result.reference_after else None,
     }
+
+
+def result_from_dict(data: dict) -> SpeedOptimizationResult:
+    """Rebuild a ``SpeedOptimizationResult`` from ``result_to_dict`` output.
+
+    后处理阶段末恢复检查点（票 06，ADR-0022）用它恢复 ``report.speed``
+    对象：QA 报告等价性要求速度结果与不中断运行相同，光存速度变更
+    JSON 不够。枚举 / 元组从 ``asdict`` 的裸值重建；未知字段忽略，
+    已知字段缺失时按模型默认值兜底。
+    """
+
+    from dataclasses import fields
+
+    from .deterministic import TimingChange
+    from .metrics import AdjacentJump, SpeedMetrics
+    from .models import Lineage
+    from .policy import SpeedPolicy, SpeedPreset
+    from .protection import ProtectionMatch
+    from .semantic import SemanticRepairRecord
+    from .structural import StructuralOperationKind, StructuralOperationRecord
+    from .validation import ValidationReason, ValidationReasonCode, ValidationStatus
+
+    def _require(key: str) -> Any:
+        value = data.get(key)
+        if value is None:
+            raise ValueError(f"speed result payload missing {key!r}")
+        return value
+
+    def _metrics(payload: Mapping[str, Any]) -> SpeedMetrics:
+        return SpeedMetrics(
+            hard_deficit=float(payload["hard_deficit"]),
+            unresolved_hard_count=int(payload["unresolved_hard_count"]),
+            speed_spread=(
+                float(payload["speed_spread"]) if payload.get("speed_spread") is not None else None
+            ),
+            adjacent_jump=AdjacentJump(
+                p90=(
+                    float(payload["adjacent_jump"]["p90"])
+                    if payload["adjacent_jump"].get("p90") is not None
+                    else None
+                ),
+                emergency_count=int(payload["adjacent_jump"]["emergency_count"]),
+                compared_count=int(payload["adjacent_jump"]["compared_count"]),
+            ),
+            invalid_count=int(payload["invalid_count"]),
+        )
+
+    policy_data = dict(_require("policy"))
+    policy_data["preset"] = SpeedPreset(policy_data.get("preset", "balanced"))
+    policy = SpeedPolicy(
+        **{f.name: policy_data[f.name] for f in fields(SpeedPolicy) if f.name in policy_data}
+    )
+
+    def _structural(payload: Mapping[str, Any]) -> StructuralOperationRecord:
+        text_side = payload["text_side"]
+        if text_side not in ("original", "translate", "both"):
+            raise ValueError(f"unknown text_side: {text_side!r}")
+        return StructuralOperationRecord(
+            operation_id=str(payload["operation_id"]),
+            kind=StructuralOperationKind(payload["kind"]),
+            before_cue_ids=tuple(str(value) for value in payload["before_cue_ids"]),
+            after_cue_ids=tuple(str(value) for value in payload["after_cue_ids"]),
+            text_side=text_side,  # type: ignore[arg-type]  # 上面已收窄
+            before_lineage=tuple(
+                Lineage.from_dict(item) if item else None for item in payload["before_lineage"]
+            ),
+            after_lineage=tuple(
+                Lineage.from_dict(item) if item else None for item in payload["after_lineage"]
+            ),
+        )
+
+    def _semantic(payload: Mapping[str, Any]) -> SemanticRepairRecord:
+        return SemanticRepairRecord(
+            window_id=str(payload["window_id"]),
+            cue_ids=tuple(str(value) for value in payload["cue_ids"]),
+            target_cue_ids=tuple(str(value) for value in payload["target_cue_ids"]),
+            cache_key=str(payload["cache_key"]),
+            status=ValidationStatus(payload["status"]),
+            status_history=tuple(
+                ValidationStatus(value) for value in payload.get("status_history", ())
+            ),
+            attempts=int(payload["attempts"]),
+            before=tuple(str(value) for value in payload["before"]),
+            after=tuple(str(value) for value in payload["after"]),
+            reasons=tuple(
+                ValidationReason(
+                    code=ValidationReasonCode(item["code"]),
+                    message=str(item["message"]),
+                    details=tuple(str(detail) for detail in item.get("details", ())),
+                )
+                for item in payload.get("reasons", ())
+            ),
+            feedback=tuple(str(value) for value in payload.get("feedback", ())),
+            from_cache=bool(payload.get("from_cache", False)),
+        )
+
+    mode = data.get("mode", "apply")
+    if mode not in ("apply", "analyze"):
+        raise ValueError(f"unknown speed mode: {mode!r}")
+    return SpeedOptimizationResult(
+        policy=policy,
+        profile_id=str(data.get("profile_id", "")),
+        mode=mode,  # type: ignore[arg-type]  # 上面已收窄到 SpeedMode
+        before=_metrics(_require("before")),
+        after=_metrics(_require("after")),
+        changes=tuple(
+            TimingChange(
+                cue_id=str(change["cue_id"]),
+                boundary=str(change["boundary"]),
+                before_ms=int(change["before_ms"]),
+                after_ms=int(change["after_ms"]),
+                reason=str(change["reason"]),
+            )
+            for change in _require("changes")
+        ),
+        unresolved_cue_ids=tuple(str(value) for value in data.get("unresolved_cue_ids", ())),
+        invalid_cue_ids=tuple(str(value) for value in data.get("invalid_cue_ids", ())),
+        protected=tuple(
+            ProtectionMatch(
+                index=int(match["index"]),
+                reason=str(match["reason"]),
+                confidence=str(match.get("confidence", "high")),
+            )
+            for match in _require("protected")
+        ),
+        reference_before=_metrics(_require("reference_before"))
+        if data.get("reference_before")
+        else None,
+        reference_after=_metrics(_require("reference_after"))
+        if data.get("reference_after")
+        else None,
+        structural_operations=tuple(
+            _structural(operation) for operation in data.get("structural_operations", ())
+        ),
+        semantic_records=tuple(_semantic(record) for record in data.get("semantic_records", ())),
+    )
 
 
 def write_changes(path: str | Path, result: SpeedOptimizationResult) -> Path:

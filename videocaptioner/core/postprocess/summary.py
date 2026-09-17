@@ -15,8 +15,15 @@ _PRECISE_TIMING_BADGES = {
 def build_postprocess_stage_summary(result: PostprocessResult) -> StageSummary:
     """Build the same truthful postprocess summary for CLI and GUI frontends."""
 
+    from ..recovery import resumed_count
+
     report = result.report
     counts: list[tuple[str, int]] = [("段", len(result.output_data.segments))]
+    # 恢复来源行（票 06，ADR-0009 口径）：本次运行从检查点继续才出现；
+    # 渲染器对「从恢复检查点继续」前缀行不显示数字（裸 label）。
+    if result.recovery_summary is not None:
+        skipped_rounds = resumed_count(result.recovery_summary, "rounds")
+        counts.append(("从恢复检查点继续，跳过后处理阶段与修复轮次", skipped_rounds))
     for key, stage_report in report.stages.items():
         if stage_report.changed > 0:
             counts.append((_STAGE_LABELS.get(key, key), stage_report.changed))

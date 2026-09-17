@@ -13,9 +13,33 @@ from typing import TYPE_CHECKING, Literal, Optional
 from ..asr.asr_data import ASRData
 from ..entities import SubtitleLayoutEnum
 from ..llm.utility import borrow_utility_gateway
+from ..recovery import (
+    RecoveryDecision,
+    RecoverySummary,
+    atomic_write_json,
+    load_recovery_manifest,
+    now_utc,
+    write_recovery_manifest,
+)
 from ..subtitle.io import clone_subtitle_data, import_subtitle, save_canonical_srt
 from ..utils.logger import setup_logger
 from . import run_post_stage, run_pre_stage
+from .checkpoint import (
+    PHASE_CHECKPOINT_FILENAME,
+    RECOVERY_MANIFEST_FILENAME,
+    ROUND_CHECKPOINT_FILENAME,
+    PhaseResumeState,
+    RoundResumeState,
+    build_recovery_summary,
+    mark_manifest_completed,
+    matching_recovery_manifest,
+    new_recovery_manifest,
+    phase_checkpoint_from_payload,
+    phase_checkpoint_payload,
+    recovery_identity,
+    round_checkpoint_from_payload,
+    round_checkpoint_payload,
+)
 from .config import PostprocessConfig, config_payload
 from .diagnostics import stage_event, terminal_event
 from .models import (
@@ -26,10 +50,14 @@ from .models import (
     PostprocessTask,
 )
 from .profiles import PostprocessProfileStore
-from .repair import execute_viewing_repair
+from .repair import RoundCheckpointState, execute_viewing_repair
 from .report import QualityReport
 from .translation import load_translation_snapshot_file, store_profile_resolver
-from .workspace import FilesystemAssetStore, fingerprint_subtitle
+from .workspace import (
+    FilesystemAssetStore,
+    fingerprint_subtitle,
+    register_transient_recovery_assets,
+)
 
 if TYPE_CHECKING:
     from ..llm import LLMGateway
@@ -260,12 +288,18 @@ def _publish_module_outputs(
     config: PostprocessConfig,
     adapter: PostprocessAssetAdapter,
     delivery: PostprocessDeliveryContext,
+    *,
+    clear_recovery: bool = True,
 ) -> None:
-    """把下游产物写入过程目录；失败只警告，不改变已完成的核心结果（D28）。"""
+    """把下游产物写入过程目录；失败只警告，不改变已完成的核心结果（D28）。
+
+    ``clear_recovery=False`` 供分析模式：干跑不写检查点，也不删别的
+    运行留下的检查点（票 06）。
+    """
 
     try:
         outputs = _module_outputs(task, report, config, delivery)
-        adapter.publish_downstream_outputs(task, outputs)
+        adapter.publish_downstream_outputs(task, outputs, clear_recovery=clear_recovery)
     except InterruptedError:
         raise
     except Exception as exc:  # noqa: BLE001 —— 过程产物落盘不得阻断交付
@@ -284,6 +318,7 @@ def run_postprocess_task(
     cancelled: Callable[[], bool] | None = None,
     progress: ProgressCallback | None = None,
     on_event: EventCallback | None = None,
+    recovery_decision: Callable[[RecoverySummary], RecoveryDecision | str] | None = None,
 ) -> PostprocessResult:
     """Run one isolated stage and fall back to its immutable initial subtitle.
 
@@ -387,12 +422,117 @@ def run_postprocess_task(
             if not task.translation_method.strip():
                 task.translation_method = rebuilt.method
     snapshot = task.translation_snapshot
+    # ---------------------------------------------------------------------------
+    # 恢复检查点（票 06，ADR-0022）：过程资产发现之后、进入处理之前。
+    # 分析模式不读写检查点；发现只在可读 manifest 验证通过时提示。
+    # ---------------------------------------------------------------------------
+    identity = recovery_identity(
+        fingerprint=task.subtitle_fingerprint,
+        source_language=task.source_language,
+        target_language=task.target_language,
+    )
+    recovery_dir = task.asset_discovery.task_dir if task.asset_discovery is not None else None
+    recovery_manifest_path = (
+        recovery_dir / RECOVERY_MANIFEST_FILENAME if recovery_dir is not None else None
+    )
+    recovery_manifest: dict | None = None
+    if recovery_manifest_path is not None and config.speed_mode != "analyze":
+        recovery_manifest = (
+            matching_recovery_manifest(recovery_manifest_path, identity=identity)
+            if recovery_manifest_path.is_file()
+            else None
+        )
+        if recovery_manifest is None and recovery_manifest_path.is_file():
+            # manifest 存在但不匹配 / 损坏：告警并从头（R06：验不过不提示）。
+            warnings.append("恢复 manifest 不可用（身份不符或损坏），已从头开始")
+    resume_phase: PhaseResumeState | None = None
+    round_resume: RoundResumeState | None = None
+    recovery_summary: RecoverySummary | None = None
+    if config.speed_mode != "analyze" and recovery_manifest is not None:
+        completed = recovery_manifest.get("completed", {})
+        phase_completed = completed.get("phase") is True
+        completed_rounds = completed.get("rounds", 0)
+        if not isinstance(completed_rounds, int) or isinstance(completed_rounds, bool):
+            completed_rounds = 0
+        if phase_completed or completed_rounds > 0:
+            # 恢复只信 manifest；登记而文件缺失 / 不可读的级别视为未完成并告警。
+            resume_warnings: list[str] = []
+            if phase_completed and recovery_dir is not None:
+                phase_path = recovery_dir / PHASE_CHECKPOINT_FILENAME
+                restored = None
+                if phase_path.is_file():
+                    loaded = load_recovery_manifest(phase_path)
+                    restored = phase_checkpoint_from_payload(loaded) if loaded is not None else None
+                if restored is None:
+                    resume_warnings.append("阶段末检查点不可用，已重跑后处理阶段")
+                else:
+                    resume_phase = restored
+            if completed_rounds > 0 and recovery_dir is not None and resume_phase is not None:
+                # 轮末检查点以阶段末可用为前提：没有工作字幕就没有修复循环入口。
+                round_path = recovery_dir / ROUND_CHECKPOINT_FILENAME
+                round_state = None
+                if round_path.is_file():
+                    loaded = round_path.read_text(encoding="utf-8")
+                    try:
+                        round_state = round_checkpoint_from_payload(json.loads(loaded))
+                    except (OSError, UnicodeError, json.JSONDecodeError):
+                        round_state = None
+                if round_state is None:
+                    resume_warnings.append("轮末检查点不可用，修复循环从阶段末重跑")
+                else:
+                    round_resume = round_state
+            if round_resume is not None or resume_phase is not None:
+                # 恢复摘要（漂移比对由票 07 交付，本轮清单为空）。
+                recovery_summary = build_recovery_summary(
+                    manifest=recovery_manifest,
+                    identity=identity,
+                    rounds=completed_rounds,
+                    phase_completed=resume_phase is not None,
+                )
+                decision = (
+                    RecoveryDecision.CONTINUE
+                    if recovery_decision is None
+                    else RecoveryDecision(recovery_decision(recovery_summary))
+                )
+                if decision is RecoveryDecision.START_FRESH:
+                    # 「从头开始」：重写 manifest 为全部未完成，不预删数据文件；
+                    # 内存引用同步换成新 manifest（后续完成标记写新进度）。
+                    if recovery_manifest_path is not None:
+                        recovery_manifest = new_recovery_manifest(
+                            identity=identity, task_name=task.workflow_base_name
+                        )
+                        write_recovery_manifest(recovery_manifest_path, recovery_manifest)
+                    resume_phase = None
+                    round_resume = None
+                    recovery_summary = None
+                else:
+                    warnings.extend(
+                        warning for warning in resume_warnings if warning not in warnings
+                    )
+            else:
+                warnings.extend(warning for warning in resume_warnings if warning not in warnings)
+    if (
+        config.speed_mode != "analyze"
+        and recovery_manifest is None
+        and recovery_manifest_path is not None
+    ):
+        # 无匹配检查点：新建 manifest（唯一进度真相），中断类型清空；
+        # 运行中的完成标记 / 中断类型都写这份内存引用。
+        recovery_manifest = new_recovery_manifest(
+            identity=identity, task_name=task.workflow_base_name
+        )
+        write_recovery_manifest(recovery_manifest_path, recovery_manifest)
     evidence = tuple(timing_windows) if config.precise_timing else ()
     # Visible outcome of 媒体增强对齐 / 对齐时间轴 (see CONTEXT.md).  None = not
     # requested; otherwise one of "applied" / "degraded_no_media" / "degraded_failed".
     precise_timing_outcome: str | None = None
     precise_timing_grades: tuple[tuple[str, int], ...] | None = None
-    if config.precise_timing:
+    if resume_phase is not None:
+        # 恢复装载的阶段末状态：对齐结论与工作字幕 / 报告一起延续，
+        # 不重跑 timing resolver（阶段末检查点已含截至该点的结论）。
+        precise_timing_outcome = resume_phase.precise_timing_outcome
+        precise_timing_grades = resume_phase.precise_timing_grades
+    elif config.precise_timing:
         if timing_resolver is not None and task.media_path:
             try:
                 evidence = tuple(timing_resolver(task, original, layout))
@@ -452,7 +592,8 @@ def run_postprocess_task(
         task.result_data = clone_subtitle_data(original)
         warnings.append("分析模式仅生成报告，未写入后处理字幕")
         task.warnings = warnings
-        # 分析模式同属模块成功：报告与状态也写入过程目录（票 08，D21/D28）。
+        # 分析模式同属模块成功：报告与状态也写入过程目录（票 08，D21/D28）；
+        # 干跑不写检查点，也不删别的运行留下的检查点（票 06）。
         _publish_module_outputs(
             task,
             report,
@@ -463,6 +604,7 @@ def run_postprocess_task(
                 precise_timing_outcome=precise_timing_outcome,
                 precise_timing_grades=precise_timing_grades,
             ),
+            clear_recovery=False,
         )
         logger.info("后处理分析模式完成：仅生成报告，未写入字幕")
         return PostprocessResult(
@@ -480,9 +622,26 @@ def run_postprocess_task(
         )
 
     try:
-        working, report = run_pre_stage(clone_subtitle_data(original), config, report)
-        report_progress(25, "正在规范化字幕")
-        _emit_event(stage_event(stage="normalize", message="正在规范化字幕", percent=25))
+        # 恢复装载（票 06）：跳过前处理与后处理阶段，直接进入修复循环。
+        # 阶段末检查点带工作字幕与质量报告累积状态；轮末检查点在其上
+        # 续带修复循环全量状态。装载失败（文件缺失 / 损坏）已在发现块
+        # 告警并按未完成处理：这里只处理决策为继续的有效装载。
+        if resume_phase is not None:
+            working = resume_phase.working
+            report = resume_phase.report
+            if round_resume is not None:
+                # 轮末恢复：报告问题清单由检查点重建（终态重扫在修复循环外）。
+                report.viewing_problems = list(round_resume.viewing_problems)
+            report_progress(25, "从恢复检查点继续，跳过后处理阶段")
+            _emit_event(
+                stage_event(
+                    stage="normalize", message="从恢复检查点继续，跳过后处理阶段", percent=25
+                )
+            )
+        else:
+            working, report = run_pre_stage(clone_subtitle_data(original), config, report)
+            report_progress(25, "正在规范化字幕")
+            _emit_event(stage_event(stage="normalize", message="正在规范化字幕", percent=25))
         # 批量观看问题修复（票 05）：确定性阶段结束后执行；局部回退只影响
         # 对应区域（D13/D14），模块级异常仍走整体回退。分析模式已在上方提前返回。
         # apply 路径只借一次工具网关：compress 与修复循环共用同一实例。
@@ -499,21 +658,115 @@ def run_postprocess_task(
         ) as runtime:
             if cancelled is not None and cancelled():
                 raise InterruptedError("LLM request cancelled")
-            # 阶段事件先于阶段调用发射（票 07 审查修复）：事件是「进入
-            # 阶段」的宣告，不是阶段完成的事后记录；简单百分比通道与
-            # 事件通道并行保留（既有 progress 消费者不降级）。
-            _emit_event(stage_event(stage="post_stage", message="正在优化阅读速度", percent=45))
-            report_progress(45, "正在优化阅读速度")
-            working, report = run_post_stage(
-                working,
-                config,
-                report,
-                layout=layout,
-                timing_windows=evidence,
-                gateway=runtime,
-            )
+
+            def _persist_phase_checkpoint() -> None:
+                """阶段末检查点（票 06）：先原子写数据文件，manifest 才登记。
+
+                检查点是瞬时资产：落盘失败只告警，不改变已完成的核心结果
+                （与 ``_publish_module_outputs`` 同口径，D28）。
+                """
+
+                if recovery_manifest_path is None or recovery_dir is None:
+                    return
+                try:
+                    atomic_write_json(
+                        recovery_dir / PHASE_CHECKPOINT_FILENAME,
+                        phase_checkpoint_payload(
+                            working=working,
+                            report=report,
+                            precise_timing_outcome=precise_timing_outcome,
+                            precise_timing_grades=precise_timing_grades,
+                        ),
+                    )
+                except InterruptedError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 —— 检查点落盘不得阻断任务
+                    warnings.append(f"阶段末恢复检查点写入失败: {exc}")
+                    logger.warning("阶段末恢复检查点写入失败，继续任务: %s", exc)
+                    return
+                if recovery_manifest is not None:
+                    # 重写阶段末 = 轮换修复循环基准：旧轮末检查点属于上一份
+                    # 工作字幕，与新阶段末错配——rounds 清零并删除旧文件，
+                    # 不把上一轮的计数 / 回退记录静默配到新基准上。
+                    round_path = recovery_dir / ROUND_CHECKPOINT_FILENAME
+                    if round_path.is_file():
+                        try:
+                            round_path.unlink()
+                        except OSError:
+                            pass  # 删除失败只保留旧文件；manifest rounds 已清零兜底
+                    mark_manifest_completed(
+                        recovery_manifest,
+                        path=recovery_manifest_path,
+                        phase=True,
+                        rounds=0,
+                    )
+                register_transient_recovery_assets(task)
+
+            def _on_round_complete(round_report: RoundCheckpointState) -> None:
+                """轮末检查点（票 06）：修复循环完成回调，运行器落盘。
+
+                落盘失败只告警；修复循环侧已吞回调异常，这里是双保险。
+                """
+
+                if recovery_manifest_path is None or recovery_dir is None:
+                    return
+                try:
+                    atomic_write_json(
+                        recovery_dir / ROUND_CHECKPOINT_FILENAME,
+                        round_checkpoint_payload(
+                            working=round_report.working,
+                            snapshot=round_report.snapshot,
+                            origin=round_report.origin,
+                            summary=round_report.summary,
+                            closed_regions=round_report.closed_regions,
+                            attempts=round_report.attempts,
+                            last_error=round_report.last_error,
+                            last_subject=round_report.last_subject,
+                            accepted=round_report.accepted,
+                            candidate_fps=round_report.candidate_fps,
+                            state_fps=round_report.state_fps,
+                            transport_streak=round_report.transport_streak,
+                            viewing_problems=round_report.viewing_problems,
+                        ),
+                    )
+                except InterruptedError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 —— 检查点落盘不得阻断修复
+                    warnings.append(f"轮末恢复检查点写入失败: {exc}")
+                    logger.warning("轮末恢复检查点写入失败，继续修复: %s", exc)
+                    return
+                if recovery_manifest is not None:
+                    rounds = round_report.summary.rounds
+                    mark_manifest_completed(
+                        recovery_manifest,
+                        path=recovery_manifest_path,
+                        phase=True,
+                        rounds=rounds,
+                    )
+                register_transient_recovery_assets(task)
+
+            if resume_phase is None:
+                # 阶段事件先于阶段调用发射（票 07 审查修复）：事件是「进入
+                # 阶段」的宣告，不是阶段完成的事后记录；简单百分比通道与
+                # 事件通道并行保留（既有 progress 消费者不降级）。
+                _emit_event(stage_event(stage="post_stage", message="正在优化阅读速度", percent=45))
+                report_progress(45, "正在优化阅读速度")
+                working, report = run_post_stage(
+                    working,
+                    config,
+                    report,
+                    layout=layout,
+                    timing_windows=evidence,
+                    gateway=runtime,
+                )
+                # 阶段末检查点（R04）：确定性阶段、压缩重译、语义修复完成、
+                # 进入观看问题修复前写入。仅报告流程没有修复轮次，只写这一级。
+                _persist_phase_checkpoint()
             if config.any_viewing_single_line():
-                report_progress(55, "正在修复观看问题")
+                if resume_phase is not None:
+                    report_progress(55, "从恢复检查点继续，正在修复观看问题")
+                else:
+                    report_progress(55, "正在修复观看问题")
                 working, report = execute_viewing_repair(
                     working,
                     config,
@@ -528,6 +781,8 @@ def run_postprocess_task(
                     cancelled=cancelled,
                     on_event=_emit_event,
                     task_id=task.task_id,
+                    resume=round_resume,
+                    on_round_complete=_on_round_complete,
                 )
                 # 修复循环的警告（回退 / 传输失败 / 容量不足）并入任务警告（D10）。
                 repair_summary = report.viewing_repair
@@ -551,6 +806,12 @@ def run_postprocess_task(
         _emit_event(stage_event(stage="save", message="正在保存后处理字幕", percent=95))
         output = save_canonical_srt(working, output, layout=layout)
     except InterruptedError:
+        # 主动停止保留检查点（R06）：manifest 记录中断类型；停止仍不交付
+        # 部分成果、阻断下游、迟到结果不写回（P05 语义不变）。
+        if recovery_manifest is not None and recovery_manifest_path is not None:
+            recovery_manifest["interruption"] = "stopped"
+            recovery_manifest["updated_at"] = now_utc()
+            write_recovery_manifest(recovery_manifest_path, recovery_manifest)
         # 取消终态统一在此发射（票 07 审查修复）：修复层只上抛不再发
         # （否则 CLI verbose 渲染两条「修复已停止」）；这是任务层对
         # cancelled 的唯一终态事件（spec「无重复完成」）。
@@ -579,6 +840,11 @@ def run_postprocess_task(
             precise_timing_grades=precise_timing_grades,
         )
     except Exception as exc:  # noqa: BLE001
+        # 模块级失败保留检查点（R06）：manifest 记录中断类型。
+        if recovery_manifest is not None and recovery_manifest_path is not None:
+            recovery_manifest["interruption"] = "failure"
+            recovery_manifest["updated_at"] = now_utc()
+            write_recovery_manifest(recovery_manifest_path, recovery_manifest)
         # 模块级失败终态（票 07 审查修复）：修复 / 规范化 / 保存期间的
         # 非取消异常也有明确终态（spec「停止和失败均有终态」）。
         _emit_event(terminal_event(status="failed", counts={"段": report.segment_count}))
@@ -639,6 +905,7 @@ def run_postprocess_task(
         False,
         precise_timing_outcome,
         precise_timing_grades,
+        recovery_summary=recovery_summary,
     )
 
 

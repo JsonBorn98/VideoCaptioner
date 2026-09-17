@@ -31,11 +31,13 @@ from videocaptioner.core.recovery import (
     RecoverySummary,
     config_drift,
     drifted_keys,
-    load_recovery_manifest,
     now_utc,
     software_version,
     text_digest,
     write_recovery_manifest,
+)
+from videocaptioner.core.recovery import (
+    matching_recovery_manifest as shared_matching_recovery_manifest,
 )
 from videocaptioner.core.utils.logger import setup_logger
 
@@ -90,9 +92,7 @@ def translation_config_fingerprint(config: Any) -> dict[str, Any]:
         "main_profile": _profile_fingerprint(getattr(main_role, "profile", None)),
         "review_profile": _profile_fingerprint(getattr(review_role, "profile", None)),
         "batch_size": int(getattr(config, "batch_size", 0) or 0),
-        "boundary_context_radius": int(
-            getattr(config, "boundary_context_radius", 0) or 0
-        ),
+        "boundary_context_radius": int(getattr(config, "boundary_context_radius", 0) or 0),
     }
 
 
@@ -219,21 +219,10 @@ def _new_recovery_manifest(
     }
 
 
-def _matching_recovery_manifest(
-    path: Path, identity: Mapping[str, str]
-) -> dict[str, Any] | None:
-    manifest = load_recovery_manifest(path)
-    if manifest is None:
-        return None
-    if (
-        manifest.get("schema") != RECOVERY_MANIFEST_SCHEMA
-        or manifest.get("version") != RECOVERY_MANIFEST_VERSION
-        or manifest.get("module") != _RECOVERY_MODULE
-        or manifest.get("identity") != dict(identity)
-    ):
-        return None
-    completed = manifest.get("completed")
-    return manifest if isinstance(completed, dict) else None
+def _matching_recovery_manifest(path: Path, identity: Mapping[str, str]) -> dict[str, Any] | None:
+    # 共享校验（票 06 审查上提）：schema / version / module / identity 四连
+    # 校验只有一份实现，见 core/recovery.py。
+    return shared_matching_recovery_manifest(path, module=_RECOVERY_MODULE, identity=identity)
 
 
 def _remove_empty_ancestors(directory: Path, stop: Path) -> None:
@@ -262,9 +251,7 @@ def run_enhanced_translation(
     gateway: Optional[LLMGateway] = None,
     cancellation: Optional[CancellationToken] = None,
     progress: Optional[Callable[[int, str], None]] = None,
-    confirm_terms: Optional[
-        Callable[[tuple[TermCandidate, ...]], Sequence[TermCandidate]]
-    ] = None,
+    confirm_terms: Optional[Callable[[tuple[TermCandidate, ...]], Sequence[TermCandidate]]] = None,
     confirm_audit: Optional[Callable[[TranslationAuditReport], Sequence[int]]] = None,
     recovery_decision: Optional[Callable[[RecoverySummary], RecoveryDecision | str]] = None,
 ) -> EnhancedTranslationRun:
@@ -339,9 +326,13 @@ def run_enhanced_translation(
         elif completed.get("glossary") is True:
             resume_warnings.append("恢复 manifest 登记的术语表缺失，已重新生成")
         if completed_ids:
-            loaded_translations, warnings = _load_checkpoint_translations(checkpoint_path, subtitle_data)
+            loaded_translations, warnings = _load_checkpoint_translations(
+                checkpoint_path, subtitle_data
+            )
             resumed_translations = {
-                cue_id: text for cue_id, text in loaded_translations.items() if cue_id in completed_ids
+                cue_id: text
+                for cue_id, text in loaded_translations.items()
+                if cue_id in completed_ids
             }
             resume_warnings.extend(warnings)
         audit_batch_keys = completed.get("audit_batches", [])

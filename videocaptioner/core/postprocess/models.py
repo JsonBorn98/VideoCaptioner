@@ -15,6 +15,7 @@ from .config import PostprocessConfig
 if TYPE_CHECKING:
     from ..asr.asr_data import ASRData
     from ..entities import SubtitleExportPolicy
+    from ..recovery import RecoverySummary
     from ..speed.timing_evidence import TimingEvidenceBundle
     from .report import QualityReport
     from .translation import TranslationExecutionSnapshot
@@ -113,12 +114,17 @@ class PostprocessAssetAdapter(Protocol):
         """Create or reuse the 过程资产目录 and attach verified assets."""
 
     def publish_downstream_outputs(
-        self, task: PostprocessTask, outputs: Mapping[str, bytes]
+        self,
+        task: PostprocessTask,
+        outputs: Mapping[str, bytes],
+        *,
+        clear_recovery: bool = True,
     ) -> None:
         """Register module-success outputs as manifest assets (D21/D28).
 
         独立测试用 fake 覆盖同一接缝：下游产物在模块成功后进入过程目录，
-        未重新产生的种类从清单中移除。
+        未重新产生的种类从清单中移除。``clear_recovery=False``（分析模式
+        干跑）不清理恢复检查点，见 workspace 实现（票 06）。
         """
 
 
@@ -144,6 +150,9 @@ class PostprocessResult:
     precise_timing_grades: Optional[tuple[tuple[str, int], ...]] = None
     # 下游继续：正常完成/跳过允许下游；无效初版、模块级失败、取消阻断下游。
     continue_downstream: bool = True
+    # 恢复摘要（票 06，ADR-0022）：本次运行实际从检查点继续时携带，
+    # 供阶段摘要「从恢复检查点继续」行与 CLI / GUI 前端消费；不中断运行为 None。
+    recovery_summary: Optional["RecoverySummary"] = None
 
 
 @dataclass(frozen=True)

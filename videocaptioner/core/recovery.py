@@ -87,9 +87,7 @@ class RecoveryProvenance:
         def _string_tuple(value: Any) -> tuple[str, ...] | None:
             if value is None:
                 return ()
-            if not isinstance(value, list) or not all(
-                isinstance(item, str) for item in value
-            ):
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 return None
             return tuple(value)
 
@@ -285,3 +283,30 @@ def load_recovery_manifest(path: str | Path) -> dict[str, Any] | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def matching_recovery_manifest(
+    path: str | Path,
+    *,
+    module: str,
+    identity: Mapping[str, str],
+) -> dict[str, Any] | None:
+    """Load and validate a manifest: schema / version / module / identity must match.
+
+    两个模块（翻译、后处理）的同一套校验（票 06 审查：此前逐行同形
+    地散在两侧 runner 里，改 schema 要同改两处）。``completed`` 不是
+    dict 时同样视为不可用——恢复只信 manifest，形状不对即未完成。
+    """
+
+    manifest = load_recovery_manifest(path)
+    if manifest is None:
+        return None
+    if (
+        manifest.get("schema") != RECOVERY_MANIFEST_SCHEMA
+        or manifest.get("version") != RECOVERY_MANIFEST_VERSION
+        or manifest.get("module") != module
+        or manifest.get("identity") != dict(identity)
+    ):
+        return None
+    completed = manifest.get("completed")
+    return manifest if isinstance(completed, dict) else None
