@@ -238,6 +238,53 @@ def _expect_interrupted(thread: PostprocessThread) -> None:
         return
 
 
+def test_stop_during_recovery_wait_emits_cancelled_not_fallback(
+    qapp, monkeypatch, tmp_path
+):
+    """恢复等待中的停止（票 09 spec 审查修复）：线程按取消终态收场。
+
+    停止语义（P05 / spec 用户故事 31）：cancelled 信号发出、不交付
+    部分成果、下游阻断——不是 fallback「回退到初版字幕」继续下游。
+    """
+
+    import time
+
+    from PyQt5.QtCore import Qt
+
+    def hanging_runner(task, **kwargs):
+        callback = kwargs.get("recovery_decision")
+        assert callback is not None
+        return callback(_summary())  # 阻塞在恢复等待里直到 stop()
+
+    monkeypatch.setattr(
+        postprocess_thread_module, "run_postprocess_task", hanging_runner
+    )
+    thread = PostprocessThread(_task(tmp_path), interactive_recovery=True)
+    cancelled: list[bool] = []
+    finished: list[tuple] = []
+    warnings: list[str] = []
+    thread.cancelled.connect(lambda: cancelled.append(True), Qt.DirectConnection)
+    thread.finished.connect(lambda *args: finished.append(args))
+    thread.warning.connect(warnings.append)
+
+    thread.start()
+    # 等 worker 进入恢复等待（信号送达需事件循环转一圈）。
+    deadline = time.perf_counter() + 5
+    while time.perf_counter() < deadline and not cancelled and not finished:
+        qapp.processEvents()
+        if not thread.isRunning():
+            break
+        time.sleep(0.02)
+    assert not finished, "thread should still be blocked in the recovery wait"
+    thread.stop()
+    assert thread.wait(5000)
+
+    assert cancelled == [True], "stop during recovery wait must emit cancelled"
+    assert not finished, "cancelled run must not emit finished (blocks downstream)"
+    assert thread.task.status == "cancelled"
+    assert warnings == [], "no fallback warning should be published"
+
+
 def test_recovery_summary_accessor_feeds_batch_row_annotation(
     qapp, monkeypatch, tmp_path
 ):

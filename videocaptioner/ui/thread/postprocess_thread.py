@@ -99,7 +99,11 @@ class PostprocessThread(QThread):
         self._recovery_cancelled = False
 
     def submit_recovery_decision(self, decision: RecoveryDecision | str) -> None:
-        """Resume a GUI postprocess task after the user chooses a recovery path."""
+        """Resume a GUI postprocess task after the user chooses a recovery path.
+
+        ``str`` 入参兼容页面对话框的裸串提交（票 08 同形）；这里统一
+        收窄成 ``RecoveryDecision`` 再落内部状态。
+        """
 
         with self._recovery_condition:
             self._recovery_decision = RecoveryDecision(decision)
@@ -215,6 +219,17 @@ class PostprocessThread(QThread):
                 self.progress.emit(100, self.tr("字幕后处理完成"))
             publish_stage_summary(build_postprocess_stage_summary(self.result))
             self.finished.emit(self.task.media_path or "", active_path)
+        except InterruptedError:
+            # 恢复等待中的停止（票 09 spec 审查修复）：`_confirm_recovery`
+            # 被 stop() 唤醒后上抛，runner 的 `recovery_decision` 调用不在
+            # try 块内——这里接住并按取消路径走（cancelled 信号、阻断
+            # 下游、不交付），与 runner 内部 `except InterruptedError`
+            # 的停止语义对齐（P05：停止不交付部分成果）。
+            if self._finish_if_cancelled():
+                return
+            self.task.status = "cancelled"
+            self.cancelled.emit()
+            self.progress.emit(100, self.tr("已取消"))
         except Exception as exc:
             logger.exception("字幕后处理阶段失败: %s", exc)
             initial_path = self.task.initial_subtitle_path or self.task.source_subtitle_path

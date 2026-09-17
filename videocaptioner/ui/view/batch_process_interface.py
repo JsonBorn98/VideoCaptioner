@@ -421,16 +421,14 @@ class BatchProcessInterface(QWidget):
                 status_item.setToolTip(error)
                 break
 
-    def on_task_completed(self, file_path: str, status: str = ""):
-        """完成行渲染（票 09）：批量默认继续，续跑行带「已从恢复检查点继续」。
-
-        ``status`` 为空（旧调用方 / 未续跑路径）时按纯「已完成」渲染。
-        """
+    def on_task_completed(self, file_path: str, resumed_from_checkpoint: bool = False):
+        """完成行渲染（票 09）：批量默认继续，续跑行带「已从恢复检查点继续」。"""
+        status = str(BatchTaskStatus.COMPLETED)
+        if resumed_from_checkpoint:
+            status += self.tr("（已从恢复检查点继续）")
         for row in range(self.task_table.rowCount()):
             if self.task_table.item(row, 0).toolTip() == file_path:
-                self.task_table.item(row, 2).setText(
-                    status or str(BatchTaskStatus.COMPLETED)
-                )
+                self.task_table.item(row, 2).setText(status)
                 self.task_table.item(row, 2).setForeground(QColor("#13A10E"))
                 break
 

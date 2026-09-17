@@ -757,12 +757,18 @@ class PostprocessInterface(QWidget):
             title=self.tr("发现后处理恢复检查点"),
             parent=self,
         )
-        decision = "continue" if dialog.exec() else "start_fresh"
+        from videocaptioner.core.recovery import RecoveryDecision
+
+        decision = (
+            RecoveryDecision.CONTINUE if dialog.exec() else RecoveryDecision.START_FRESH
+        )
         thread = getattr(self, "_thread", None)
         if thread is not None:
             thread.submit_recovery_decision(decision)
         self.status_label.setText(
-            self.tr("继续后处理") if decision == "continue" else self.tr("从头开始后处理")
+            self.tr("继续后处理")
+            if decision is RecoveryDecision.CONTINUE
+            else self.tr("从头开始后处理")
         )
 
     def _on_warning(self, message: str) -> None:

@@ -89,9 +89,9 @@ class BatchProcessThread(QThread):
     # 信号定义
     task_progress = pyqtSignal(str, int, str)  # file_path, progress, status
     task_error = pyqtSignal(str, str)  # file_path, error_message
-    # 终态状态文本（票 09）：完成行带「已从恢复检查点继续」标注时
-    # 表格要显示它，光靠 file_path 找不回这层事实。
-    task_completed = pyqtSignal(str, str)  # file_path, status
+    # 完成行的续跑事实（票 09）：线程只传 resumed 布尔，
+    # 「已从恢复检查点继续」文案由视图层渲染。
+    task_completed = pyqtSignal(str, bool)  # file_path, resumed_from_checkpoint
 
     def __init__(self):
         super().__init__()
@@ -188,9 +188,6 @@ class BatchProcessThread(QThread):
         if batch_task.current_thread in self.threads:
             self.threads.remove(batch_task.current_thread)
 
-    # 批量行恢复续跑标注（票 09）：「已从恢复检查点继续」。
-    RESUMED_STATUS_SUFFIX = "（已从恢复检查点继续）"
-
     def _on_finished_wrapper(self, batch_task: BatchTask, task=None):
         """完成信号包装器"""
         if batch_task.status is not BatchTaskStatus.RUNNING:
@@ -198,18 +195,11 @@ class BatchProcessThread(QThread):
             return
         batch_task.status = BatchTaskStatus.COMPLETED
         batch_task.progress = 100
+        # 续跑事实（票 09）：布尔透传，视图层拼「已从恢复检查点继续」。
         self.task_completed.emit(
-            batch_task.file_path, self._terminal_status_text(batch_task)
+            batch_task.file_path, batch_task.resumed_from_checkpoint
         )
         self._release_current_thread(batch_task)
-
-    def _terminal_status_text(self, batch_task: BatchTask) -> str:
-        """终态状态文本：续跑行带标注，未续跑行不带（票 09）。"""
-
-        status = str(batch_task.status)
-        if batch_task.resumed_from_checkpoint:
-            return status + self.RESUMED_STATUS_SUFFIX
-        return status
 
     def _mark_resumed_from_checkpoint(self, batch_task: BatchTask, thread) -> None:
         """模块从检查点继续时置行标注（票 09）：任一模块续跑即整行标注。"""
