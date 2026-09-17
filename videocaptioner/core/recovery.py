@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 RECOVERY_MANIFEST_SCHEMA = "videocaptioner.recovery_manifest"
 RECOVERY_MANIFEST_VERSION = 1
@@ -111,6 +111,37 @@ def text_digest(text: str) -> str:
 
 # 旧 manifest（票 05 之前）没有冻结配置摘要可比对时的唯一漂移项。
 UNRECORDED_CONFIG_DIGEST_DRIFT = "检查点未记录配置摘要，无法比对配置漂移"
+
+# 已完成级别一行渲染的兜底串：``completed`` 全为假值时显示。
+UNVERIFIED_COMPLETED_FALLBACK = "尚未验证的检查点数据"
+
+
+def render_completed_levels(
+    summary: "RecoverySummary",
+    completed_labels: Mapping[str, tuple[str, Optional[str]]],
+    *,
+    translate: Callable[[str], str] = lambda text: text,
+) -> str:
+    """已完成级别一行渲染（票 11 收口：CLI 与 GUI 共享同一实现）。
+
+    ``completed_labels`` 把每个已完成级别键映射到 ``(显示名, 单位)``：
+    单位为 ``None`` 的布尔级别渲染「{显示名}已完成」，带单位的计数级别
+    渲染「{显示名} {数值} {单位}」；未标注的键以键名 + 计数兜底——新增
+    恢复级别不会在任何入口静默消失。假值级别跳过；全为假值时给
+    ``UNVERIFIED_COMPLETED_FALLBACK``。``translate`` 由各入口注入自己的
+    本地化钩子（GUI 的 ``tr``），缺省恒等。
+    """
+
+    parts: list[str] = []
+    for key, value in summary.completed.items():
+        if not value:
+            continue
+        label, unit = completed_labels.get(key, (key, None))
+        if unit:
+            parts.append(translate(f"{label} {value} {unit}"))
+        else:
+            parts.append(translate(f"{label}已完成"))
+    return "、".join(parts) or translate(UNVERIFIED_COMPLETED_FALLBACK)
 
 
 def render_recovery_provenance_lines(

@@ -705,12 +705,19 @@ class SubtitleInterface(QWidget):
             title=self.tr("发现翻译恢复检查点"),
             parent=self,
         )
-        decision = "continue" if dialog.exec() else "start_fresh"
+        # 票 09 审查裁决：统一 RecoveryDecision 枚举（与后处理页同形），不散裸串。
+        from videocaptioner.core.recovery import RecoveryDecision
+
+        decision = (
+            RecoveryDecision.CONTINUE if dialog.exec() else RecoveryDecision.START_FRESH
+        )
         thread = getattr(self, "subtitle_optimization_thread", None)
         if thread is not None:
             thread.submit_recovery_decision(decision)
         self.status_label.setText(
-            self.tr("继续翻译") if decision == "continue" else self.tr("从头开始翻译")
+            self.tr("继续翻译")
+            if decision is RecoveryDecision.CONTINUE
+            else self.tr("从头开始翻译")
         )
 
     def _submit_term_confirmation(self, candidates) -> None:

@@ -202,11 +202,14 @@ class BatchProcessThread(QThread):
         self._release_current_thread(batch_task)
 
     def _mark_resumed_from_checkpoint(self, batch_task: BatchTask, thread) -> None:
-        """模块从检查点继续时置行标注（票 09）：任一模块续跑即整行标注。"""
+        """模块从检查点继续时置行标注（票 09）：任一模块续跑即整行标注。
 
-        summary = getattr(thread, "recovery_summary", None)
-        if summary is not None and callable(summary):
-            summary = summary()
+        两个生产线程都以方法形状暴露 ``recovery_summary``（票 11 收口：
+        单形状调用，不留属性式/方法式双兼容分支）。
+        """
+
+        summary_getter = getattr(thread, "recovery_summary", None)
+        summary = summary_getter() if summary_getter is not None else None
         if summary is not None:
             batch_task.resumed_from_checkpoint = True
 

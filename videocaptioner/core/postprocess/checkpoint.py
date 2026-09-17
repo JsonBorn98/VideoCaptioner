@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from ..asr.asr_data import ASRData
     from .config import PostprocessConfig
-    from .repair import RegionRollback, RepairSummary
+    from .repair import RegionRollback, RepairSummary, RoundCheckpointState
     from .report import QualityReport, SpeedWarning
     from .translation import TranslationExecutionSnapshot
     from .viewing import ViewingProblem
@@ -433,23 +433,10 @@ def phase_checkpoint_from_payload(payload: Any) -> Optional["PhaseResumeState"]:
 # ---------------------------------------------------------------------------
 
 
-def round_checkpoint_payload(
-    *,
-    working: "ASRData",
-    snapshot: "ASRData",
-    origin: "list[int]",
-    summary: "RepairSummary",
-    closed_regions: "set[int]",
-    attempts: "Mapping[tuple[int, str, str], int]",
-    last_error: "Mapping[tuple[int, str, str], str]",
-    last_subject: "Mapping[tuple[int, str, str], tuple[int, ...]]",
-    accepted: "set[tuple[int, str, str]]",
-    candidate_fps: "Mapping[int, set[str]]",
-    state_fps: "Mapping[int, set[str]]",
-    transport_streak: int,
-    viewing_problems: "list[ViewingProblem]",
-) -> dict[str, Any]:
-    """轮末检查点载荷：``_WorkingState`` 全量 + 修复摘要。
+def round_checkpoint_payload(state: "RoundCheckpointState") -> dict[str, Any]:
+    """轮末检查点载荷：``_WorkingState`` 全量 + 修复摘要（票 11 收口：直接收
+    修复循环的完成回调状态，不再逐字段拆参数——13 个参数与状态字段一一
+    对应的拆装箱由调用侧消除）。
 
     问题身份 ``ProblemIdentity`` 是 ``(初版段序, 显示侧, 问题类别)``；
     序列化为 ``origin|side|kind`` 字符串键。``snapshot`` + ``origin``
@@ -457,6 +444,20 @@ def round_checkpoint_payload(
     身份、区域回退（恢复到检查点基线段）与重复检测与不中断运行等价。
     下一轮反馈由恢复侧从 ``last_error`` 重建（与修复循环同式）。
     """
+
+    working = state.working
+    snapshot = state.snapshot
+    origin = state.origin
+    summary = state.summary
+    closed_regions = state.closed_regions
+    attempts = state.attempts
+    last_error = state.last_error
+    last_subject = state.last_subject
+    accepted = state.accepted
+    candidate_fps = state.candidate_fps
+    state_fps = state.state_fps
+    transport_streak = state.transport_streak
+    viewing_problems = state.viewing_problems
 
     def _identity_key(identity: tuple[int, str, str]) -> str:
         # JSON 对象键必须是字符串：``origin|side|kind``（side/kind 不含 |，

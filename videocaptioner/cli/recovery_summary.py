@@ -30,19 +30,12 @@ POSTPROCESS_COMPLETED_LABELS: _COMPLETED_LABELS_TYPE = {
 }
 
 
-def _render_completed(
-    summary: RecoverySummary,
-    completed_labels: _COMPLETED_LABELS_TYPE,
-) -> str:
-    """已完成级别一行渲染：布尔级别「已完成」，计数级别「N 单位」（票 09 同款语义）。"""
+def _render_completed(summary: RecoverySummary, completed_labels: _COMPLETED_LABELS_TYPE) -> str:
+    """已完成级别一行渲染：共享实现（票 11 收口），CLI 恒等本地化。"""
 
-    parts: list[str] = []
-    for key, value in summary.completed.items():
-        if not value:
-            continue
-        label, unit = completed_labels.get(key, (key, None))
-        parts.append(f"{label} {value} {unit}" if unit else f"{label}已完成")
-    return "、".join(parts) or "尚未验证的检查点数据"
+    from videocaptioner.core.recovery import render_completed_levels
+
+    return render_completed_levels(summary, completed_labels)
 
 
 def print_recovery_summary(

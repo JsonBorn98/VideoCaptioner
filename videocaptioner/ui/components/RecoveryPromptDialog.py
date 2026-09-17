@@ -69,19 +69,10 @@ class RecoveryPromptDialog(MessageBoxBase):
         self.yesButton.setFocus()
 
     def _render_completed(self) -> str:
-        """已完成级别一行渲染：布尔级别「已完成」，计数级别「N 单位」。"""
+        """已完成级别一行渲染：共享实现（票 11 收口），``tr`` 做本地化。"""
 
-        parts: list[str] = []
-        for key, value in self.summary.completed.items():
-            if not value:
-                continue
-            label, unit = self._completed_labels.get(key, (key, None))
-            if unit:
-                parts.append(
-                    self.tr("{label} {value} {unit}").format(
-                        label=label, value=value, unit=unit
-                    )
-                )
-            else:
-                parts.append(self.tr("{label}已完成").format(label=label))
-        return self.tr("、").join(parts) or self.tr("尚未验证的检查点数据")
+        from videocaptioner.core.recovery import render_completed_levels
+
+        return render_completed_levels(
+            self.summary, self._completed_labels, translate=self.tr
+        )

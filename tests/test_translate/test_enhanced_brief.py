@@ -40,6 +40,8 @@ def _candidates() -> tuple[TermCandidate, ...]:
             sense="the planet",
             aliases=("planet Mercury",),
             occurrence_ids=(1, 4),
+            # 代表语境所需引用（spec 级别① schema）：候选在简报文件里往返不丢。
+            representative_context_ids=(1,),
         ),
         TermCandidate(
             candidate_id="mercury-element",
@@ -47,6 +49,7 @@ def _candidates() -> tuple[TermCandidate, ...]:
             sense="the chemical element",
             aliases=(),
             occurrence_ids=(7,),
+            representative_context_ids=(7,),
         ),
     )
 

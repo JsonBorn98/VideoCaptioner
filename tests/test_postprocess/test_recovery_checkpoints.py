@@ -15,7 +15,7 @@ from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.postprocess.checkpoint import round_checkpoint_payload
 from videocaptioner.core.postprocess.config import PostprocessConfig
 from videocaptioner.core.postprocess.models import PostprocessLayoutMode, PostprocessTask
-from videocaptioner.core.postprocess.repair import RepairSummary
+from videocaptioner.core.postprocess.repair import RepairSummary, RoundCheckpointState
 from videocaptioner.core.postprocess.runner import run_postprocess_task
 from videocaptioner.core.postprocess.workspace import FilesystemAssetStore
 from videocaptioner.core.recovery import (
@@ -488,19 +488,21 @@ def test_phase_rewrite_resets_rounds_and_deletes_stale_round_checkpoint(tmp_path
     # R06）——重跑会从阶段末重来：旧轮末属于上一份工作字幕，配不上
     # 新阶段末基准，重写阶段末时必须清零 rounds 并删旧轮末文件。
     round_payload = round_checkpoint_payload(
-        working=_asr_data(((_LONG_TEXT, "短"),)),
-        snapshot=_asr_data(((_LONG_TEXT, "短"),)),
-        origin=[0],
-        summary=_repair_summary(rounds=1, requests=1),
-        closed_regions=set(),
-        attempts={(0, "original", "length"): 1},
-        last_error={},
-        last_subject={},
-        accepted=set(),
-        candidate_fps={},
-        state_fps={},
-        transport_streak=0,
-        viewing_problems=[],
+        RoundCheckpointState(
+            working=_asr_data(((_LONG_TEXT, "短"),)),
+            snapshot=_asr_data(((_LONG_TEXT, "短"),)),
+            origin=[0],
+            summary=_repair_summary(rounds=1, requests=1),
+            closed_regions=set(),
+            attempts={(0, "original", "length"): 1},
+            last_error={},
+            last_subject={},
+            accepted=set(),
+            candidate_fps={},
+            state_fps={},
+            transport_streak=0,
+            viewing_problems=[],
+        )
     )
     atomic_write_json(task_dir / "recovery-round.json", round_payload)
     (task_dir / "recovery-phase.json").write_text("{ broken phase", encoding="utf-8")

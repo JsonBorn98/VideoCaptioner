@@ -57,12 +57,19 @@ def _candidate_from_dict(raw: Any) -> TermCandidate:
         for item in occurrences
     ):
         raise BriefFormatError("candidate occurrence_ids must be positive integers")
+    representative = raw.get("representative_context_ids", [])
+    if not isinstance(representative, list) or not all(
+        isinstance(item, int) and not isinstance(item, bool) and item > 0
+        for item in representative
+    ):
+        raise BriefFormatError("candidate representative_context_ids must be positive integers")
     return TermCandidate(
         candidate_id=candidate_id.strip(),
         source_term=source_term.strip(),
         sense=sense,
         aliases=tuple(dict.fromkeys(alias for alias in aliases if alias.strip())),
         occurrence_ids=tuple(sorted(set(occurrences))),
+        representative_context_ids=tuple(sorted(set(representative))),
     )
 
 
@@ -113,6 +120,7 @@ def translation_brief_to_dict(
                 "sense": candidate.sense,
                 "aliases": list(candidate.aliases),
                 "occurrence_ids": list(candidate.occurrence_ids),
+                "representative_context_ids": list(candidate.representative_context_ids),
             }
             for candidate in candidates
         ],

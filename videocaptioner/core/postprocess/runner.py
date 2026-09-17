@@ -781,23 +781,10 @@ def run_postprocess_task(
                 if recovery_manifest_path is None or recovery_dir is None:
                     return
                 try:
+                    # 票 11 收口：payload 直接收修复循环的完成回调状态。
                     atomic_write_json(
                         recovery_dir / ROUND_CHECKPOINT_FILENAME,
-                        round_checkpoint_payload(
-                            working=round_report.working,
-                            snapshot=round_report.snapshot,
-                            origin=round_report.origin,
-                            summary=round_report.summary,
-                            closed_regions=round_report.closed_regions,
-                            attempts=round_report.attempts,
-                            last_error=round_report.last_error,
-                            last_subject=round_report.last_subject,
-                            accepted=round_report.accepted,
-                            candidate_fps=round_report.candidate_fps,
-                            state_fps=round_report.state_fps,
-                            transport_streak=round_report.transport_streak,
-                            viewing_problems=round_report.viewing_problems,
-                        ),
+                        round_checkpoint_payload(round_report),
                     )
                 except InterruptedError:
                     raise
