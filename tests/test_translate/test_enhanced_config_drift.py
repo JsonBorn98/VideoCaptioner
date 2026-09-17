@@ -436,7 +436,6 @@ def test_snapshot_round_trips_recovery_provenance(tmp_path, monkeypatch):
     from videocaptioner.core.postprocess.translation import (
         TranslationExecutionSnapshot,
     )
-    from videocaptioner.core.recovery import RecoveryProvenance
 
     config = _enhanced_config_with_profiles()
     _interrupt_with_checkpoint(tmp_path, monkeypatch, config)
