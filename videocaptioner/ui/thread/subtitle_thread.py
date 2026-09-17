@@ -214,6 +214,11 @@ class SubtitleThread(QThread):
             self._recovery_decision = RecoveryDecision(decision)
             self._recovery_condition.notify_all()
 
+    def recovery_summary(self) -> RecoverySummary | None:
+        """本次运行实际从检查点继续时携带的恢复摘要（票 09：批量行标注消费）。"""
+
+        return self._enhanced_recovery_summary
+
     def _confirm_recovery(self, summary: RecoverySummary) -> RecoveryDecision:
         with self._recovery_condition:
             self._recovery_decision = None

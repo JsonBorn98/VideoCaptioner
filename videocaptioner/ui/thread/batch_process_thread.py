@@ -44,6 +44,9 @@ class BatchTask:
         self.status = BatchTaskStatus.WAITING
         self.progress = 0
         self.error_message = ""
+        # 批量任务恢复续跑标注（票 09）：翻译或后处理任一模块从
+        # 恢复检查点继续时置 True，任务行状态带「已从恢复检查点继续」。
+        self.resumed_from_checkpoint = False
         self.current_thread: Optional[QThread] = None
         self.export_policy = TaskFactory.create_subtitle_export_policy()
         self.workflow_base_name = Path(file_path).stem
@@ -86,7 +89,9 @@ class BatchProcessThread(QThread):
     # 信号定义
     task_progress = pyqtSignal(str, int, str)  # file_path, progress, status
     task_error = pyqtSignal(str, str)  # file_path, error_message
-    task_completed = pyqtSignal(str)  # file_path
+    # 终态状态文本（票 09）：完成行带「已从恢复检查点继续」标注时
+    # 表格要显示它，光靠 file_path 找不回这层事实。
+    task_completed = pyqtSignal(str, str)  # file_path, status
 
     def __init__(self):
         super().__init__()
@@ -183,6 +188,9 @@ class BatchProcessThread(QThread):
         if batch_task.current_thread in self.threads:
             self.threads.remove(batch_task.current_thread)
 
+    # 批量行恢复续跑标注（票 09）：「已从恢复检查点继续」。
+    RESUMED_STATUS_SUFFIX = "（已从恢复检查点继续）"
+
     def _on_finished_wrapper(self, batch_task: BatchTask, task=None):
         """完成信号包装器"""
         if batch_task.status is not BatchTaskStatus.RUNNING:
@@ -190,8 +198,27 @@ class BatchProcessThread(QThread):
             return
         batch_task.status = BatchTaskStatus.COMPLETED
         batch_task.progress = 100
-        self.task_completed.emit(batch_task.file_path)
+        self.task_completed.emit(
+            batch_task.file_path, self._terminal_status_text(batch_task)
+        )
         self._release_current_thread(batch_task)
+
+    def _terminal_status_text(self, batch_task: BatchTask) -> str:
+        """终态状态文本：续跑行带标注，未续跑行不带（票 09）。"""
+
+        status = str(batch_task.status)
+        if batch_task.resumed_from_checkpoint:
+            return status + self.RESUMED_STATUS_SUFFIX
+        return status
+
+    def _mark_resumed_from_checkpoint(self, batch_task: BatchTask, thread) -> None:
+        """模块从检查点继续时置行标注（票 09）：任一模块续跑即整行标注。"""
+
+        summary = getattr(thread, "recovery_summary", None)
+        if summary is not None and callable(summary):
+            summary = summary()
+        if summary is not None:
+            batch_task.resumed_from_checkpoint = True
 
     def _connect_cancellation(self, thread: QThread, batch_task: BatchTask) -> None:
         cancelled = getattr(thread, "cancelled", None)
@@ -346,6 +373,11 @@ class BatchProcessThread(QThread):
             self._release_current_thread(batch_task)
             return
         self._release_current_thread(batch_task)
+        # 翻译模块恢复续跑标注（票 09）：字幕线程刚结束，检查它是否
+        # 从翻译检查点继续；后处理侧在 postprocess 线程完成后检测。
+        self._mark_resumed_from_checkpoint(
+            batch_task, getattr(batch_task, "current_thread", None)
+        )
         task = batch_task.postprocess_task
         task.source_subtitle_path = subtitle_path
         task.initial_subtitle_path = subtitle_path
@@ -368,6 +400,11 @@ class BatchProcessThread(QThread):
             lambda message: self._emit_progress_if_running(
                 batch_task, 74 if full_process else 99, message
             )
+        )
+        # 后处理模块恢复续跑标注（票 09）：先于完成包装器连接，
+        # 终态状态文本计算时标注已就位。
+        thread.finished.connect(
+            lambda _video, _path: self._mark_resumed_from_checkpoint(batch_task, thread)
         )
         if full_process:
             thread.progress.connect(

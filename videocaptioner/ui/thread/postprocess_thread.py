@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -9,6 +10,7 @@ from videocaptioner.core.llm.context import clear_task_context, set_task_context
 from videocaptioner.core.postprocess.models import PostprocessTask
 from videocaptioner.core.postprocess.runner import run_postprocess_task
 from videocaptioner.core.postprocess.summary import build_postprocess_stage_summary
+from videocaptioner.core.recovery import RecoveryDecision, RecoverySummary
 from videocaptioner.core.speed.models import CueSnapshot
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.stage_summary import StageSummary
@@ -70,12 +72,59 @@ class PostprocessThread(QThread):
     warning = pyqtSignal(str)
     error = pyqtSignal(str)
     cancelled = pyqtSignal()
+    # 「需要恢复决定」信号与提交方法（票 09，与票 08 翻译线程同一
+    # 阻塞等待模式）：worker 发摘要、页面弹对话框、提交决定唤醒。
+    recovery_decision_required = pyqtSignal(object)
 
-    def __init__(self, task: PostprocessTask, gateway: LLMGateway | None = None):
+    def __init__(
+        self,
+        task: PostprocessTask,
+        gateway: LLMGateway | None = None,
+        *,
+        interactive_recovery: bool = False,
+    ):
         super().__init__()
         self.task = task
         self.result = None
         self._injected_gateway = gateway
+        # interactive_recovery 默认 False：无人值守调用方（批量 / 流水线）
+        # 遗漏显式关闭时也不会挂死在无人消费的恢复等待上；页面任务
+        # 显式传 True 接「需要恢复决定」信号（票 09）。
+        self._interactive_recovery = interactive_recovery
+        self._recovery_condition = threading.Condition()
+        self._recovery_decision: RecoveryDecision | None = None
+        # 恢复等待的取消标志（票 09）：Qt 的 requestInterruption 只对运行中
+        # 的线程生效，stop() 早于 run() 进入等待时置不了中断标志——
+        # 与票 08 翻译线程的 CancellationToken 同一角色的独立布尔。
+        self._recovery_cancelled = False
+
+    def submit_recovery_decision(self, decision: RecoveryDecision | str) -> None:
+        """Resume a GUI postprocess task after the user chooses a recovery path."""
+
+        with self._recovery_condition:
+            self._recovery_decision = RecoveryDecision(decision)
+            self._recovery_condition.notify_all()
+
+    def _confirm_recovery(self, summary: RecoverySummary) -> RecoveryDecision:
+        """阻塞等待页面提交决定；stop() 经取消标志唤醒并按取消退出。"""
+
+        with self._recovery_condition:
+            self._recovery_decision = None
+            self.recovery_decision_required.emit(summary)
+            while (
+                self._recovery_decision is None
+                and not self._recovery_cancelled
+                and not self.isInterruptionRequested()
+            ):
+                self._recovery_condition.wait(timeout=0.2)
+            if self._recovery_decision is None:
+                raise InterruptedError("recovery confirmation cancelled")
+            return self._recovery_decision
+
+    def recovery_summary(self) -> RecoverySummary | None:
+        """本次运行实际从检查点继续时携带的恢复摘要（供行标注消费）。"""
+
+        return getattr(self.result, "recovery_summary", None) if self.result else None
 
     def _emit_progress_event(self, event: dict) -> None:
         """worker 侧事件 → JSON 字符串信号（queued 送达 GUI 线程，票 07）。
@@ -89,6 +138,12 @@ class PostprocessThread(QThread):
         """Request cooperative cancellation at the next safe stage boundary."""
 
         self.requestInterruption()
+        # 恢复提示阻塞等待也要被停止唤醒（票 09，与票 08 同模式）：
+        # 独立取消标志先置再 notify（requestInterruption 只对运行中的
+        # 线程生效，stop() 早于 run() 进入等待时靠它退出）。
+        with self._recovery_condition:
+            self._recovery_cancelled = True
+            self._recovery_condition.notify_all()
 
     def _finish_if_cancelled(self) -> bool:
         if not self.isInterruptionRequested():
@@ -122,6 +177,9 @@ class PostprocessThread(QThread):
                     else self.progress.emit(value, self.tr(message))
                 ),
                 on_event=self._emit_progress_event,
+                recovery_decision=self._confirm_recovery
+                if self._interactive_recovery
+                else None,
             )
             if self._finish_if_cancelled():
                 return

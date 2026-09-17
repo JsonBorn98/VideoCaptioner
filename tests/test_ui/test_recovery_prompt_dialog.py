@@ -185,3 +185,140 @@ page.close()
 """,
         tmp_dir=tmp_path,
     )
+
+
+def test_postprocess_page_submits_both_decisions_from_dialog(tmp_path):
+    """后处理页（票 09）：同一对话框组件，两种决定都提交回线程。"""
+
+    _run_qt_script(
+        """
+from PyQt5.QtWidgets import QApplication, QWidget
+from videocaptioner.core.recovery import RecoverySummary
+from videocaptioner.core.postprocess import PostprocessProfileStore
+from pathlib import Path
+import tempfile
+from videocaptioner.ui.view.postprocess_interface import PostprocessInterface
+
+app = QApplication([])
+parent = QWidget()
+page = PostprocessInterface(
+    parent,
+    profile_store=PostprocessProfileStore(Path(tempfile.mkdtemp()) / 'profiles.json'),
+)
+
+class FakeThread:
+    def __init__(self):
+        self.decisions = []
+    def submit_recovery_decision(self, decision):
+        self.decisions.append(decision)
+    def isRunning(self):
+        return False
+
+page._thread = FakeThread()
+
+dialogs = []
+class PatchedDialog:
+    accept = True
+    def __init__(self, summary, **kwargs):
+        self.summary = summary
+        self.kwargs = kwargs
+        dialogs.append(self)
+    def exec(self):
+        return PatchedDialog.accept
+
+import videocaptioner.ui.view.postprocess_interface as interface_module
+interface_module.RecoveryPromptDialog = PatchedDialog
+
+# 「从检查点继续」：accept → continue。
+page._thread.decisions.clear()
+page._show_recovery_decision(RecoverySummary(
+    module='postprocess',
+    identity={'input_fingerprint': 'sha256:test'},
+    completed={'phase': 1, 'rounds': 2},
+    checkpoint_time='2026-09-17T00:00:00Z',
+    configuration_drift=('后处理配置方案：检查点 sha256:old，当前 sha256:new',),
+))
+assert page._thread.decisions == ['continue']
+# 标签表对齐 core 侧 _RECOVERY_COMPLETED_LEVEL_LABELS（report.py）：
+# phase / rounds 在恢复提示与 QA 报告不出现两个名字。
+labels = dialogs[0].kwargs['completed_labels']
+assert set(labels) == {'phase', 'rounds'}
+assert labels['phase'][0] == page.tr('阶段末检查点')
+assert labels['rounds'][0] == page.tr('修复轮次')
+assert labels['rounds'][1] == page.tr('轮')
+assert dialogs[0].kwargs['title'] == page.tr('发现后处理恢复检查点')
+
+# 「从头开始」：reject → start_fresh。
+PatchedDialog.accept = False
+page._thread.decisions.clear()
+page._show_recovery_decision(RecoverySummary(
+    module='postprocess',
+    identity={},
+    completed={},
+    checkpoint_time='',
+    configuration_drift=(),
+))
+assert page._thread.decisions == ['start_fresh']
+page.close()
+""",
+        tmp_dir=tmp_path,
+    )
+
+
+def test_batch_row_annotates_resumed_checkpoint(tmp_path, monkeypatch):
+    """批量行标注（票 09）：续跑行带「已从恢复检查点继续」，未续跑行不带。
+
+    批量任务对翻译与后处理都不接恢复决定回调（默认继续）；任一模块
+    从检查点继续时线程结果带 recovery_summary，包装器据此标注任务行。
+    纯 Python 包装器逻辑，不需要 Qt 事件循环；后处理任务构造经
+    monkeypatch 绕过方案库解析（本测试不消费它）。
+    """
+
+    from videocaptioner.core.entities import BatchTaskType
+    from videocaptioner.ui.thread import batch_process_thread as batch_module
+    from videocaptioner.ui.thread.batch_process_thread import (
+        BatchProcessThread,
+        BatchTask,
+    )
+
+    # 本测试只测行标注包装器：绕过方案库解析（无种子 LLM 方案会 fail-fast）。
+    monkeypatch.setattr(
+        batch_module.TaskFactory,
+        "create_postprocess_task",
+        lambda *args, **kwargs: type("Post", (), {})(),
+    )
+    thread = BatchProcessThread()
+    completed: list[tuple[str, str]] = []
+    thread.task_completed.connect(lambda path, status: completed.append((path, status)))
+
+    resumed = BatchTask("a.wav", BatchTaskType.SUBTITLE)
+    resumed.status = batch_module.BatchTaskStatus.RUNNING
+    resumed.resumed_from_checkpoint = True
+    thread.current_tasks = {resumed.file_path: resumed}
+    thread._on_finished_wrapper(resumed)
+    assert completed == [
+        (resumed.file_path, f"已完成{thread.RESUMED_STATUS_SUFFIX}")
+    ]
+
+    # 未续跑行：纯「已完成」，不带标注。
+    completed.clear()
+    plain = BatchTask("b.wav", BatchTaskType.SUBTITLE)
+    plain.status = batch_module.BatchTaskStatus.RUNNING
+    thread.current_tasks = {plain.file_path: plain}
+    thread._on_finished_wrapper(plain)
+    assert completed == [(plain.file_path, "已完成")]
+
+    # 标注检测：线程带 recovery_summary → 标注置位；无摘要方法 → 不置。
+    thread._mark_resumed_from_checkpoint(resumed, _ThreadWithSummary())
+    assert resumed.resumed_from_checkpoint is True
+    plain.resumed_from_checkpoint = False
+    thread._mark_resumed_from_checkpoint(plain, object())  # 无 recovery_summary
+    assert plain.resumed_from_checkpoint is False
+
+
+class _ThreadWithSummary:
+    """带 recovery_summary 的最小线程替身：返回非 None 摘要。"""
+
+    def recovery_summary(self):
+        return object()
+

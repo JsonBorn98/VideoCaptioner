@@ -62,6 +62,7 @@ from videocaptioner.core.subtitle.io import (
     save_canonical_srt,
 )
 from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.components.RecoveryPromptDialog import RecoveryPromptDialog
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.view.subtitle_interface import SubtitleTableModel
 
@@ -618,13 +619,16 @@ class PostprocessInterface(QWidget):
         # P3 修复（spec 决策 7「运行耗时」）：任务起点随线程启动记录，
         # 运行中详情行渲染「任务已运行 Xs」（终态行已带耗时，运行中无）。
         self._task_started_at = time.perf_counter()
-        self._thread = PostprocessThread(self.task)
+        # 页面任务接恢复决定回调（票 09）：批量 / 流水线调用方走
+        # interactive_recovery=False 的默认继续路径，不弹窗。
+        self._thread = PostprocessThread(self.task, interactive_recovery=True)
         self._thread.progress.connect(self._on_progress)
         self._thread.progress_event.connect(self._on_progress_event)
         self._thread.finished.connect(self._on_finished)
         self._thread.warning.connect(self._on_warning)
         self._thread.error.connect(self._on_error)
         self._thread.cancelled.connect(self._on_cancelled)
+        self._thread.recovery_decision_required.connect(self._show_recovery_decision)
         self._set_processing(True)
         self.timing_status_label.hide()
         self.progress_bar.reset()
@@ -736,6 +740,30 @@ class PostprocessInterface(QWidget):
         else:
             self.detail_toggle.setText(self.tr("展开详情"))
             self.detail_text.hide()
+
+    def _show_recovery_decision(self, summary) -> None:
+        """恢复提示（票 09）：复用票 08 的模块无关对话框组件。
+
+        标签对齐 core 侧权威标注表（report.py _RECOVERY_COMPLETED_LEVEL_LABELS）：
+        phase / rounds 在恢复提示与 QA 报告「恢复来源」节不出现两个名字。
+        """
+
+        dialog = RecoveryPromptDialog(
+            summary,
+            completed_labels={
+                "phase": (self.tr("阶段末检查点"), None),
+                "rounds": (self.tr("修复轮次"), self.tr("轮")),
+            },
+            title=self.tr("发现后处理恢复检查点"),
+            parent=self,
+        )
+        decision = "continue" if dialog.exec() else "start_fresh"
+        thread = getattr(self, "_thread", None)
+        if thread is not None:
+            thread.submit_recovery_decision(decision)
+        self.status_label.setText(
+            self.tr("继续后处理") if decision == "continue" else self.tr("从头开始后处理")
+        )
 
     def _on_warning(self, message: str) -> None:
         InfoBar.warning(
